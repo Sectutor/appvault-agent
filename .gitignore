@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.env
+agent_state.json
+catalog_cache.json
