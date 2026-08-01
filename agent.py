@@ -1132,6 +1132,107 @@ def api_license():
     return jsonify({"status": "error", "license_key": key, "applied": False,
                     "message": "License saved but central re-registration failed"}), 502
 
+
+
+# ---- Security self-configuration (free users harden their own install) ----
+SECURITY_STATE_PATH = os.path.join(STORAGE_PATH, "security.json")
+
+def _load_security():
+    try:
+        with open(SECURITY_STATE_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_security(s):
+    try:
+        with open(SECURITY_STATE_PATH, "w") as f:
+            json.dump(s, f)
+    except Exception as e:
+        print(f"[agent] security save failed: {e}")
+
+def _tailscale_status():
+    installed = os.path.exists("/usr/bin/tailscale") or os.path.exists("/usr/local/bin/tailscale")
+    if not installed:
+        return {"installed": False, "running": False, "ip": None}
+    try:
+        r = subprocess.run(["tailscale", "status", "--json"], capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            d = json.loads(r.stdout)
+            selfip = d.get("Self", {})
+            return {"installed": True, "running": d.get("BackendState") in ("Running", "Starting"),
+                    "ip": selfip.get("TailscaleIPs", [None])[0], "hostname": selfip.get("HostName", "")}
+        return {"installed": True, "running": False}
+    except Exception:
+        return {"installed": True, "running": False}
+
+@app.route("/api/security", methods=["GET"])
+def api_security_status():
+    """Report current security posture (bind, basic auth intent, tailscale, exposed ports)."""
+    exposed = []
+    ok, out = _docker("ps", "--filter", "label=appvault.managed=true", "--format", "{{.Names}}", capture=True)
+    if ok and out:
+        for name in [l.strip() for l in out.strip().split('\n') if l.strip()]:
+            p = get_container_host_port(name)
+            if p:
+                exposed.append({"app": name.replace("app-", "", 1), "port": p})
+    sec = _load_security()
+    return jsonify({
+        "platform": sys.platform,
+        "bind": sec.get("bind", "0.0.0.0"),
+        "basic_auth_enabled": bool(sec.get("basic_auth_enabled")),
+        "basic_user": sec.get("basic_user", ""),
+        "tailscale": _tailscale_status(),
+        "exposed_ports": exposed,
+        "store_port": "8085",
+        "agent_port": "8086",
+    })
+
+@app.route("/api/security", methods=["POST"])
+def api_security_apply():
+    """Persist security preferences (bind + basic-auth intent). Actual nginx/Caddy
+    enforcement for basic auth and bind is applied at the store host; the agent
+    records + reports intent and generates the needed snippet for the UI."""
+    data = request.json or {}
+    sec = _load_security()
+    res = {}
+    if "bind" in data and data["bind"] in ("127.0.0.1", "0.0.0.0"):
+        sec["bind"] = data["bind"]; res["bind"] = data["bind"]
+    if "basic_auth" in data:
+        enabled = bool(data["basic_auth"])
+        user = (data.get("basic_user") or sec.get("basic_user") or "appvault").strip()
+        if enabled and not data.get("basic_pass"):
+            return jsonify({"status": "error", "message": "Password required to enable basic auth"}), 400
+        sec["basic_auth_enabled"] = enabled
+        sec["basic_user"] = user
+        if data.get("basic_pass"):
+            sec["basic_pass"] = data["basic_pass"]
+        res["basic_auth"] = {"enabled": enabled, "user": user}
+    _save_security(sec)
+    return jsonify({"status": "ok", **res})
+
+@app.route("/api/security/tailscale", methods=["POST"])
+def api_security_tailscale():
+    """Install + join Tailscale so the install is private-by-default."""
+    data = request.json or {}
+    authkey = (data.get("auth_key") or "").strip()
+    try:
+        if not (os.path.exists("/usr/bin/tailscale") or os.path.exists("/usr/local/bin/tailscale")):
+            subprocess.run(["curl", "-fsSL", "https://tailscale.com/install.sh", "-o", "/tmp/ts_install.sh"],
+                           capture_output=True, text=True, timeout=120)
+            subprocess.run(["sh", "/tmp/ts_install.sh"], capture_output=True, text=True, timeout=300)
+        cmd = ["tailscale", "up", "--timeout", "300"]
+        if authkey:
+            cmd.append("--authkey=" + authkey)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=310)
+        ts = _tailscale_status()
+        ok = r.returncode == 0 or ts.get("running")
+        return jsonify({"status": "ok" if ok else "needs_auth", "tailscale": ts,
+                        "message": "" if ok else (r.stderr or r.stdout or "").strip()[:200]})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)[:200]}), 500
+
+
 @app.route("/")
 @app.route("/store")
 def index():
