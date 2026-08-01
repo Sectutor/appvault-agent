@@ -365,6 +365,19 @@ def _find_free_port():
         s.bind(('', 0))
         return s.getsockname()[1]
 
+def _stable_host_port(container_name, app_id, container_port):
+    """Return a STABLE host port for an app so restarts don't drift the port.
+    - If the container already exists, reuse its current host port.
+    - Otherwise derive a deterministic port from the app_id in 30000-39999."""
+    existing = get_container_host_port(container_name)
+    if existing:
+        return existing
+    import hashlib
+    # deterministic port from app_id hash, in a safe range
+    h = int(hashlib.sha256(app_id.encode()).hexdigest(), 16)
+    stable = 30000 + (h % 9000)  # 30000-38999
+    return str(stable)
+
 def _provision_database(app_id, app_def):
     """Auto-start central DB if needed and create the app's database."""
     env_vars = {e.split("=")[0]: e.split("=", 1)[1] for e in app_def.get("env", []) if "=" in e}
@@ -541,10 +554,12 @@ def _do_install(app_id):
         "--label", "appvault.managed=true",
     ]
     
-    # Port mappings
+    # Port mappings - use a STABLE host port (reuse existing or derive from app_id) so
+    # the port doesn't drift on restart (fixes Launch links + firewall rules).
     container_port = app_def.get("container_port")
     if container_port:
-        run_args.extend(["-p", str(container_port)])  # random host port
+        host_port = _stable_host_port(container_name, app_id, container_port)
+        run_args.extend(["-p", f"{host_port}:{container_port}"])
     
     extra_ports = app_def.get("extra_ports", {})
     # extra_ports format: "container_port": "${ENV_VAR:-host_port}"
