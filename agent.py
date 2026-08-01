@@ -1152,19 +1152,33 @@ def _save_security(s):
         print(f"[agent] security save failed: {e}")
 
 def _tailscale_status():
-    installed = os.path.exists("/usr/bin/tailscale") or os.path.exists("/usr/local/bin/tailscale")
-    if not installed:
-        return {"installed": False, "running": False, "ip": None}
+    """Report Tailscale status. Prefers the HOST tailscale (VPS runs tailscale on the
+    host; the agent container reaches it via the docker socket). Falls back to any
+    tailscale binary present in the container (desktop single-host installs)."""
     try:
-        r = subprocess.run(["tailscale", "status", "--json"], capture_output=True, text=True, timeout=10)
-        if r.returncode == 0:
-            d = json.loads(r.stdout)
+        # 1) Try host tailscale via docker socket (VPS host has tailscaled)
+        ok, out = _docker("run", "--rm", "--network", "host",
+                          "tailscale/tailscale", "status", "--json", capture=True, timeout=20)
+        if ok and out:
+            d = json.loads(out)
             selfip = d.get("Self", {})
             return {"installed": True, "running": d.get("BackendState") in ("Running", "Starting"),
                     "ip": selfip.get("TailscaleIPs", [None])[0], "hostname": selfip.get("HostName", "")}
+    except Exception as e:
+        print(f"[agent] host tailscale check via docker failed: {e}")
+    # 2) Fallback: tailscale binary inside the container
+    if os.path.exists("/usr/bin/tailscale") or os.path.exists("/usr/local/bin/tailscale"):
+        try:
+            r = subprocess.run(["tailscale", "status", "--json"], capture_output=True, text=True, timeout=10)
+            if r.returncode == 0:
+                d = json.loads(r.stdout)
+                selfip = d.get("Self", {})
+                return {"installed": True, "running": d.get("BackendState") in ("Running", "Starting"),
+                        "ip": selfip.get("TailscaleIPs", [None])[0], "hostname": selfip.get("HostName", "")}
+        except Exception:
+            pass
         return {"installed": True, "running": False}
-    except Exception:
-        return {"installed": True, "running": False}
+    return {"installed": False, "running": False, "ip": None}
 
 @app.route("/api/security", methods=["GET"])
 def api_security_status():
