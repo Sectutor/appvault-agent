@@ -257,6 +257,7 @@ def poll_jobs():
 
 def sync_catalog(force=False):
     """Check if catalog has been updated and sync if needed. force=True always re-fetches."""
+    global catalog_cache
     effective_id = agent_state.get("agent_id", "")
     effective_key = agent_state.get("api_key", "")
     if not effective_id or not effective_key:
@@ -283,7 +284,6 @@ def sync_catalog(force=False):
                 "api_key": effective_key
             })
             if catalog_result:
-                global catalog_cache
                 catalog_cache = catalog_result
                 save_catalog_cache(catalog_result)
                 print(f"[agent] Catalog synced: v{remote_ver} ({len(catalog_cache.get('apps', []))} apps)")
