@@ -60,6 +60,14 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   </div>
 </div>
 
+<!-- License key entry (unlock premium apps) -->
+<div class="controls" style="padding-top:4px;padding-bottom:4px;gap:8px;">
+  <span style="font-size:12px;color:#94a3b8;font-weight:600;">🔑 License:</span>
+  <input id="license-input" type="text" placeholder="Enter your license key (e.g. APPVAULT-XXXX-XXXX-XXXX-XXXX)" style="flex:0 0 340px;padding:8px 14px;border-radius:8px;border:1px solid #334155;background:#1e293b;color:#e2e8f0;font-size:13px;">
+  <button class="btn btn-install" onclick="applyLicense()" style="padding:8px 18px;">Apply</button>
+  <span id="license-status" style="font-size:12px;color:#94a3b8;"></span>
+</div>
+
 <div class="controls">
   <div class="nav-tabs">
     <button class="active" onclick="filterCategory('all')">All</button>
@@ -94,6 +102,23 @@ function showToast(msg, type) {
 async function api(path, opts) {
   const r = await fetch(path, opts);
   return r.json();
+}
+
+async function applyLicense() {
+  const input = document.getElementById('license-input');
+  const status = document.getElementById('license-status');
+  const key = (input.value || '').trim();
+  if (!key) { status.textContent = 'Please enter a license key'; status.style.color = '#f87171'; return; }
+  status.textContent = 'Applying...'; status.style.color = '#fbbf24';
+  const r = await api('/api/license', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ license_key: key }) });
+  if (r.status === 'ok') {
+    status.textContent = '✅ License applied — upgrading to paid (premium apps unlocked)';
+    status.style.color = '#4ade80';
+    setTimeout(loadCatalog, 1500);
+  } else {
+    status.textContent = '❌ ' + (r.message || 'Failed to apply license');
+    status.style.color = '#f87171';
+  }
 }
 
 let catalogData = null;
@@ -211,7 +236,21 @@ async function restart(id) {
   }
 }
 
+async function loadLicense() {
+  try {
+    const r = await api('/api/license');
+    const status = document.getElementById('license-status');
+    if (status && r.license_key) {
+      status.textContent = '🔑 Active license: ' + r.license_key;
+      status.style.color = '#4ade80';
+      const input = document.getElementById('license-input');
+      if (input) input.value = r.license_key;
+    }
+  } catch (e) {}
+}
+
 // Refresh every 15s
+loadLicense();
 loadCatalog();
 setInterval(loadCatalog, 15000);
 </script>

@@ -66,6 +66,9 @@ def require_api_key():
         return None
     path = request.path
     if path.startswith("/api/"):
+        # Self-service license apply is public (user's own agent/local install)
+        if path.startswith("/api/license"):
+            return None
         is_public_read = request.method == "GET" and path.startswith(PUBLIC_READ_PREFIXES)
         requires_key = (not is_public_read) or path.startswith("/api/install/")
         if requires_key:
@@ -170,6 +173,9 @@ def save_agent_state(state):
         json.dump(state, f)
 
 agent_state = load_agent_state()
+# Prefer a persisted license key; fall back to env (initial provisioning)
+if not agent_state.get("license_key"):
+    agent_state["license_key"] = os.getenv("LICENSE_KEY", "")
 
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # HTTP CLIENT for central server
@@ -218,7 +224,7 @@ def register_with_central():
         "os": sys.platform,
         "docker_version": docker["version"],
         "app_version": APP_VERSION,
-        "license_key": os.getenv("LICENSE_KEY", ""),
+        "license_key": agent_state.get("license_key", os.getenv("LICENSE_KEY", "")),
     })
     
     if result:
@@ -1097,6 +1103,25 @@ def api_agent_status():
         "central_url": CENTRAL_URL,
         "is_registered": bool(agent_state.get("api_key")),
     })
+
+@app.route("/api/license", methods=["GET", "POST"])
+def api_license():
+    """Get (GET) or apply (POST) the agent's license key.
+    POST stores the key persistently and re-registers with the central so the
+    agent's plan upgrades to 'paid' (unlocking premium apps)."""
+    if request.method == "GET":
+        return jsonify({"license_key": agent_state.get("license_key", "")})
+    data = request.json or {}
+    key = (data.get("license_key") or "").strip()
+    if not key:
+        return jsonify({"status": "error", "message": "License key required"}), 400
+    agent_state["license_key"] = key
+    save_agent_state(agent_state)
+    ok = register_with_central()
+    if ok:
+        return jsonify({"status": "ok", "license_key": key, "applied": True})
+    return jsonify({"status": "error", "license_key": key, "applied": False,
+                    "message": "License saved but central re-registration failed"}), 502
 
 @app.route("/")
 @app.route("/store")
