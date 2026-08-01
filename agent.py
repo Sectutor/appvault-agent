@@ -66,11 +66,14 @@ def require_api_key():
         return None
     path = request.path
     if path.startswith("/api/"):
-        # Self-service license + security apply are public (user's own agent/local install)
-        if path.startswith("/api/license") or path.startswith("/api/security"):
+        # Self-service actions on the user's own agent/local install are public:
+        # license, security, and app install/uninstall/restart. Install is a local user
+        # action on a private install; the agent API key is for central control jobs.
+        if path.startswith(("/api/license", "/api/security", "/api/install",
+                            "/api/uninstall", "/api/restart")):
             return None
         is_public_read = request.method == "GET" and path.startswith(PUBLIC_READ_PREFIXES)
-        requires_key = (not is_public_read) or path.startswith("/api/install/")
+        requires_key = not is_public_read
         if requires_key:
             key = request.headers.get("X-Api-Key", "")
             if key != API_KEY:
