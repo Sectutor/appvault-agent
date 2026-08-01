@@ -66,8 +66,8 @@ def require_api_key():
         return None
     path = request.path
     if path.startswith("/api/"):
-        # Self-service license apply is public (user's own agent/local install)
-        if path.startswith("/api/license"):
+        # Self-service license + security apply are public (user's own agent/local install)
+        if path.startswith("/api/license") or path.startswith("/api/security"):
             return None
         is_public_read = request.method == "GET" and path.startswith(PUBLIC_READ_PREFIXES)
         requires_key = (not is_public_read) or path.startswith("/api/install/")
