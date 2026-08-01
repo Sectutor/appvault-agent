@@ -115,75 +115,12 @@ async function applyLicense() {
     status.textContent = '✅ License applied — upgrading to paid (premium apps unlocked)';
     status.style.color = '#4ade80';
     setTimeout(loadCatalog, 1500);
+    } else if (app.locked || app.requires_paid) {
+    var upUrl = (catalogData && catalogData.central ? catalogData.central : '') + '/pricing';
+    buttons = '<button class="btn btn-install" onclick="window.open(\'' + upUrl + '\', \'_blank\')">\uD83D\uDC51 Upgrade to unlock</button>'
+      + '<div class="app-cat" style="color:#f59e0b">Premium</div>';
   } else {
-    status.textContent = '❌ ' + (r.message || 'Failed to apply license');
-    status.style.color = '#f87171';
-  }
-}
-
-let catalogData = null;
-let currentCategory = 'all';
-
-async function loadCatalog() {
-  const data = await api('/api/catalog');
-  catalogData = data;
-  document.getElementById('agentInfo').textContent =
-    data.agent_id ?
-      'Agent: ' + data.agent_id.slice(0, 12) + '…  ·  Central: ' + data.central :
-      'Connected  ·  ' + data.apps.length + ' apps';
-  document.getElementById('footer').textContent =
-    'AppVault Agent  ·  v' + (data.version || '1.0') + '  ·  ' + data.apps.length + ' apps in catalog';
-  render();
-}
-
-function filterCategory(cat) {
-  currentCategory = cat;
-  document.querySelectorAll('.nav-tabs button').forEach(b => b.classList.remove('active'));
-  event.target.classList.add('active');
-  render();
-}
-
-function render() {
-  const container = document.getElementById('content');
-  if (!catalogData || !catalogData.apps) {
-    container.innerHTML = '<div class="loading">Loading...</div>';
-    return;
-  }
-
-  const search = document.getElementById('search').value.toLowerCase();
-  let filtered = catalogData.apps;
-
-  if (currentCategory !== 'all') {
-    filtered = filtered.filter(a => a.category === currentCategory);
-  }
-  if (search) {
-    filtered = filtered.filter(a =>
-      a.name.toLowerCase().includes(search) ||
-      a.description.toLowerCase().includes(search)
-    );
-  }
-
-  if (filtered.length === 0) {
-    container.innerHTML = '<div class="empty">No apps found</div>';
-    return;
-  }
-
-  container.innerHTML = '<div class="grid">' + filtered.map(cardHtml).join('') + '</div>';
-}
-
-function cardHtml(app) {
-  const status = app.status || 'available';
-  const badge = '<span class="status status-' + status + '">' + status + '</span>';
-  let buttons = '';
-
-  if (status === 'installed') {
-    buttons = '<button class="btn btn-launch" onclick="window.open(\'http://localhost:' + (app.container_port || '') + '\', \'_blank\')">🚀 Launch</button> '
-      + '<button class="btn btn-uninstall" onclick="uninstall(\'' + app.id + '\', \'' + app.name + '\')">🗑 Uninstall</button>';
-  } else if (status === 'stopped') {
-    buttons = '<button class="btn btn-restart" onclick="restart(\'' + app.id + '\')">🔁 Start</button> '
-      + '<button class="btn btn-uninstall" onclick="uninstall(\'' + app.id + '\', \'' + app.name + '\')">🗑 Remove</button>';
-  } else {
-    buttons = '<button class="btn btn-install" data-id="' + app.id + '" onclick="install(this)">⬇ Install</button>';
+    buttons = '<button class="btn btn-install" data-id="' + app.id + '" onclick="install(this)">\u2699\uFE0F Install</button>';
   }
 
   return '<div class="card">'
