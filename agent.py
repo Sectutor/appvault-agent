@@ -1156,14 +1156,19 @@ def _tailscale_status():
     host; the agent container reaches it via the docker socket). Falls back to any
     tailscale binary present in the container (desktop single-host installs)."""
     try:
-        # 1) Try host tailscale via docker socket (VPS host has tailscaled)
-        ok, out = _docker("run", "--rm", "--network", "host",
-                          "tailscale/tailscale", "status", "--json", capture=True, timeout=20)
+        # 1) Try host tailscale via docker socket (VPS host has tailscaled).
+        #    Mount the host tailscaled socket so the CLI in the container talks to host daemon.
+        ok, out = _docker("run", "--rm",
+                          "-v", "/var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock",
+                          "--network", "host", "--entrypoint", "tailscale",
+                          "tailscale/tailscale", "status", "--json", capture=True, timeout=25)
         if ok and out:
-            d = json.loads(out)
-            selfip = d.get("Self", {})
-            return {"installed": True, "running": d.get("BackendState") in ("Running", "Starting"),
-                    "ip": selfip.get("TailscaleIPs", [None])[0], "hostname": selfip.get("HostName", "")}
+            # guard: ensure it's actually JSON (docker may emit errors)
+            if out.lstrip().startswith("{"):
+                d = json.loads(out)
+                selfip = d.get("Self", {})
+                return {"installed": True, "running": d.get("BackendState") in ("Running", "Starting"),
+                        "ip": selfip.get("TailscaleIPs", [None])[0], "hostname": selfip.get("HostName", "")}
     except Exception as e:
         print(f"[agent] host tailscale check via docker failed: {e}")
     # 2) Fallback: tailscale binary inside the container
