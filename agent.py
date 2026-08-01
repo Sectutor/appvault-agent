@@ -605,7 +605,20 @@ def _do_install(app_id):
             # Only add if not referencing an unset variable
             if not expanded.startswith("${") or ":-" in expanded:
                 run_args.extend(["-e", f"{key}={expanded}"])
-    
+
+    # ownCloud trusted domains: ensure private/reachable addresses are trusted so the
+    # app doesn't reject access via the tailnet/private IP (fixes "untrusted domain").
+    if any(k.startswith("OWNCLOUD_") for k in [e.split("=")[0] for e in app_def.get("env", [])]):
+        td_hosts = ["localhost", "127.0.0.1"]
+        try:
+            from urllib.parse import urlparse
+            pu = urlparse(os.environ.get("PUBLIC_URL", "")).hostname
+            if pu:
+                td_hosts.append(pu)
+        except Exception:
+            pass
+        run_args.extend(["-e", "OWNCLOUD_TRUSTED_DOMAINS=" + ",".join(td_hosts)])
+
     # Add image
     run_args.append(image)
     
