@@ -381,6 +381,52 @@ def _stable_host_port(container_name, app_id, container_port):
     stable = 30000 + (h % 9000)  # 30000-38999
     return str(stable)
 
+
+
+def _sync_caddy_apps():
+    """Durable: auto-register installed apps as HTTPS reverse-proxy paths in Caddy.
+    Rebuilds the managed apps.conf (handle_path /<app-id>/ -> app-<id>:<cport>) and reloads
+    Caddy, so any newly installed app is reachable at https://PUBLIC_URL/<app-id>/ without
+    manual Caddyfile edits. Called after install/uninstall."""
+    try:
+        rules = []
+        ok, out = _docker("ps", "--filter", "label=appvault.managed=true",
+                          "--format", "{{.Names}}\t{{.Label \"appvault.app\"}}", capture=True)
+        if ok and out:
+            for line in out.strip().splitlines():
+                parts = line.split("\t")
+                cname = parts[0].strip()
+                app_id = parts[1].strip() if len(parts) > 1 else cname.replace("app-", "", 1)
+                # get the app's container port (first published internal port)
+                ok2, pout = _docker("port", cname, capture=True)
+                cport = None
+                if ok2 and pout:
+                    for pl in pout.strip().splitlines():
+                        if "->" in pl:
+                            cport = pl.split("->")[0].split("/")[0].strip()
+                            break
+                if not cport:
+                    continue
+                # ensure on Caddy's network so Caddy can resolve the app
+                _docker("network", "connect", os.environ.get("APPVAULT_NETWORK", "appvault_appvault-net"), cname)
+                rules.append("handle_path /" + app_id + "/* {")
+                rules.append("    reverse_proxy " + cname + ":" + cport)
+                rules.append("}")
+                rules.append("handle_path /" + app_id + " {")
+                rules.append("    reverse_proxy " + cname + ":" + cport)
+                rules.append("}")
+        content = "\n".join(rules) if rules else "# no apps"
+        # write into the Caddy container's mounted caddy.d and reload
+        import base64
+        b64 = base64.b64encode(content.encode()).decode()
+        _docker("exec", "appvault-caddy", "sh", "-c",
+                f"echo {b64} | base64 -d > /etc/caddy/caddy.d/apps.conf")
+        _docker("exec", "appvault-caddy", "caddy", "reload", "--config", "/etc/caddy/Caddyfile")
+        print(f"[agent] Caddy app routes synced ({len(rules)//2} apps)")
+    except Exception as e:
+        print(f"[agent] Caddy sync failed: {e}")
+
+
 def _provision_database(app_id, app_def):
     """Auto-start central DB if needed and create the app's database."""
     env_vars = {e.split("=")[0]: e.split("=", 1)[1] for e in app_def.get("env", []) if "=" in e}
@@ -651,6 +697,7 @@ def _do_install(app_id):
         print(f"[agent] Heimdall tile not added: {e}")
     
     _set_progress_done(app_id, f"{app_def.get('name', app_id)} installed!")
+    _sync_caddy_apps()  # register HTTPS reverse-proxy path for this app
     print(f"[agent] {app_id} installed successfully")
 
 def _do_install_stack(app_id):
@@ -846,6 +893,7 @@ def _do_uninstall(app_id):
     except Exception as e:
         pass
     
+    _sync_caddy_apps()  # remove HTTPS reverse-proxy path for this app
     print(f"[agent] {app_id} uninstalled")
 
 def _do_restart(app_id):
