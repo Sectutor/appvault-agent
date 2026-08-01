@@ -57,6 +57,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   </div>
   <div class="header-links">
     <a href="/api/health">Agent Status</a>
+    <a href="#" onclick="openSecurity();return false;" style="color:#f59e0b;">🔐 Security</a>
   </div>
 </div>
 
@@ -335,7 +336,84 @@ async function joinTailscale() {
 }
 
 
+
+// ---- Security self-configuration UI (parity with heimdall store) ----
+function openSecurity() {
+  document.getElementById('sec-overlay').style.display='block';
+  document.getElementById('sec-modal').style.display='block';
+  loadSecStat();
+}
+function closeSecurity() {
+  document.getElementById('sec-overlay').style.display='none';
+  document.getElementById('sec-modal').style.display='none';
+}
+async function loadSecStat() {
+  var b = document.getElementById('sec-body');
+  if (!b) return;
+  b.innerHTML = '<div class="loading">Loading security status...</div>';
+  var r = await api('/api/security');
+  if (r.error || !r.platform) { b.innerHTML = '<div class="empty">Could not load: ' + (r.error||'error') + '</div>'; return; }
+  var ts = r.tailscale || {};
+  var tsTxt = ts.installed ? (ts.running ? '<span style="color:#4ade80">Running (IP: ' + (ts.ip||'?') + ')</span>' : '<span style="color:#f59e0b">Not connected</span>') : '<span style="color:#f87171">Not installed</span>';
+  var ports = (r.exposed_ports && r.exposed_ports.length) ? r.exposed_ports.map(function(q){ return q.app + ':' + q.port; }).join(', ') : 'None';
+  b.innerHTML =
+    '<div style="background:#1e293b;border-radius:10px;padding:14px;margin-bottom:12px;">'
+    + '<div><b>Platform:</b> ' + (r.platform||'') + '</div>'
+    + '<div><b>Store (heimdall):</b> port ' + r.store_port + ' — bind: ' + (r.bind==='127.0.0.1'?'<span style="color:#4ade80">localhost only</span>':'<span style="color:#f59e0b">all interfaces (LAN)</span>') + '</div>'
+    + '<div><b>Agent API:</b> port ' + r.agent_port + ' (127.0.0.1 only)</div>'
+    + '<div><b>Installed app ports:</b> ' + ports + '</div>'
+    + '<div><b>Basic auth:</b> ' + (r.basic_auth_enabled ? '<span style="color:#4ade80">ENABLED ('+r.basic_user+')</span>' : '<span style="color:#f87171">disabled</span>') + '</div>'
+    + '<div style="margin-top:10px;"><b>Tailscale (private access):</b> ' + tsTxt + '</div>'
+    + '</div>'
+    + '<div style="margin-bottom:12px;"><b>Private access via Tailscale</b>'
+    + '<div style="margin-top:6px;display:flex;gap:8px;">'
+    + '<input id="ts-key" placeholder="Optional Tailscale auth key" style="flex:1;padding:8px;border:1px solid #334155;border-radius:8px;background:#1e293b;color:#e2e8f0;">'
+    + '<button class="btn btn-install" onclick="secJoinTailscale()">Install / Join</button></div>'
+    + '<div id="ts-status" style="font-size:12px;color:#94a3b8;margin-top:6px;"></div></div>'
+    + '<div><b>Password-protect the store</b>'
+    + '<div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap;">'
+    + '<input id="sec-user" placeholder="username" value="'+(r.basic_user||'appvault')+'" style="flex:1;padding:8px;border:1px solid #334155;border-radius:8px;background:#1e293b;color:#e2e8f0;">'
+    + '<input id="sec-pass" type="password" placeholder="password" style="flex:1;padding:8px;border:1px solid #334155;border-radius:8px;background:#1e293b;color:#e2e8f0;">'
+    + '</div>'
+    + '<div style="margin-top:6px;display:flex;gap:8px;">'
+    + '<button class="btn btn-install" onclick="secApplyAuth(true)">Enable Auth</button>'
+    + '<button class="btn btn-uninstall" onclick="secApplyAuth(false)">Disable Auth</button>'
+    + '</div>'
+    + '<div id="sec-auth-status" style="font-size:12px;color:#94a3b8;margin-top:6px;"></div></div>';
+}
+async function secApplyAuth(enabled) {
+  var st = document.getElementById('sec-auth-status');
+  var user = (document.getElementById('sec-user')||{}).value || 'appvault';
+  var pw = (document.getElementById('sec-pass')||{}).value || '';
+  if (st) st.textContent = 'Applying...';
+  var body = { basic_auth: enabled, basic_user: user };
+  if (enabled && pw) body.basic_pass = pw;
+  var r = await api('/api/security', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (st) { st.textContent = (r.status==='ok') ? (enabled ? 'Basic auth enabled (user: '+user+')' : 'Basic auth disabled') : ('Error: '+(r.message||'failed')); st.style.color = r.status==='ok' ? '#4ade80' : '#f87171'; }
+  setTimeout(loadSecStat, 700);
+}
+async function secJoinTailscale() {
+  var st = document.getElementById('ts-status');
+  var key = (document.getElementById('ts-key')||{}).value || '';
+  if (st) st.textContent = 'Installing / connecting...';
+  var r = await api('/api/security/tailscale', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ auth_key: key }) });
+  if (st) { st.textContent = r.message || (r.tailscale && r.tailscale.running ? 'Connected: '+r.tailscale.ip : 'Check Tailscale admin to approve the device'); st.style.color = (r.status==='ok'||(r.tailscale&&r.tailscale.running)) ? '#4ade80' : '#f59e0b'; }
+  setTimeout(loadSecStat, 1500);
+}
+
+
 </script>
+
+<!-- Security modal -->
+<div id="sec-overlay" onclick="closeSecurity()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9990;"></div>
+<div id="sec-modal" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:560px;max-width:92vw;max-height:86vh;overflow:auto;background:#111827;border:1px solid #334155;border-radius:14px;padding:22px;z-index:9995;color:#e2e8f0;font-size:14px;">
+  <div style="display:flex;justify-content:space-between;align-items:center;">
+    <h3 style="margin:0;font-size:18px;">🔐 Security</h3>
+    <button onclick="closeSecurity()" style="background:none;border:none;color:#94a3b8;font-size:20px;cursor:pointer;">&times;</button>
+  </div>
+  <div id="sec-body" style="margin-top:14px;"></div>
+</div>
+
 
 <!-- Security modal -->
 <div id="sec-overlay" onclick="closeSecurity()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9990;"></div>
