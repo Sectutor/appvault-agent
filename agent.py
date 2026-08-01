@@ -26,6 +26,11 @@ AGENT_NAME = os.getenv("AGENT_NAME", socket.gethostname())
 API_KEY = os.getenv("API_KEY", "")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "30"))  # seconds between polls
 STORAGE_PATH = os.getenv("STORAGE_PATH", "/data")
+PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
+
+def public_base():
+    """Base URL for app links: PUBLIC_URL if set, else localhost (local installs)."""
+    return PUBLIC_URL if PUBLIC_URL else "http://localhost"
 CATALOG_CACHE_PATH = os.path.join(STORAGE_PATH, "catalog_cache.json")
 AGENT_STATE_PATH = os.path.join(STORAGE_PATH, "agent_state.json")
 HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", "60"))  # seconds between heartbeats
@@ -44,6 +49,31 @@ def add_cors_headers(response):
     response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Agent-Id, X-Api-Key"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
     return response
+
+# -- Auth guard: require X-Api-Key on /api/* when API_KEY is set --
+# -- Auth guard --
+# Read-only catalog/status endpoints (GET) are PUBLIC so a fresh install shows free apps
+# without a pre-provisioned API key. Mutating/admin actions (install/uninstall/restart)
+# still require a valid X-Api-Key.
+PUBLIC_READ_PREFIXES = ("/api/catalog", "/api/health", "/api/info", "/api/agent/status",
+                        "/api/apps/health", "/api/education/", "/api/icon/", "/api/ping/")
+
+@app.before_request
+def require_api_key():
+    if request.method == "OPTIONS":
+        return None
+    if not API_KEY:
+        return None
+    path = request.path
+    if path.startswith("/api/"):
+        is_public_read = request.method == "GET" and path.startswith(PUBLIC_READ_PREFIXES)
+        requires_key = (not is_public_read) or path.startswith("/api/install/")
+        if requires_key:
+            key = request.headers.get("X-Api-Key", "")
+            if key != API_KEY:
+                return jsonify({"error": "Unauthorized", "message": "Valid X-Api-Key header required"}), 401
+    return None
+
 
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # DOCKER â€” via CLI (more reliable than docker-py)
@@ -188,6 +218,7 @@ def register_with_central():
         "os": sys.platform,
         "docker_version": docker["version"],
         "app_version": APP_VERSION,
+        "license_key": os.getenv("LICENSE_KEY", ""),
     })
     
     if result:
@@ -306,6 +337,15 @@ def get_container_host_port(container_name):
                 if ':' in host_part:
                     return host_part.split(':')[-1].strip()
                 return host_part
+    return None
+
+def get_container_port_host(container_name, container_port):
+    """Get the host port mapped to a specific container port (e.g. setup wizard port)."""
+    ok, out = _docker("port", container_name, f"{container_port}/tcp", capture=True)
+    if ok and out:
+        line = out.strip().split('\n')[0]
+        if ':' in line:
+            return line.split(':')[-1].strip()
     return None
 
 import socket
@@ -506,6 +546,8 @@ def _do_install(app_id):
             m = re.search(r'\$\{[^:-]+:-([^}]+)\}', host_port_str)
             if m:
                 host_port = m.group(1)
+        if host_port == "auto":
+            host_port = str(_find_free_port())
         if host_port and container_port_str:
             run_args.extend(["-p", f"{host_port}:{container_port_str}"])
     
@@ -562,7 +604,7 @@ def _do_install(app_id):
         from heimdall_bridge import add_heimdall_tile
         container_port = app_def.get("container_port", "")
         host_port = get_container_host_port(container_name)
-        tile_url = f"http://localhost:{host_port}" if host_port else f"http://localhost:{container_port}"
+        tile_url = f"{public_base()}:{host_port}" if host_port else f"{public_base()}:{container_port}"
         add_heimdall_tile(app_def.get("name", app_id), tile_url, app_id, app_def.get("description", ""))
     except Exception as e:
         print(f"[agent] Heimdall tile not added: {e}")
@@ -733,7 +775,7 @@ def _do_install_stack(app_id):
     
     try:
         from heimdall_bridge import add_heimdall_tile
-        tile_url = f"http://localhost:{app_def.get('container_port','3000')}"
+        tile_url = f"{public_base()}:{app_def.get('container_port','3000')}"
         add_heimdall_tile(app_name, tile_url, app_id, app_def.get("description", ""))
     except Exception as e:
         print(f"[agent] Tile not added: {e}")
@@ -757,7 +799,7 @@ def _do_uninstall(app_id):
     # Remove Heimdall tile
     try:
         from heimdall_bridge import remove_heimdall_tile
-        tile_url = f"http://localhost:{get_container_host_port(container_name) or ''}"
+        tile_url = f"{public_base()}:{get_container_host_port(container_name) or ''}"
         if tile_url:
             remove_heimdall_tile(tile_url)
     except Exception as e:
@@ -946,7 +988,16 @@ def api_catalog():
         if status in ("installed", "stopped"):
             cname = f"app-{app['id']}"
             host_port = get_container_host_port(cname) or app.get("container_port", "")
-        result.append({**app, "status": status, "host_port": host_port})
+        entry = {**app, "status": status, "host_port": host_port}
+        if status in ("installed", "stopped") and app.get("extra_ports"):
+            cname = f"app-{app['id']}"
+            path = app.get("web_path", "/")
+            for cport in app["extra_ports"]:
+                hp = get_container_port_host(cname, cport)
+                if hp:
+                    entry["setup_url"] = f"{public_base()}:{hp}{path}"
+                    break
+        result.append(entry)
     
     return jsonify({
         "apps": result,
@@ -1141,9 +1192,18 @@ def api_education(app_id):
     port = result["host_port"]
     path = result["web_path"]
     if port:
-        result["launch_url"] = f"http://localhost:{port}{path}"
+        result["launch_url"] = f"{public_base()}:{port}{path}"
     else:
         result["launch_url"] = ""
+
+    # Extra ports (setup/secondary) -> host URLs so clients show the RIGHT link
+    extra_urls = {}
+    for cport in (app_def.get("extra_ports") or {}):
+        hp = get_container_port_host(cname, cport)
+        if hp:
+            extra_urls[cport] = f"{public_base()}:{hp}{path}"
+    result["extra_urls"] = extra_urls
+    result["setup_url"] = list(extra_urls.values())[0] if extra_urls else None
     
     # Extract credentials from env vars if not in education data
     if not result.get("default_login"):
@@ -1237,6 +1297,11 @@ def api_app_icon(app_id):
 @app.route("/api/install/<app_id>", methods=["POST"])
 def api_install(app_id):
     """Start installing an app in the background. Returns immediately."""
+    # Reject disabled apps (admin disabled for everyone)
+    for a in catalog_cache.get("apps", []):
+        if a["id"] == app_id and a.get("disabled"):
+            return jsonify({"status": "error", "app_id": app_id,
+                            "message": "This app is currently disabled by the admin"}), 400
     # Initialize progress
     _set_progress(app_id, "Queued...", 2)
     # Run install in background thread
