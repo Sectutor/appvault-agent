@@ -56,7 +56,7 @@ def add_cors_headers(response):
 # without a pre-provisioned API key. Mutating/admin actions (install/uninstall/restart)
 # still require a valid X-Api-Key.
 PUBLIC_READ_PREFIXES = ("/api/catalog", "/api/health", "/api/info", "/api/agent/status",
-                        "/api/apps/health", "/api/education/", "/api/icon/", "/api/ping/")
+                        "/api/apps/health", "/api/education/", "/api/icon/", "/api/ping/", "/api/security")
 
 @app.before_request
 def require_api_key():
