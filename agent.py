@@ -383,6 +383,13 @@ def _stable_host_port(container_name, app_id, container_port):
 
 
 
+def _https_port(app_id):
+    """Deterministic HTTPS proxy port for an app (20000-28999), used for per-app HTTPS."""
+    import hashlib
+    h = int(hashlib.sha256(("https:" + app_id).encode()).hexdigest(), 16)
+    return 20000 + (h % 9000)
+
+
 def _sync_caddy_apps():
     """Durable: auto-register installed apps as HTTPS reverse-proxy paths in Caddy.
     Rebuilds the managed apps.conf (handle_path /<app-id>/ -> app-<id>:<cport>) and reloads
@@ -422,10 +429,10 @@ def _sync_caddy_apps():
                     continue
                 # ensure on Caddy's network so Caddy can resolve the app
                 _docker("network", "connect", os.environ.get("APPVAULT_NETWORK", "appvault_appvault-net"), cname)
-                rules.append("handle_path /" + app_id + "/* {")
-                rules.append("    reverse_proxy " + cname + ":" + cport)
-                rules.append("}")
-                rules.append("handle_path /" + app_id + " {")
+                # per-app HTTPS port serving the app at ROOT (no subpath breakage)
+                hport = _https_port(app_id)
+                rules.append(":" + str(hport) + " {")
+                rules.append("    tls /etc/caddy/certs/cert.pem /etc/caddy/certs/key.pem")
                 rules.append("    reverse_proxy " + cname + ":" + cport)
                 rules.append("}")
         content = "\n".join(rules) if rules else "# no apps"
@@ -1094,9 +1101,9 @@ def api_catalog():
         # Reverse-proxied launch URL (HTTPS through Caddy at /<app-id>/). The store's
         # Launch button uses this so apps open over HTTPS at https://PUBLIC_URL/<app-id>/.
         if status in ("installed", "stopped"):
-            wp = (app.get("web_path") or "").strip("/")
-            path = f"/{wp}" if wp else "/"
-            entry["launch_url"] = f"{public_base()}/{app['id']}{path}"
+            # Per-app HTTPS port serving at root
+            hpj = _https_port(app["id"])
+            entry["launch_url"] = f"{public_base()}:{hpj}/"
         if status in ("installed", "stopped") and app.get("extra_ports"):
             cname = f"app-{app['id']}"
             path = app.get("web_path", "/")
