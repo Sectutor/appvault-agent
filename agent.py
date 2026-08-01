@@ -1112,19 +1112,19 @@ def api_license():
     if request.method == "GET":
         return jsonify({"license_key": agent_state.get("license_key", "")})
     data = request.json or {}
+    # Empty key clears the license (downgrades to free-only); a non-empty key applies it.
     key = (data.get("license_key") or "").strip()
-    if not key:
-        return jsonify({"status": "error", "message": "License key required"}), 400
     agent_state["license_key"] = key
     save_agent_state(agent_state)
     ok = register_with_central()
     if ok:
-        # Re-sync catalog so premium apps appear immediately (plan upgraded to paid)
+        # Re-sync catalog so the correct apps show (premium when paid, free-only when cleared)
         try:
             sync_catalog(force=True)
         except Exception as e:
-            print(f"[agent] Catalog re-sync after license apply failed: {e}")
-        return jsonify({"status": "ok", "license_key": key, "applied": True})
+            print(f"[agent] Catalog re-sync after license change failed: {e}")
+        cleared = not key
+        return jsonify({"status": "ok", "license_key": key, "applied": not cleared, "cleared": cleared})
     return jsonify({"status": "error", "license_key": key, "applied": False,
                     "message": "License saved but central re-registration failed"}), 502
 
