@@ -255,8 +255,8 @@ def poll_jobs():
             print(f"[agent] Executing job #{job['id']}: {job['action']} {job['app_id']}")
             execute_job(job)
 
-def sync_catalog():
-    """Check if catalog has been updated and sync if needed."""
+def sync_catalog(force=False):
+    """Check if catalog has been updated and sync if needed. force=True always re-fetches."""
     effective_id = agent_state.get("agent_id", "")
     effective_key = agent_state.get("api_key", "")
     if not effective_id or not effective_key:
@@ -272,7 +272,7 @@ def sync_catalog():
     
     if ver_result:
         remote_ver = ver_result.get("version", 0)
-        if remote_ver > local_ver:
+        if force or remote_ver > local_ver:
             print(f"[agent] Catalog update available: v{local_ver} -> v{remote_ver}")
             catalog_result = central_request("GET", "/api/agent/catalog", params={
                 "agent_id": effective_id,
@@ -1119,6 +1119,11 @@ def api_license():
     save_agent_state(agent_state)
     ok = register_with_central()
     if ok:
+        # Re-sync catalog so premium apps appear immediately (plan upgraded to paid)
+        try:
+            sync_catalog(force=True)
+        except Exception as e:
+            print(f"[agent] Catalog re-sync after license apply failed: {e}")
         return jsonify({"status": "ok", "license_key": key, "applied": True})
     return jsonify({"status": "error", "license_key": key, "applied": False,
                     "message": "License saved but central re-registration failed"}), 502
