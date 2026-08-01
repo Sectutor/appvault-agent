@@ -272,8 +272,12 @@ def sync_catalog(force=False):
     
     if ver_result:
         remote_ver = ver_result.get("version", 0)
-        if force or remote_ver > local_ver:
-            print(f"[agent] Catalog update available: v{local_ver} -> v{remote_ver}")
+        remote_plan = ver_result.get("plan")
+        local_plan = catalog_cache.get("plan")
+        plan_changed = (remote_plan is not None) and (remote_plan != local_plan)
+        if force or remote_ver > local_ver or plan_changed:
+            reason = "force" if force else (f"v{local_ver} -> v{remote_ver}" if remote_ver > local_ver else f"plan {local_plan} -> {remote_plan}")
+            print(f"[agent] Catalog update available: {reason}")
             catalog_result = central_request("GET", "/api/agent/catalog", params={
                 "agent_id": effective_id,
                 "api_key": effective_key
