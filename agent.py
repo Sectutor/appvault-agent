@@ -1101,9 +1101,14 @@ def api_catalog():
         # Reverse-proxied launch URL (HTTPS through Caddy at /<app-id>/). The store's
         # Launch button uses this so apps open over HTTPS at https://PUBLIC_URL/<app-id>/.
         if status in ("installed", "stopped"):
-            # Per-app HTTPS port serving at root
+            # Per-app HTTPS port serving at root (+ web_path if the app serves under a subpath,
+            # e.g. pihole at /admin/) so Launch opens the correct location.
             hpj = _https_port(app["id"])
-            entry["launch_url"] = f"{public_base()}:{hpj}/"
+            wp = (app.get("web_path") or "").strip("/")
+            launch = f"{public_base()}:{hpj}/"
+            if wp:
+                launch += wp + "/"
+            entry["launch_url"] = launch
         if status in ("installed", "stopped") and app.get("extra_ports"):
             cname = f"app-{app['id']}"
             path = app.get("web_path", "/")
