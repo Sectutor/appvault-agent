@@ -1030,6 +1030,12 @@ def api_catalog():
             cname = f"app-{app['id']}"
             host_port = get_container_host_port(cname) or app.get("container_port", "")
         entry = {**app, "status": status, "host_port": host_port}
+        # Reverse-proxied launch URL (HTTPS through Caddy at /<app-id>/). The store's
+        # Launch button uses this so apps open over HTTPS at https://PUBLIC_URL/<app-id>/.
+        if status in ("installed", "stopped"):
+            wp = (app.get("web_path") or "").strip("/")
+            path = f"/{wp}" if wp else "/"
+            entry["launch_url"] = f"{public_base()}/{app['id']}{path}"
         if status in ("installed", "stopped") and app.get("extra_ports"):
             cname = f"app-{app['id']}"
             path = app.get("web_path", "/")
