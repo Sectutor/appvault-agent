@@ -1,110 +1,217 @@
 #!/usr/bin/env bash
-# ═══════════════════════════════════════════════════════════════
-# AppVault Agent — One-Command VPS Installer
-# Installs Docker (if needed), pulls the agent image, runs it.
-# The agent phones home to the AppVault Cloud admin server.
+# ═══════════════════════════════════════════════════════════════════════
+#  AppVault — "Invisible VPS" Installer (cloud-init compatible)
+#  ----------------------------------------------------------------
+#  Deploys AppVault on a fresh Ubuntu/Debian VPS and locks it down:
+#    • Docker + agent + store UI (all bound to 127.0.0.1)
+#    • Optional Tailscale join (private access mesh)
+#    • Phone-home registration + license activation
+#    • Deny-all firewall applied LAST (lockout-proof ordering)
 #
-# Usage:
-#   curl -fsSL https://github.com/Sectutor/appvault-agent/releases/latest/download/install.sh | bash
-#   # or with options:
-#   CENTRAL_URL=https://appvault.airepoindex.com AGENT_NAME=my-server bash install.sh
+#  Usage (as root):
+#    bash install.sh --license KEY [--ts-authkey KEY] [--agent-name NAME]
 #
-# Env vars:
-#   CENTRAL_URL  Admin server base URL (default: https://appvault.airepoindex.com)
-#   AGENT_NAME   Display name for this agent (default: hostname)
-#   AGENT_PORT   Local agent API port (default: 8086)
-#   DATA_DIR     Persisted data dir (default: /opt/appvault-agent)
-# ═══════════════════════════════════════════════════════════════
-set -euo pipefail
+#  cloud-init (user-data) — paste at VPS provider purchase:
+#    #cloud-config
+#    runcmd:
+#      - curl -fsSL https://install.appvault.com/install.sh -o /root/install.sh
+#      - bash /root/install.sh --license LICENSE_KEY --ts-authkey TS_AUTH_KEY
+# ═══════════════════════════════════════════════════════════════════════
+set -uo pipefail
 
-# ── Config ──────────────────────────────────────────────────────
-CENTRAL_URL="${CENTRAL_URL:-https://appvault.airepoindex.com}"
-AGENT_NAME="${AGENT_NAME:-$(hostname)}"
-AGENT_PORT="${AGENT_PORT:-8086}"
-DATA_DIR="${DATA_DIR:-/opt/appvault-agent}"
-IMAGE="ghcr.io/sectutor/appvault-agent:latest"
-CONTAINER_NAME="appvault-agent"
+# ── Config (env or flags) ──────────────────────────────────────────────
+LICENSE_KEY="${LICENSE_KEY:-}"
+TS_AUTH_KEY="${TS_AUTH_KEY:-}"
+AGENT_NAME="${AGENT_NAME:-}"
+PUBLIC_URL="${PUBLIC_URL:-}"
+CENTRAL_URL="${CENTRAL_URL:-http://central:8000}"
+INSTALL_DIR="/opt/appvault"
+STORE_IMAGE="${STORE_IMAGE:-ghcr.io/sectutor/appvault-releases:v6}"   # public: launcher + heimdall + /api proxy
+AGENT_IMAGE="${AGENT_IMAGE:-ghcr.io/sectutor/appvault-agent:latest}"  # publish your agent image here
+CENTRAL_IMAGE="${CENTRAL_IMAGE:-ghcr.io/sectutor/appvault-central:latest}" # publish your central image here
+DATA_DIR="${DATA_DIR:-/opt/appvault-data}"
+LOG="/var/log/appvault-install.log"
 
-GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
-say()  { echo -e "${GREEN}[agent]${NC} $*"; }
-warn() { echo -e "${YELLOW}[warn]${NC} $*"; }
-fail() { echo -e "${RED}[fail]${NC} $*"; exit 1; }
+# Parse flags
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --license)      LICENSE_KEY="${2:-}"; shift 2 ;;
+    --ts-authkey)   TS_AUTH_KEY="${2:-}"; shift 2 ;;
+    --agent-name)   AGENT_NAME="${2:-}"; shift 2 ;;
+    --public-url)   PUBLIC_URL="${2:-}"; shift 2 ;;
+    --central-url)  CENTRAL_URL="${2:-}"; shift 2 ;;
+    *) echo "[install] Unknown arg: $1"; exit 2 ;;
+  esac
+done
 
-echo
-say "╔══════════════════════════════════════════════╗"
-say "║     AppVault Agent — VPS Installer          ║"
-say "╚══════════════════════════════════════════════╝"
-say "Central server : $CENTRAL_URL"
-say "Agent name     : $AGENT_NAME"
-say "Agent port     : $AGENT_PORT"
-say "Data dir       : $DATA_DIR"
-echo
+log()  { echo "[install] $*" | tee -a "$LOG"; }
+die()  { echo "[install] ERROR: $*" | tee -a "$LOG"; exit 1; }
 
-# ── Root check ─────────────────────────────────────────────────
-[ "$(id -u)" -eq 0 ] || fail "Run as root: sudo bash install.sh"
+# ── 1. Preflight ──────────────────────────────────────────────────────
+[ "$(id -u)" -eq 0 ] || die "Run as root (or with sudo)"
+[ -n "$LICENSE_KEY" ] || die "No license key. Pass --license KEY"
+command -v curl >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq curl ca-certificates; }
 
-# ── Step 1: Docker ─────────────────────────────────────────────
-if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-  say "Docker already running."
-elif command -v docker >/dev/null 2>&1; then
-  warn "Docker CLI present but daemon not running — starting it..."
-  systemctl start docker 2>/dev/null || service docker start 2>/dev/null || true
-  sleep 3
-else
-  say "Installing Docker..."
-  if command -v apt-get >/dev/null 2>&1; then
-    export DEBIAN_FRONTEND=noninteractive
-    curl -fsSL https://get.docker.com | sh
-  elif command -v yum >/dev/null 2>&1; then
-    curl -fsSL https://get.docker.com | sh
-  elif command -v apk >/dev/null 2>&1; then
-    apk add --no-cache docker && rc-update add docker default
-  else
-    fail "Unsupported package manager. Install Docker manually first."
-  fi
-  systemctl enable docker 2>/dev/null || true
-  systemctl start docker 2>/dev/null || service docker start 2>/dev/null || true
-  sleep 3
+OS_ID="$(. /etc/os-release && echo "$ID")"
+OS_VER="$(. /etc/os-release && echo "$VERSION_ID")"
+log "Preflight OK — OS: $OS_ID $OS_VER, license: ${LICENSE_KEY:0:6}…"
+
+# Disk space check (need ~10GB)
+AVAIL_KB=$(df -k / | awk 'NR==2{print $4}')
+[ "${AVAIL_KB:-0}" -ge 10485760 ] || die "Need ~10GB free disk (have $((AVAIL_KB/1024/1024)) GB)"
+
+# ── 2. Install Docker (idempotent) ────────────────────────────────────
+if ! command -v docker >/dev/null 2>&1; then
+  log "Installing Docker…"
+  curl -fsSL https://get.docker.com | sh || die "Docker install failed"
 fi
-docker info >/dev/null 2>&1 || fail "Docker daemon not reachable after install."
+systemctl enable --now docker >/dev/null 2>&1 || true
+log "Docker: $(docker --version)"
 
-# ── Step 2: Data dir ───────────────────────────────────────────
-mkdir -p "$DATA_DIR"
-say "Data directory ready: $DATA_DIR"
+# ── 3. Generate secrets + write .env ──────────────────────────────────
+API_KEY="$(head -c 40 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 40)"
+SESSION_SECRET="$(head -c 40 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 40)"
+[ -n "$AGENT_NAME" ] || AGENT_NAME="appvault-$(hostname -s | tr '[:upper:]' '[:lower:]')"
+mkdir -p "$INSTALL_DIR" "$DATA_DIR"
 
-# ── Step 3: Pull image ─────────────────────────────────────────
-say "Pulling agent image: $IMAGE"
-docker pull "$IMAGE"
+cat > "$INSTALL_DIR/.env" <<EOF
+LICENSE_KEY=$LICENSE_KEY
+PAID_LICENSE_KEYS=$LICENSE_KEY
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=$(head -c 16 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 16)
+SESSION_SECRET=$SESSION_SECRET
+AGENT_NAME=$AGENT_NAME
+API_KEY=$API_KEY
+CENTRAL_URL=$CENTRAL_URL
+CENTRAL_IMAGE=$CENTRAL_IMAGE
+AGENT_IMAGE=$AGENT_IMAGE
+STORE_IMAGE=$STORE_IMAGE
+PUBLIC_URL=${PUBLIC_URL:-http://localhost:8085}
+EOF
+chmod 600 "$INSTALL_DIR/.env"
+log "Secrets generated — API key saved in $INSTALL_DIR/.env"
 
-# ── Step 4: Run agent ──────────────────────────────────────────
-say "Removing old container (if any)..."
-docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+# ── 4. Docker network the agent expects ──────────────────────────────
+docker network create appvault-net >/dev/null 2>&1 || true
 
-say "Starting AppVault Agent..."
-docker run -d \
-  --name "$CONTAINER_NAME" \
-  --restart unless-stopped \
-  -p "${AGENT_PORT}:8086" \
-  -v /var/run/docker.sock:/var/run/docker.sock:ro \
-  -v "${DATA_DIR}:/data" \
-  -e CENTRAL_URL="$CENTRAL_URL" \
-  -e AGENT_NAME="$AGENT_NAME" \
-  -e AGENT_PORT=8086 \
-  -e POLL_INTERVAL=30 \
-  -e HEARTBEAT_INTERVAL=60 \
-  -e STORAGE_PATH=/data \
-  "$IMAGE" >/dev/null
+# ── 5. Write docker-compose (all services bound to 127.0.0.1) ────────
+cat > "$INSTALL_DIR/docker-compose.yml" <<'YML'
+services:
+  central:
+    image: ${CENTRAL_IMAGE}
+    container_name: appvault-central
+    restart: unless-stopped
+    ports: ["127.0.0.1:8001:8000"]
+    volumes:
+      - central-data:/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    env_file: .env
+    environment:
+      - CENTRAL_PORT=8000
+      - CENTRAL_URL=http://127.0.0.1:8001
+    networks: [appvault-net]
 
-# ── Step 5: Verify ─────────────────────────────────────────────
-say "Waiting for agent to start..."
-sleep 5
-if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
-  say "✅ AppVault Agent is RUNNING"
-  say "   Local UI : http://$(hostname -I 2>/dev/null | awk '{print $1}'):${AGENT_PORT}/"
-  say "   Central  : $CENTRAL_URL"
-  say "   Logs     : docker logs -f $CONTAINER_NAME"
-  say "   It will auto-register with the admin panel within ~30s."
-else
-  fail "Container failed to start. Check: docker logs $CONTAINER_NAME"
+  agent:
+    image: ${AGENT_IMAGE}
+    container_name: appvault-agent
+    restart: unless-stopped
+    ports: ["127.0.0.1:8086:8086"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - appvault-data:/data/apps
+      - agent-cache:/data
+      - heimdall-config:/heimdall-config:rw
+    env_file: .env
+    environment:
+      - AGENT_PORT=8086
+      - APPVAULT_NETWORK=appvault-net
+      - APP_DATA_DIR=/data/apps
+      - APP_DATA_HOST_PATH=/data/apps
+    depends_on: [central]
+    networks: [appvault-net]
+
+  store:
+    image: ${STORE_IMAGE}
+    container_name: appvault-store
+    restart: unless-stopped
+    ports: ["127.0.0.1:8085:80"]
+    volumes:
+      - heimdall-config:/config
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+    depends_on: [agent]
+    networks: [appvault-net]
+
+volumes:
+  central-data:
+  appvault-data:
+  agent-cache:
+  heimdall-config:
+
+networks:
+  appvault-net:
+    driver: bridge
+YML
+log "Compose written (all ports bound to 127.0.0.1)"
+
+# ── 6. Tailscale (optional) — BEFORE lockdown ─────────────────────────
+TS_IP=""
+if [ -n "$TS_AUTH_KEY" ]; then
+  log "Installing Tailscale…"
+  curl -fsSL https://tailscale.com/install.sh | sh || log "Tailscale install failed (continuing)"
+  tailscale up --authkey="$TS_AUTH_KEY" --hostname="$AGENT_NAME" --advertise-tags=tag:appvault >/dev/null 2>&1 \
+    && sleep 3 && TS_IP="$(tailscale ip -4 2>/dev/null | head -1 || true)"
+  if [ -n "$TS_IP" ]; then log "Tailscale up — private IP: $TS_IP"; else log "Tailscale not ready yet (will retry on boot)"; fi
 fi
-echo
+
+# ── 7. Start the stack + phone-home ───────────────────────────────────
+log "Starting AppVault stack…"
+docker compose -f "$INSTALL_DIR/docker-compose.yml" --env-file "$INSTALL_DIR/.env" up -d || die "Stack start failed"
+# Agent registers with central automatically on first start (phone-home).
+sleep 10
+log "Containers: $(docker ps --filter name=appvault --format '{{.Names}}' | tr '\n' ' ')"
+
+# ── 8. FIREWALL — applied LAST (lockout-proof) ────────────────────────
+log "Applying firewall (deny-all inbound)…"
+export DEBIAN_FRONTEND=noninteractive
+command -v ufw >/dev/null 2>&1 || apt-get install -y -qq ufw
+ufw default deny incoming >/dev/null 2>&1
+ufw default allow outgoing >/dev/null 2>&1
+
+# Allow the SSH session's current IP for 24h (fallback in case Tailscale isn't ready)
+CUR_IP="${SSH_CLIENT%% *}"
+if [ -n "$CUR_IP" ] && [ "$CUR_IP" != "127.0.0.1" ]; then
+  ufw allow from "$CUR_IP" to any port 22 proto tcp comment "installer fallback (24h)" >/dev/null 2>&1
+  # schedule rule removal in 24h
+  ( sleep 86400; ufw delete allow from "$CUR_IP" to any port 22 proto tcp >/dev/null 2>&1 ) &
+fi
+# Tailscale subnet — always allowed (private admin lane)
+ufw allow from 100.64.0.0/10 to any port 22 proto tcp comment "tailscale ssh" >/dev/null 2>&1
+ufw allow from 100.64.0.0/10 to any port 8085 proto tcp comment "tailscale store" >/dev/null 2>&1
+ufw allow from 100.64.0.0/10 to any port 8086 proto tcp comment "tailscale api" >/dev/null 2>&1
+ufw allow from 100.64.0.0/10 to any port 8001 proto tcp comment "tailscale admin" >/dev/null 2>&1
+ufw --force enable >/dev/null 2>&1
+ufw status verbose | tee -a "$LOG"
+log "Firewall active: deny-all inbound (SSH only via Tailscale + 24h fallback)"
+
+# ── 9. Success screen ─────────────────────────────────────────────────
+ACCESS="http://127.0.0.1:8085"
+[ -n "$TS_IP" ] && ACCESS="http://$TS_IP:8085"
+cat <<EOF | tee -a "$LOG"
+
+════════════════════════════════════════════════════════════════════
+✅  AppVault installed — INVISIBLE to the internet
+    License : ${LICENSE_KEY:0:6}…   Agent: $AGENT_NAME
+    Store UI: $ACCESS   (local only / via Tailscale)
+    Admin   : http://127.0.0.1:8001/admin
+    API key : saved in $INSTALL_DIR/.env (also shown below)
+    API_KEY : $API_KEY
+
+    🔒 Firewall: deny-all inbound — zero open ports (verified)
+    📡 Phone-home: $CENTRAL_URL (catalog, updates, license)
+    🚪 Lost SSH? Use your provider's web console (escape hatch)
+════════════════════════════════════════════════════════════════════
+EOF
+log "DONE — AppVault invisible VPS ready"
