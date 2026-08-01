@@ -383,6 +383,14 @@ def _stable_host_port(container_name, app_id, container_port):
 
 
 
+def _is_proxy_disabled(app_id):
+    """True if a catalog app should NOT be reverse-proxied (e.g. VPN/network-only like wireguard)."""
+    for a in catalog_cache.get("apps", []):
+        if a.get("id") == app_id:
+            return bool(a.get("disable_proxy"))
+    return False
+
+
 def _https_port(app_id):
     """Deterministic HTTPS proxy port for an app (20000-28999), used for per-app HTTPS."""
     import hashlib
@@ -404,6 +412,9 @@ def _sync_caddy_apps():
                 parts = line.split("\t")
                 cname = parts[0].strip()
                 app_id = parts[1].strip() if len(parts) > 1 else cname.replace("app-", "", 1)
+                # skip apps that are marked VPN/network-only (no web UI to proxy)
+                if _is_proxy_disabled(app_id):
+                    continue
                 # choose the web container port: prefer the catalog's container_port (correct
                 # per-app web UI), else fall back to the app's internal port via docker port.
                 cport = None
@@ -660,6 +671,12 @@ def _do_install(app_id):
             # Create the directory on the container side
             dir_path = os.path.join(app_data_dir, app_id, vol_name)
             os.makedirs(dir_path, exist_ok=True)
+            # Make the data dir writable by any container user: prevents EACCES crashes for
+            # images that run as a non-root user (e.g. n8n's 'node', nextcloud's 'www-data').
+            try:
+                os.chmod(dir_path, 0o777)
+            except Exception as e:
+                print(f"[agent] chmod data dir warning: {e}")
             print(f"[agent] Data dir: {dir_path}")
             # Use the host path for Docker bind mount
             run_args.extend(["-v", f"{host_path}:{container_path}"])
