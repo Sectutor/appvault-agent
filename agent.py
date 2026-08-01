@@ -397,14 +397,27 @@ def _sync_caddy_apps():
                 parts = line.split("\t")
                 cname = parts[0].strip()
                 app_id = parts[1].strip() if len(parts) > 1 else cname.replace("app-", "", 1)
-                # get the app's container port (first published internal port)
-                ok2, pout = _docker("port", cname, capture=True)
+                # choose the web container port: prefer the catalog's container_port (correct
+                # per-app web UI), else fall back to the app's internal port via docker port.
                 cport = None
-                if ok2 and pout:
-                    for pl in pout.strip().splitlines():
-                        if "->" in pl:
-                            cport = pl.split("->")[0].split("/")[0].strip()
-                            break
+                for a in catalog_cache.get("apps", []):
+                    if a.get("id") == app_id and a.get("container_port"):
+                        cport = str(a["container_port"])
+                        break
+                if not cport:
+                    ok2, pout = _docker("port", cname, capture=True)
+                    if ok2 and pout:
+                        first = pout.strip().splitlines()[0] if pout.strip() else ""
+                        # prefer 80/8080/3000 style web ports if present
+                        for pl in pout.strip().splitlines():
+                            ip = pl.split("->")[0].strip()
+                            pnum = ip.split("/")[0]
+                            if pnum in ("80", "8080", "3000", "3001", "9000", "5678", "8096"):
+                                cport = pnum
+                                break
+                        if not cport:
+                            if "->" in first:
+                                cport = first.split("->")[0].split("/")[0].strip()
                 if not cport:
                     continue
                 # ensure on Caddy's network so Caddy can resolve the app
