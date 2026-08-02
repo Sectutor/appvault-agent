@@ -28,6 +28,13 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "30"))  # seconds between polls
 STORAGE_PATH = os.getenv("STORAGE_PATH", "/data")
 PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
 
+def public_base_host():
+    """Host part of PUBLIC_URL (no scheme), for raw http:// links to non-proxied ports."""
+    pu = PUBLIC_URL or ""
+    pu = pu.replace("https://", "").replace("http://", "").split("/")[0]
+    return pu or "127.0.0.1"
+
+
 def public_base():
     """Base URL for app links: PUBLIC_URL if set, else localhost (local installs)."""
     return PUBLIC_URL if PUBLIC_URL else "http://localhost"
@@ -1820,12 +1827,15 @@ def api_education(app_id):
     else:
         result["launch_url"] = ""
 
-    # Extra ports (setup/secondary) -> host URLs so clients show the RIGHT link
+    # Extra ports are RAW host ports (plain HTTP, not Caddy-routed). Only expose a setup URL
+    # when the extra port differs from the main web port, and use http:// so the link works.
     extra_urls = {}
     for cport in (app_def.get("extra_ports") or {}):
+        if str(cport) == str(app_def.get("container_port", "")):
+            continue  # duplicates the main web port (already on https via Caddy)
         hp = get_container_port_host(cname, cport)
         if hp:
-            extra_urls[cport] = f"{public_base()}:{hp}{path}"
+            extra_urls[cport] = f"http://{public_base_host()}:{hp}{path}"
     result["extra_urls"] = extra_urls
     result["setup_url"] = list(extra_urls.values())[0] if extra_urls else None
     
