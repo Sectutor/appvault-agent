@@ -828,7 +828,7 @@ def _do_install(app_id):
         # Monitoring consoles publish NO host ports. They are reached ONLY via Caddy
         # reverse_proxy across the shared bridge net (Caddy exposes :29001/:29002/:29003).
         pass
-    elif container_port:
+    elif container_port and (_is_proxy_disabled(app_id) or app_def.get("publish_host_port")):
         host_port = _stable_host_port(container_name, app_id, container_port)
         run_args.extend(["-p", f"{host_port}:{container_port}"])
 
