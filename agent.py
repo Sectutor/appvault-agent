@@ -413,6 +413,40 @@ def _https_port(app_id):
     return 20000 + (h % 9000)
 
 
+def _app_https_ports():
+    """Stable, collision-free https port per catalog app (sorted by id, skip taken ports).
+
+    The raw hash can collide (central DBs all hit 28449), which makes Caddy refuse the
+    config ("ambiguous site definition"). This assigns each non-hidden, non-central app a
+    unique port deterministically so routes/publish/launch URLs always agree.
+    """
+    result = {}
+    used = set()
+    try:
+        apps = catalog_cache.get("apps", [])
+    except Exception:
+        apps = []
+    for a in sorted(apps, key=lambda x: x.get("id", "")):
+        aid = a.get("id", "")
+        if not aid or a.get("hidden") or aid.startswith("central-"):
+            continue
+        h = _https_port(aid)
+        while h in used or h in (443, 29001, 29002):
+            h += 1
+            if h > 28999:
+                h = 20000
+        used.add(h)
+        result[aid] = h
+    return result
+
+
+
+    """Deterministic HTTPS proxy port for an app (20000-28999), used for per-app HTTPS."""
+    import hashlib
+    h = int(hashlib.sha256(("https:" + app_id).encode()).hexdigest(), 16)
+    return 20000 + (h % 9000)
+
+
 def _sync_caddy_apps():
     """Durable: auto-register installed apps as HTTPS reverse-proxy paths in Caddy.
     Rebuilds the managed apps.conf (handle_path /<app-id>/ -> app-<id>:<cport>) and reloads
@@ -426,9 +460,12 @@ def _sync_caddy_apps():
             for line in out.strip().splitlines():
                 parts = line.split("\t")
                 cname = parts[0].strip()
-                app_id = parts[1].strip() if len(parts) > 1 else cname.replace("app-", "", 1)
+                app_id = parts[1].strip() if len(parts) > 1 and parts[1].strip() else cname.replace("app-", "", 1)
                 # skip apps that are marked VPN/network-only (no web UI to proxy)
                 if _is_proxy_disabled(app_id):
+                    continue
+                # skip central infra DBs/cache (no web UI to reverse-proxy)
+                if app_id.startswith("central-"):
                     continue
                 # choose the web container port: prefer the catalog's container_port (correct
                 # per-app web UI), else fall back to the app's internal port via docker port.
@@ -456,7 +493,7 @@ def _sync_caddy_apps():
                 # ensure on Caddy's network so Caddy can resolve the app
                 _docker("network", "connect", _caddy_net(), cname)
                 # per-app HTTPS port serving the app at ROOT (no subpath breakage)
-                hport = _https_port(app_id)
+                hport = _app_https_ports().get(app_id, _https_port(app_id))
                 rules.append(":" + str(hport) + " {")
                 rules.append("    tls /etc/caddy/certs/cert.pem /etc/caddy/certs/key.pem")
                 rules.append("    reverse_proxy " + cname + ":" + cport)
@@ -482,6 +519,7 @@ def _ensure_caddy_publishes():
     no drift/orphan recreation and no manual port edits are needed.
     """
     try:
+        import re
         # needed https ports: from the managed apps (what _sync_caddy_apps routes)
         ports = ["443", "29001", "29002"]
         ok, out = _docker("ps", "--filter", "label=appvault.managed=true",
@@ -494,7 +532,9 @@ def _ensure_caddy_publishes():
                 app_id = cname[4:]
                 if _is_proxy_disabled(app_id):
                     continue
-                hp = str(_https_port(app_id))
+                if app_id.startswith("central-"):
+                    continue
+                hp = str(_app_https_ports().get(app_id, _https_port(app_id)))
                 if hp not in ports:
                     ports.append(hp)
         # locate the compose file (mounted /opt/appvault)
@@ -515,18 +555,19 @@ def _ensure_caddy_publishes():
         if ports_i == -1 or vols_i == -1 or vols_i <= ports_i:
             return
         block = txt[ports_i:vols_i]
+        # existing published ports (bare form "PORT:PORT" with quotes)
         have = set()
         for ln in block.split("\n"):
-            s = ln.strip()
-            if s.startswith('- "') and ':' in s:
-                have.add(s)
+            m2 = re.match(r'\s*-\s*"(\d+):(\d+)"', ln)
+            if m2:
+                have.add(m2.group(1))
         need_lines = set()
         for p in ports:
-            need_lines.add('      - "%s:%s"' % (p, p))
-        missing = need_lines - have
+            need_lines.add(p)
+        missing = sorted(need_lines - have)
         if not missing:
             return  # already all published
-        insert = "\n".join(sorted(missing))
+        insert = "\n".join('      - "%s:%s"' % (p, p) for p in missing)
         new_block = block.rstrip("\n") + "\n" + insert + "\n"
         txt = txt[:ports_i] + new_block + txt[vols_i:]
         open(cf, "w", encoding="utf-8").write(txt)
@@ -914,7 +955,7 @@ def _do_install(app_id):
         from heimdall_bridge import add_heimdall_tile
         # Reach the app securely via its deterministic HTTPS proxy port (Caddy), not the raw HTTP docker port.
         if not _is_proxy_disabled(app_id):
-            tile_url = f"{public_base()}:{_https_port(app_id)}"
+            tile_url = f"{public_base()}:{_app_https_ports().get(app_id, _https_port(app_id))}"
         else:
             container_port = app_def.get("container_port", "")
             host_port = get_container_host_port(container_name)
@@ -1333,7 +1374,7 @@ def api_catalog():
         if status in ("installed", "stopped"):
             # Per-app HTTPS port serving at root (+ web_path if the app serves under a subpath,
             # e.g. pihole at /admin/) so Launch opens the correct location.
-            hpj = _https_port(app["id"])
+            hpj = _app_https_ports().get(app["id"], _https_port(app["id"]))
             wp = (app.get("web_path") or "").strip("/")
             launch = f"{public_base()}:{hpj}/"
             if wp:
@@ -1771,6 +1812,9 @@ def api_education(app_id):
             port = _mon_port
         else:
             result["launch_url"] = ""
+    elif app_id in _app_https_ports():
+        result["launch_url"] = f"{public_base()}:{_app_https_ports()[app_id]}{path}"
+        result["host_port"] = _app_https_ports()[app_id]
     elif port:
         result["launch_url"] = f"{public_base()}:{port}{path}"
     else:
