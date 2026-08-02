@@ -56,7 +56,7 @@ def add_cors_headers(response):
 # without a pre-provisioned API key. Mutating/admin actions (install/uninstall/restart)
 # still require a valid X-Api-Key.
 PUBLIC_READ_PREFIXES = ("/api/catalog", "/api/health", "/api/info", "/api/agent/status",
-                        "/api/apps/health", "/api/education/", "/api/icon/", "/api/ping/", "/api/security")
+                        "/api/apps/health", "/api/education/", "/api/icon/", "/api/ping/", "/api/security", "/api/monitoring")
 
 @app.before_request
 def require_api_key():
@@ -573,6 +573,57 @@ def _create_postgres_db(cname, db_name, db_user, db_pass):
                 f"GRANT ALL PRIVILEGES ON DATABASE {db_name} TO {db_user}", timeout=10)
     print(f"[agent] PostgreSQL: created DB '{db_name}', user '{db_user}'")
 
+MONITORING_IDS = ("portainer", "uptime-kuma", "netdata")
+
+def _monitoring_health_dir(app_id):
+    """Host path where a monitoring app's data lives (wiped on uninstall)."""
+    base = os.environ.get("APP_DATA_HOST_PATH", "") or os.environ.get("APP_DATA_DIR", "")
+    return os.path.join(base, app_id) if base else ""
+
+def _bootstrap_portainer():
+    """Create Portainer admin via its bootstrap API with a fresh random password."""
+    import json as _json, random, string as _string, base64 as _b64
+    user = os.getenv("PORTAINER_ADMIN_USER", "admin")
+    newpw = "".join(random.choices(_string.ascii_letters + _string.digits, k=16))
+
+    # 1) read setup token from portainer logs (via the docker socket the agent holds)
+    ok, logs = _docker("logs", "app-portainer", capture=True)
+    tok = ""
+    if ok and logs:
+        for line in str(logs).splitlines():
+            if "setup_token=" in line:
+                try:
+                    tok = line.split("setup_token=")[1].split()[0].strip()
+                    if tok:
+                        break
+                except Exception:
+                    pass
+    if not tok:
+        return (None, None)
+
+    # 2) POST admin/init from inside the caddy container (same bridge net; no host publish)
+    body = _json.dumps({"Username": user, "Password": newpw, "ConfirmPassword": newpw})
+    body_b64 = _b64.b64encode(body.encode()).decode()
+    tok_b64 = _b64.b64encode(tok.encode()).decode()
+    scraper = (
+        "echo " + tok_b64 + " | base64 -d > /tmp/pt_tok; "
+        + "echo " + body_b64 + " | base64 -d > /tmp/pt_init.json; "
+        + "TOK=$(cat /tmp/pt_tok); "
+        + "wget -qO- -T 20 "
+        + "--header=\"X-Setup-Token: $TOK\" "
+        + "--header=\"Content-Type: application/json\" "
+        + "--post-file=/tmp/pt_init.json "
+        + "http://app-portainer:9000/api/users/admin/init; echo -n"
+    )
+    _docker("exec", "appvault-caddy", "sh", "-c", scraper, capture=True)
+
+    # 3) store fresh secret so the Manage tab shows it
+    try:
+        _mon_sec("portainer", "set", newpw)
+    except Exception:
+        pass
+    return (user, newpw)
+
 def _do_install(app_id):
     """Install a Docker app locally using Docker CLI."""
     global _install_progress
@@ -637,11 +688,15 @@ def _do_install(app_id):
     # Port mappings - use a STABLE host port (reuse existing or derive from app_id) so
     # the port doesn't drift on restart (fixes Launch links + firewall rules).
     container_port = app_def.get("container_port")
-    if container_port:
+    if app_id in MONITORING_IDS:
+        # Monitoring consoles publish NO host ports. They are reached ONLY via Caddy
+        # reverse_proxy across the shared bridge net (Caddy exposes :29001/:29002/:29003).
+        pass
+    elif container_port:
         host_port = _stable_host_port(container_name, app_id, container_port)
         run_args.extend(["-p", f"{host_port}:{container_port}"])
-    
-    extra_ports = app_def.get("extra_ports", {})
+
+    extra_ports = app_def.get("extra_ports", {}) if app_id not in MONITORING_IDS else {}
     # extra_ports format: "container_port": "${ENV_VAR:-host_port}"
     for container_port_str, host_port_str in extra_ports.items():
         host_port = host_port_str
@@ -734,6 +789,11 @@ def _do_install(app_id):
         print(f"[agent] Heimdall tile not added: {e}")
     
     _set_progress_done(app_id, f"{app_def.get('name', app_id)} installed!")
+    if app_id == "portainer":
+        try:
+            _bootstrap_portainer()
+        except Exception as e:
+            print(f"[agent] portainer bootstrap error: {e}")
     _sync_caddy_apps()  # register HTTPS reverse-proxy path for this app
     print(f"[agent] {app_id} installed successfully")
 
@@ -930,6 +990,22 @@ def _do_uninstall(app_id):
     except Exception as e:
         pass
     
+    # Monitoring tools (Portainer/Kuma/Netdata): clear per-install secret + wipe data
+    # so uninstall removes the admin password entirely and reinstalling gets a fresh one.
+    if app_id in ("portainer", "uptime-kuma", "netdata"):
+        try:
+            _mon_sec(app_id, "clear")
+        except Exception:
+            pass
+        try:
+            host_dir = _monitoring_health_dir(app_id)  # APP_DATA_HOST_PATH/<id>
+            if host_dir and os.path.isdir(host_dir):
+                import shutil
+                shutil.rmtree(host_dir, ignore_errors=True)
+                print(f"[agent] wiped {app_id} data dir {host_dir}")
+        except Exception as e:
+            pass
+
     _sync_caddy_apps()  # remove HTTPS reverse-proxy path for this app
     print(f"[agent] {app_id} uninstalled")
 
@@ -1184,6 +1260,77 @@ def api_info():
         "central": CENTRAL_URL,
         "is_registered": bool(agent_state.get("api_key")),
         "hostname": socket.gethostname(),
+    })
+
+def _mon_sec(mon_id, action="get", value=None):
+    """Store/read the admin secret for a monitoring app in agent_state.
+
+    Stored per-install: set on bootstrap-install, cleared on uninstall so a
+    reinstall gets a fresh password. Keyed agent_state["monitoring"]["<id>"]["admin_pass"].
+    """
+    m = agent_state.setdefault("monitoring", {})
+    entry = m.setdefault(mon_id, {})
+    if action == "set" and value is not None:
+        entry["admin_pass"] = value
+        save_agent_state(agent_state)
+    elif action == "get":
+        return entry.get("admin_pass", "")
+    elif action == "clear":
+        m.pop(mon_id, None)
+        save_agent_state(agent_state)
+    return ""
+
+@app.route("/api/monitoring")
+def api_monitoring():
+    """Return monitoring endpoints + admin credentials.
+
+    Passwords live in agent_state, shown ONLY while the container runs.
+    Uninstalling a monitoring app clears its secret (fresh on reinstall).
+    """
+    base = os.getenv("PUBLIC_URL", "").rstrip("/")
+    host = base
+    host = host.replace("https://", "").replace("http://", "") or socket.gethostname()
+    if not base:
+        try:
+            ip = subprocess.run(["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=3)
+            if ip.returncode == 0:
+                t = ip.stdout.strip().split("\n")
+                if t and t[0].strip():
+                    host = t[0].strip()
+        except Exception:
+            pass
+
+    p_port = os.getenv("PORTAINER_PORT", "29001")
+    k_port = os.getenv("KUMA_PORT", "29002")
+    n_port = os.getenv("NETDATA_PORT", "29003")
+
+    portainer_ok = container_running("app-portainer")
+    kuma_ok = container_running("app-uptime-kuma")
+    netdata_ok = container_running("app-netdata")
+    p_user = os.getenv("PORTAINER_ADMIN_USER", "admin")
+    # Password shown only while Portainer is running (per-install secret).
+    p_pass = _mon_sec("portainer") if portainer_ok else ""
+
+    enabled = portainer_ok or kuma_ok or netdata_ok
+    return jsonify({
+        "enabled": enabled,
+        "portainer": {
+            "url": "https://%s:%s/" % (host, p_port) if host and portainer_ok else "",
+            "admin_user": p_user,
+            "admin_pass": p_pass,
+            "port": p_port,
+            "running": portainer_ok,
+        },
+        "uptime_kuma": {
+            "url": "https://%s:%s/" % (host, k_port) if host and kuma_ok else "",
+            "port": k_port,
+            "running": kuma_ok,
+        },
+        "netdata": {
+            "url": "https://%s:%s/" % (host, n_port) if host and netdata_ok else "",
+            "port": n_port,
+            "running": netdata_ok,
+        },
     })
 
 @app.route("/api/apps/health")
