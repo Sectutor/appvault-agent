@@ -530,13 +530,22 @@ def _ensure_caddy_publishes():
         # needed https ports: from the managed apps (what _sync_caddy_apps routes)
         ports = ["443", "29001", "29002"]
         ok, out = _docker("ps", "-a", "--filter", "label=appvault.managed=true",
-                          "--format", "{{.Names}}", capture=True)
+                          "--format", "{{.Names}}\t{{.Label \"appvault.app\"}}", capture=True)
         if ok and out:
-            for cname in out.strip().splitlines():
-                cname = cname.strip()
-                if not cname.startswith("app-"):
+            for line in out.strip().splitlines():
+                parts = line.split("\t")
+                cname = parts[0].strip()
+                if not cname:
                     continue
-                app_id = cname[4:]
+                # ADDITIVE: also publish HTTPS ports for stack-app services that carry
+                # the appvault.app label (e.g. compose services labeled appvault.app=twenty).
+                # Single-image app-* containers behave exactly as before.
+                if cname.startswith("app-"):
+                    app_id = cname[4:]
+                elif len(parts) > 1 and parts[1].strip():
+                    app_id = parts[1].strip()
+                else:
+                    continue
                 if _is_proxy_disabled(app_id):
                     continue
                 if app_id.startswith("central-"):
@@ -1068,7 +1077,20 @@ def _do_install_stack(app_id):
         if not os.path.exists(compose_path):
             compose_path = os.path.join(repo_dir, "docker-compose.yaml")
         print(f"[agent] Using compose file: {compose_path}")
-    
+
+    # ADDITIVE: direct-HTTP compose URLs (e.g. central-hosted compose) are downloaded
+    # instead of cloned. Existing raw.githubusercontent.com stack apps are unaffected.
+    if not repo_url and (compose_url.startswith("http://") or compose_url.startswith("https://")):
+        print(f"[agent] Downloading compose from {compose_url}")
+        _set_progress(app_id, "Downloading compose configuration...", 20)
+        import subprocess
+        r = subprocess.run(["curl", "-fsSL", compose_url, "-o", compose_path],
+                           capture_output=True, text=True, timeout=180)
+        if r.returncode != 0 or not os.path.exists(compose_path) or os.path.getsize(compose_path) == 0:
+            _set_progress_error(app_id, f"Failed to download compose: {(r.stderr or '')[:200]}")
+            raise Exception(f"Failed to download compose for '{app_id}'")
+        print(f"[agent] Compose downloaded to {compose_path}")
+
     _set_progress(app_id, "Pulling images...", 40)
     ok, pull_out = _docker("compose", "-f", compose_path, "pull", capture=True, timeout=600)
     if not ok:
@@ -1151,7 +1173,14 @@ def _do_install_stack(app_id):
         add_heimdall_tile(app_name, tile_url, app_id, app_def.get("description", ""))
     except Exception as e:
         print(f"[agent] Tile not added: {e}")
-    
+
+    # ADDITIVE: register any labeled stack services with Caddy's HTTPS proxy so the
+    # store's Launch URL works for stack apps (same as single-image apps).
+    try:
+        _sync_caddy_apps()
+    except Exception as e:
+        print(f"[agent] Caddy sync failed for stack app: {e}")
+
     _set_progress_done(app_id, f"{app_name} installed!")
     print(f"[agent] {app_id} stack installed")
 
@@ -1449,6 +1478,13 @@ def get_app_status_local(app_id):
         return "installed"
     if container_exists(cname):
         return "stopped"
+    # ADDITIVE: stack apps run compose containers labeled appvault.app=<app_id>
+    # (e.g. twenty-server-1), so they are reported installed/stopped like single-image apps.
+    ok, out = _docker("ps", "-a", "--filter", f"label=appvault.app={app_id}",
+                      "--format", "{{.Names}}", capture=True)
+    if ok and out and out.strip():
+        first = out.strip().splitlines()[0].strip()
+        return "installed" if container_running(first) else "stopped"
     return "available"
 
 @app.route("/api/catalog")
@@ -1943,6 +1979,21 @@ def api_education(app_id):
     result["is_running"] = container_running(cname)
     result["host_port"] = get_container_host_port(cname) or app_def.get("container_port", "")
     result["web_path"] = app_def.get("web_path", "/")
+    # ADDITIVE: stack apps run compose containers labeled appvault.app=<app_id>;
+    # report live status/host port from the first labeled container if app-<id> is absent.
+    if not result["is_running"]:
+        okc, outc = _docker("ps", "-a", "--filter", f"label=appvault.app={app_id}",
+                            "--format", "{{.Names}}", capture=True)
+        if okc and outc and outc.strip():
+            sc = outc.strip().splitlines()[0].strip()
+            result["is_running"] = container_running(sc)
+            if not result["host_port"] or result["host_port"] == app_def.get("container_port", ""):
+                okp, outp = _docker("port", sc, capture=True)
+                if okp and outp and outp.strip():
+                    first = outp.strip().splitlines()[0].strip()
+                    if "->" in first:
+                        result["host_port"] = first.split("->")[1].split("/")[0].strip()
+    # END ADDITIVE
     
     # Build launch URL.
     # Monitoring apps publish NO host ports and are reached ONLY via Caddy on the
