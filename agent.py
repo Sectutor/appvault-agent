@@ -842,6 +842,10 @@ def _do_install(app_id):
     extra_ports = app_def.get("extra_ports", {}) if app_id not in MONITORING_IDS else {}
     # extra_ports format: "container_port": "${ENV_VAR:-host_port}"
     for container_port_str, host_port_str in extra_ports.items():
+        # skip extra ports that duplicate the main web port (would create a raw http port
+        # that users hit with https and get SSL errors). The main port is Caddy-routed.
+        if container_port and str(container_port_str) == str(container_port):
+            continue
         host_port = host_port_str
         if isinstance(host_port_str, str) and "${" in host_port_str and ":-" in host_port_str:
             # Extract default value from ${VAR:-default}
