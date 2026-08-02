@@ -2092,12 +2092,26 @@ def api_install_status(app_id):
 
 @app.route("/api/uninstall/<app_id>", methods=["POST"])
 def api_uninstall(app_id):
-    """Uninstall an app locally."""
-    try:
-        _do_uninstall(app_id)
-        return jsonify({"status": "ok", "app_id": app_id, "message": f"{app_id} uninstalled"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    """Uninstall an app locally in the background (returns immediately)."""
+    _set_progress(app_id, "Uninstalling...", 5)
+    def _uninstall_thread():
+        try:
+            _set_progress(app_id, "Removing container...", 30)
+            _do_uninstall(app_id)
+            _set_progress_done(app_id, f"{app_id} uninstalled")
+        except Exception as e:
+            _set_progress_error(app_id, str(e))
+    threading.Thread(target=_uninstall_thread, daemon=True).start()
+    return jsonify({"status": "started", "app_id": app_id, "message": f"Uninstalling {app_id}..."})
+
+@app.route("/api/uninstall/<app_id>/status", methods=["GET"])
+def api_uninstall_status(app_id):
+    """Get uninstall progress."""
+    prog = _install_progress.get(app_id, {
+        "stage": "unknown", "message": "No uninstall in progress",
+        "percent": 0, "done": True, "error": ""
+    })
+    return jsonify(prog)
 
 @app.route("/api/restart/<app_id>", methods=["POST"])
 def api_restart(app_id):
