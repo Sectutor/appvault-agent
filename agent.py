@@ -781,9 +781,13 @@ def _do_install(app_id):
     # Add Heimdall tile
     try:
         from heimdall_bridge import add_heimdall_tile
-        container_port = app_def.get("container_port", "")
-        host_port = get_container_host_port(container_name)
-        tile_url = f"{public_base()}:{host_port}" if host_port else f"{public_base()}:{container_port}"
+        # Reach the app securely via its deterministic HTTPS proxy port (Caddy), not the raw HTTP docker port.
+        if not _is_proxy_disabled(app_id):
+            tile_url = f"{public_base()}:{_https_port(app_id)}"
+        else:
+            container_port = app_def.get("container_port", "")
+            host_port = get_container_host_port(container_name)
+            tile_url = f"{public_base()}:{host_port}" if host_port else f"{public_base()}:{container_port}"
         add_heimdall_tile(app_def.get("name", app_id), tile_url, app_id, app_def.get("description", ""))
     except Exception as e:
         print(f"[agent] Heimdall tile not added: {e}")
@@ -984,7 +988,7 @@ def _do_uninstall(app_id):
     # Remove Heimdall tile
     try:
         from heimdall_bridge import remove_heimdall_tile
-        tile_url = f"{public_base()}:{get_container_host_port(container_name) or ''}"
+        tile_url = f"{public_base()}:{_https_port(app_id)}" if not _is_proxy_disabled(app_id) else f"{public_base()}:{get_container_host_port(container_name) or ''}"
         if tile_url:
             remove_heimdall_tile(tile_url)
     except Exception as e:
