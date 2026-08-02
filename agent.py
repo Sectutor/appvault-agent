@@ -62,7 +62,7 @@ def add_cors_headers(response):
 # Read-only catalog/status endpoints (GET) are PUBLIC so a fresh install shows free apps
 # without a pre-provisioned API key. Mutating/admin actions (install/uninstall/restart)
 # still require a valid X-Api-Key.
-PUBLIC_READ_PREFIXES = ("/api/catalog", "/api/health", "/api/info", "/api/agent/status",
+PUBLIC_READ_PREFIXES = ("/api/catalog", "/api/health", "/api/info", "/api/agent/status", "/api/stats",
                         "/api/apps/health", "/api/education/", "/api/icon/", "/api/ping/", "/api/security", "/api/monitoring")
 
 @app.before_request
@@ -1211,6 +1211,19 @@ def _do_restart(app_id):
     else:
         raise Exception(f"Failed to restart: {err}")
 
+def _do_stop(app_id):
+    """Stop a Docker app (releases memory; container + data preserved)."""
+    if not docker_available():
+        raise Exception("Docker unavailable")
+    container_name = f"app-{app_id}"
+    if not container_exists(container_name):
+        raise Exception(f"Container '{container_name}' not found")
+    ok, err = _docker("stop", container_name, capture=True)
+    if ok:
+        print(f"[agent] {app_id} stopped")
+    else:
+        raise Exception(f"Failed to stop: {err}")
+
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # APP HEALTH MONITOR
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -1422,6 +1435,61 @@ def api_health():
         "catalog_version": catalog_cache.get("version", 0),
         "catalog_apps": len(catalog_cache.get("apps", [])),
         "version": APP_VERSION,
+    })
+
+@app.route("/api/stats")
+def api_stats():
+    """System + per-app memory/disk stats for the sidebar."""
+    import shutil as _shutil
+    mem = {}
+    try:
+        with open("/proc/meminfo") as f:
+            mi = {}
+            for line in f:
+                parts = line.split(":")
+                if len(parts) == 2:
+                    k = parts[0].strip()
+                    try:
+                        mi[k] = int(parts[1].strip().split()[0])
+                    except Exception:
+                        pass
+        total = mi.get("MemTotal", 0) * 1024
+        avail = mi.get("MemAvailable", mi.get("MemFree", 0)) * 1024
+        mem = {"total": total, "used": total - avail, "available": avail}
+    except Exception:
+        pass
+    disk = {}
+    try:
+        du = _shutil.disk_usage("/")
+        disk = {"total": du.total, "used": du.used, "free": du.free}
+    except Exception:
+        pass
+    apps_mem = {}
+    try:
+        ok, out = _docker("stats", "--no-stream", "--format", "{{.Name}}\t{{.MemUsage}}\t{{.MemPerc}}", capture=True)
+        if ok and out:
+            for line in out.strip().splitlines():
+                parts = line.split("\t")
+                if len(parts) >= 3 and parts[0].startswith("app-"):
+                    apps_mem[parts[0][4:]] = {"usage": parts[1].strip(), "percent": parts[2].strip()}
+    except Exception:
+        pass
+    running = stopped = 0
+    try:
+        ok, out = _docker("ps", "-a", "--filter", "label=appvault.managed=true", "--format", "{{.Names}}\t{{.Status}}", capture=True)
+        if ok and out:
+            for line in out.strip().splitlines():
+                if "\tUp" in line:
+                    running += 1
+                elif "app-" in line:
+                    stopped += 1
+    except Exception:
+        pass
+    return jsonify({
+        "memory": mem,
+        "disk": disk,
+        "containers": {"running": running, "stopped": stopped},
+        "apps_memory": apps_mem,
     })
 
 @app.route("/api/info")
@@ -1987,6 +2055,15 @@ def api_restart(app_id):
     try:
         _do_restart(app_id)
         return jsonify({"status": "ok", "app_id": app_id, "message": f"{app_id} restarted"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/stop/<app_id>", methods=["POST"])
+def api_stop(app_id):
+    """Stop an app locally (frees its memory; data preserved)."""
+    try:
+        _do_stop(app_id)
+        return jsonify({"status": "ok", "app_id": app_id, "message": f"{app_id} stopped"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
