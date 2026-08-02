@@ -77,7 +77,7 @@ def require_api_key():
         # license, security, and app install/uninstall/restart. Install is a local user
         # action on a private install; the agent API key is for central control jobs.
         if path.startswith(("/api/license", "/api/security", "/api/install",
-                            "/api/uninstall", "/api/restart")):
+                            "/api/uninstall", "/api/restart", "/api/stop")):
             return None
         is_public_read = request.method == "GET" and path.startswith(PUBLIC_READ_PREFIXES)
         requires_key = not is_public_read
