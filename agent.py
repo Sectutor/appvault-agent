@@ -1156,17 +1156,67 @@ def _do_install_stack(app_id):
     print(f"[agent] {app_id} stack installed")
 
 def _do_uninstall(app_id):
-    """Uninstall a Docker app."""
+    """Uninstall a Docker app AND free its disk (image + data + volumes)."""
     if not docker_available():
         raise Exception("Docker unavailable")
-    
+
     container_name = f"app-{app_id}"
     if not container_exists(container_name):
         print(f"[agent] {app_id} not found, skipping")
         return
-    
+
+    # capture image + volumes/binds BEFORE removing the container
+    image = None
+    named_volumes = []
+    bind_dirs = []
+    try:
+        ok, insp = _docker("inspect", container_name, capture=True)
+        if ok and insp:
+            import json as _json
+            info = _json.loads(insp)[0]
+            image = info.get("Config", {}).get("Image")
+            for m in info.get("Mounts", []):
+                if m.get("Type") == "volume" and m.get("Name"):
+                    named_volumes.append(m["Name"])
+                elif m.get("Type") == "bind" and m.get("Source"):
+                    bind_dirs.append(m["Source"])
+    except Exception as e:
+        print(f"[agent] uninstall inspect warn: {e}")
+
     _docker("stop", container_name)
     _docker("rm", container_name)
+
+    # 1. remove the app's docker image (frees GBs). Ignore if shared/in-use.
+    if image:
+        ok, err = _docker("image", "rm", image, capture=True)
+        if ok:
+            print(f"[agent] removed image {image}")
+        else:
+            print(f"[agent] image {image} not removed ({str(err)[:60]}) - shared/in-use")
+    # 2. clear dangling layers left behind (safe: only untagged)
+    _docker("image", "prune", "-f", capture=True)
+
+    # 3. remove the app's named volumes (skip shared central-* infra)
+    for vol in named_volumes:
+        if str(vol).startswith("central-"):
+            continue
+        _docker("volume", "rm", vol, capture=True)
+        print(f"[agent] removed volume {vol}")
+
+    # 4. remove the app's data dir (unified /data/apps/<id>) + any bind mounts
+    app_data_host = os.environ.get("APP_DATA_HOST_PATH", "")
+    host_dir = ""
+    if app_data_host:
+        host_dir = os.path.join(app_data_host, app_id).replace(os.sep, "/")
+        if os.path.isdir(host_dir):
+            import shutil
+            shutil.rmtree(host_dir, ignore_errors=True)
+            print(f"[agent] removed app data dir {host_dir}")
+    for d in bind_dirs:
+        if d and d != host_dir and os.path.isdir(d):
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
+            print(f"[agent] removed bind dir {d}")
     
     # Remove Heimdall tile
     try:
