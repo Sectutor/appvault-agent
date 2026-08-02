@@ -1302,13 +1302,30 @@ def _get_container_started_at(cname):
     return 0
 
 def _get_internal_port(cname):
-    """Get the container's internal port from Docker port mapping."""
-    ok, out = _docker("port", cname, capture=True)
-    if ok and out:
-        for line in out.strip().split('\n'):
-            if '/tcp' in line:
-                parts = line.split('->')
-                return parts[0].split('/')[0].strip()
+    """Get the container's INTERNAL web port (catalog container_port, else docker inspect).
+
+    Apps no longer publish raw host ports (only Caddy does), so `docker port` returns
+    nothing. Use the catalog's container_port (the app's real internal web port) so
+    health checks curl the correct port inside the container.
+    """
+    app_id = cname.replace("app-", "", 1)
+    for a in catalog_cache.get("apps", []):
+        if a["id"] == app_id and a.get("container_port"):
+            return str(a["container_port"])
+    try:
+        ok, out = _docker("inspect", cname, "--format", "{{json .Config.ExposedPorts}}", capture=True)
+        if ok and out:
+            import json as _json
+            d = _json.loads(out)
+            ports = [k.split("/")[0] for k in d if k.endswith("/tcp")]
+            if ports:
+                # prefer a likely web port
+                for p in ("80", "8080", "3000", "3001", "8000", "8096", "2342", "5678"):
+                    if p in ports:
+                        return p
+                return ports[0]
+    except Exception:
+        pass
     return "80"
 
 def _is_app_alive(cname, internal_port):
