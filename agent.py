@@ -1616,10 +1616,25 @@ def api_education(app_id):
     result["host_port"] = get_container_host_port(cname) or app_def.get("container_port", "")
     result["web_path"] = app_def.get("web_path", "/")
     
-    # Build launch URL
+    # Build launch URL.
+    # Monitoring apps publish NO host ports and are reached ONLY via Caddy on the
+    # monitoring HTTPS ports (29001/29002/29003). Use the Caddy port, not the
+    # container port (9000/3001/19999), so the store shows the WORKING link.
     port = result["host_port"]
     path = result["web_path"]
-    if port:
+    if app_id in MONITORING_IDS:
+        _mon_port = {
+            "portainer": os.getenv("PORTAINER_PORT", "29001"),
+            "uptime-kuma": os.getenv("KUMA_PORT", "29002"),
+            "netdata": os.getenv("NETDATA_PORT", "29003"),
+        }.get(app_id, "")
+        if _mon_port:
+            result["launch_url"] = f"{public_base()}:{_mon_port}{path}"
+            result["host_port"] = _mon_port
+            port = _mon_port
+        else:
+            result["launch_url"] = ""
+    elif port:
         result["launch_url"] = f"{public_base()}:{port}{path}"
     else:
         result["launch_url"] = ""
