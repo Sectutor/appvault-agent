@@ -391,6 +391,21 @@ def _is_proxy_disabled(app_id):
     return False
 
 
+def _caddy_net():
+    """Return the docker network Caddy is attached to (so apps connect to the net Caddy resolves them on)."""
+    try:
+        import json as _json
+        ok, out = _docker("inspect", "appvault-caddy", "--format", "{{json .NetworkSettings.Networks}}", capture=True)
+        if ok and out:
+            nets = list(_json.loads(out).keys())
+            for n in nets:
+                if n not in ("none", "host", "bridge"):
+                    return n
+    except Exception:
+        pass
+    return os.environ.get("APPVAULT_NETWORK", "appvault_appvault-net")
+
+
 def _https_port(app_id):
     """Deterministic HTTPS proxy port for an app (20000-28999), used for per-app HTTPS."""
     import hashlib
@@ -439,7 +454,7 @@ def _sync_caddy_apps():
                 if not cport:
                     continue
                 # ensure on Caddy's network so Caddy can resolve the app
-                _docker("network", "connect", os.environ.get("APPVAULT_NETWORK", "appvault_appvault-net"), cname)
+                _docker("network", "connect", _caddy_net(), cname)
                 # per-app HTTPS port serving the app at ROOT (no subpath breakage)
                 hport = _https_port(app_id)
                 rules.append(":" + str(hport) + " {")
@@ -453,9 +468,73 @@ def _sync_caddy_apps():
         _docker("exec", "appvault-caddy", "sh", "-c",
                 f"echo {b64} | base64 -d > /etc/caddy/caddy.d/apps.conf")
         _docker("exec", "appvault-caddy", "caddy", "reload", "--config", "/etc/caddy/Caddyfile")
+        _ensure_caddy_publishes()
         print(f"[agent] Caddy app routes synced ({len(rules)//2} apps)")
     except Exception as e:
         print(f"[agent] Caddy sync failed: {e}")
+
+def _ensure_caddy_publishes():
+    """Ensure Caddy publishes the https port for every installed app (plus 443 + monitoring).
+
+    Uses docker compose (the agent has the compose plugin + /opt/appvault mounted): edits the
+    caddy service's ports list in docker-compose.(vps.)yml to include each app's https port,
+    then `docker compose up -d caddy` to apply. This keeps compose as the source of truth, so
+    no drift/orphan recreation and no manual port edits are needed.
+    """
+    try:
+        # needed https ports: from the managed apps (what _sync_caddy_apps routes)
+        ports = ["443", "29001", "29002"]
+        ok, out = _docker("ps", "--filter", "label=appvault.managed=true",
+                          "--format", "{{.Names}}", capture=True)
+        if ok and out:
+            for cname in out.strip().splitlines():
+                cname = cname.strip()
+                if not cname.startswith("app-"):
+                    continue
+                app_id = cname[4:]
+                if _is_proxy_disabled(app_id):
+                    continue
+                hp = str(_https_port(app_id))
+                if hp not in ports:
+                    ports.append(hp)
+        # locate the compose file (mounted /opt/appvault)
+        cf = None
+        for cand in ("/opt/appvault/docker-compose.vps.yml", "/opt/appvault/docker-compose.yml"):
+            if os.path.exists(cand):
+                cf = cand
+                break
+        if not cf:
+            print("[agent] _ensure_caddy_publishes: no compose file found")
+            return
+        txt = open(cf, "r", encoding="utf-8").read()
+        if "caddy:" not in txt:
+            return
+        caddy_i = txt.find("caddy:")
+        ports_i = txt.find("    ports:", caddy_i)
+        vols_i = txt.find("    volumes:", ports_i)
+        if ports_i == -1 or vols_i == -1 or vols_i <= ports_i:
+            return
+        block = txt[ports_i:vols_i]
+        have = set()
+        for ln in block.split("\n"):
+            s = ln.strip()
+            if s.startswith('- "') and ':' in s:
+                have.add(s)
+        need_lines = set()
+        for p in ports:
+            need_lines.add('      - "%s:%s"' % (p, p))
+        missing = need_lines - have
+        if not missing:
+            return  # already all published
+        insert = "\n".join(sorted(missing))
+        new_block = block.rstrip("\n") + "\n" + insert + "\n"
+        txt = txt[:ports_i] + new_block + txt[vols_i:]
+        open(cf, "w", encoding="utf-8").write(txt)
+        # apply via compose (only caddy)
+        _docker("compose", "-f", cf, "up", "-d", "caddy", capture=True, timeout=300)
+        print(f"[agent] Caddy compose ports updated to {len(ports)} ports")
+    except Exception as e:
+        print(f"[agent] _ensure_caddy_publishes failed: {e}")
 
 
 def _provision_database(app_id, app_def):
@@ -743,6 +822,10 @@ def _do_install(app_id):
         if "=" in e:
             key, val = e.split("=", 1)
             expanded = os.path.expandvars(val)
+            # Auto-generate a random secret for __AUTO__ markers (e.g. *_SECRET_KEY)
+            if expanded == "__AUTO__":
+                import secrets as _secrets
+                expanded = _secrets.token_urlsafe(48)
             # Only add if not referencing an unset variable
             if not expanded.startswith("${") or ":-" in expanded:
                 run_args.extend(["-e", f"{key}={expanded}"])
@@ -759,6 +842,30 @@ def _do_install(app_id):
         except Exception:
             pass
         run_args.extend(["-e", "OWNCLOUD_TRUSTED_DOMAINS=" + ",".join(td_hosts)])
+
+    # Provision dependency containers the app requires (Redis/Postgres/etc.)
+    for dep in app_def.get("deps", []):
+        dname = dep.get("name", "")
+        dimg = dep.get("image", "")
+        if not dname or not dimg or container_exists(dname):
+            continue
+        print(f"[agent] Starting dependency {dname} ({dimg})")
+        dargs = ["run", "-d", "--name", dname, "--network", net_name,
+                 "--restart", "unless-stopped",
+                 "--label", f"appvault.app={dname}",
+                 "--label", "appvault.managed=true"]
+        for e in dep.get("env", []):
+            if "=" in e:
+                k2, v2 = e.split("=", 1)
+                dargs.extend(["-e", f"{k2}={os.path.expandvars(v2)}"])
+        for v in dep.get("volumes", []):
+            dargs.extend(["-v", v])
+        dargs.append(dimg)
+        _docker(*dargs, capture=True)
+        try:
+            _docker("network", "connect", _caddy_net(), dname)
+        except Exception:
+            pass
 
     # Add image
     run_args.append(image)
@@ -777,7 +884,13 @@ def _do_install(app_id):
         raise Exception(f"Failed to start container: {err}")
     
     _set_progress(app_id, "Finalizing...", 90)
-    
+
+    # Ensure the app is on Caddy's network so Caddy can reverse-proxy it by name.
+    try:
+        _docker("network", "connect", _caddy_net(), container_name)
+    except Exception:
+        pass
+
     # Add Heimdall tile
     try:
         from heimdall_bridge import add_heimdall_tile
