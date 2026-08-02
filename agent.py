@@ -537,122 +537,136 @@ def _ensure_caddy_publishes():
         print(f"[agent] _ensure_caddy_publishes failed: {e}")
 
 
-def _provision_database(app_id, app_def):
-    """Auto-start central DB if needed and create the app's database."""
-    env_vars = {e.split("=")[0]: e.split("=", 1)[1] for e in app_def.get("env", []) if "=" in e}
-    
-    # Check which central DB is needed
-    central_db = None
-    db_name = None
-    db_user = None
-    db_pass = None
-    
-    for key, val in env_vars.items():
-        if val == "app-central-mariadb" or val == "app-central-mariadb:3306":
-            central_db = "central-mariadb"
-        elif val == "app-central-postgres":
-            central_db = "central-postgres"
-    
-    # Extract DB credentials from env vars
-    for key, val in env_vars.items():
-        if "DB_NAME" in key.upper() or "DB_DATABASE" in key.upper() or "MYSQL_DATABASE" in key.upper() or "DATABASE_NAME" in key.upper():
-            db_name = val
-        if "DB_USER" in key.upper() or "MYSQL_USER" in key.upper() or "DATABASE_USER" in key.upper():
-            db_user = val
-        if "DB_PASS" in key.upper() or "MYSQL_PASSWORD" in key.upper() or "DB_PASSWORD" in key.upper() or "DATABASE_PASSWORD" in key.upper():
-            db_pass = val
-    
-    if not central_db:
-        return  # No central DB needed
-    
-    cname = f"app-{central_db}"
-    
-    # Start central DB if not running
-    if not container_running(cname):
-        # Find central DB in catalog
+def _provision_database(app_id, app_def, env_map=None):
+    """Ensure all shared central services (mariadb/postgres/redis) the app needs are running,
+    then create the app's database inside the central DB.
+
+    ONE central database per engine + a shared redis, started on demand from the catalog.
+    Apps reference app-central-* in env; no per-app DB containers.
+    """
+    if env_map is None:
+        env_map = {e.split("=")[0]: e.split("=", 1)[1] for e in app_def.get("env", []) if "=" in e}
+
+    # collect ALL central services referenced in env
+    needed = set()
+    for key, val in env_map.items():
+        v = str(val)
+        if v == "app-central-mariadb" or v == "app-central-mariadb:3306":
+            needed.add("central-mariadb")
+        elif v == "app-central-postgres":
+            needed.add("central-postgres")
+        elif "app-central-redis" in v:
+            needed.add("central-redis")
+    if not needed:
+        return
+
+    # start each needed central service if not running
+    for central_db in needed:
+        cname = "app-" + central_db
+        if container_running(cname):
+            continue
         db_def = None
         for a in catalog_cache.get("apps", []):
             if a["id"] == central_db:
                 db_def = a
                 break
-        if db_def:
-            print(f"[agent] Starting central DB: {central_db}")
-            # Build minimal run args for central DB
-            image = db_def.get("image", "mariadb:10.11")
-            net_name = os.environ.get("APPVAULT_NETWORK", "webdev_appvault-net")
-            run_args = [
-                "run", "-d",
-                "--name", cname,
-                "--network", net_name,
-                "--restart", "unless-stopped",
-                "-p", "3306" if central_db == "central-mariadb" else "5432",
-                "--label", "appvault.managed=true",
-            ]
-            for vol in db_def.get("volumes", []):
-                run_args.extend(["-v", vol])
-            for e in db_def.get("env", []):
-                run_args.extend(["-e", e])
-            run_args.append(image)
-            ok, err = _docker(*run_args, capture=True)
-            if ok:
-                print(f"[agent] Central DB {central_db} started")
-                time.sleep(5)  # Give it a moment
-            else:
-                print(f"[agent] Failed to start central DB: {err}")
-                return
-    
-    # Create database and user if needed
-    if central_db == "central-mariadb":
-        _create_mariadb_db(cname, db_name, db_user, db_pass)
-    elif central_db == "central-postgres":
-        _create_postgres_db(cname, db_name, db_user, db_pass)
+        if not db_def:
+            print(f"[agent] central DB {central_db} not in catalog")
+            continue
+        print(f"[agent] Starting central DB: {central_db}")
+        image = db_def.get("image", "mariadb:10.11")
+        net_name = os.environ.get("APPVAULT_NETWORK", "webdev_appvault-net")
+        cport = {"central-mariadb": "3306", "central-postgres": "5432", "central-redis": "6379"}.get(central_db, "3306")
+        run_args = [
+            "run", "-d",
+            "--name", cname,
+            "--network", net_name,
+            "--restart", "unless-stopped",
+            "-p", cport,
+            "--label", "appvault.managed=true",
+        ]
+        for vol in db_def.get("volumes", []):
+            run_args.extend(["-v", vol])
+        for e in db_def.get("env", []):
+            run_args.extend(["-e", e])
+        run_args.append(image)
+        ok, err = _docker(*run_args, capture=True)
+        if ok:
+            print(f"[agent] Central DB {central_db} started")
+            time.sleep(5)
+        else:
+            print(f"[agent] Failed to start central DB {central_db}: {err}")
+
+    # create the app's DB in the central DB engine (not redis)
+    if "central-postgres" in needed:
+        db_name = db_user = db_pass = None
+        for key, val in env_map.items():
+            k = key.upper()
+            if "DBNAME" in k or "DB_NAME" in k or "DATABASE_NAME" in k:
+                db_name = val
+            if "DBUSER" in k or "DB_USER" in k or "DATABASE_USER" in k:
+                db_user = val
+            if "DBPASS" in k or "DB_PASS" in k or "DATABASE_PASSWORD" in k:
+                db_pass = val
+        _create_postgres_db("app-central-postgres", db_name, db_user, db_pass)
+    elif "central-mariadb" in needed:
+        db_name = db_user = db_pass = None
+        for key, val in env_map.items():
+            k = key.upper()
+            if "MYSQL_DATABASE" in k or "DB_NAME" in k or "DATABASE_NAME" in k:
+                db_name = val
+            if "MYSQL_USER" in k or "DB_USER" in k or "DATABASE_USER" in k:
+                db_user = val
+            if "MYSQL_PASSWORD" in k or "DB_PASS" in k or "DATABASE_PASSWORD" in k:
+                db_pass = val
+        _create_mariadb_db("app-central-mariadb", db_name, db_user, db_pass)
+
+
 
 def _create_mariadb_db(cname, db_name, db_user, db_pass):
-    """Create a database and user in MariaDB."""
+    """Create/ensure the app's database and user in central MariaDB (idempotent, password reset)."""
     if not db_name:
         return
-    root_pass = "appvault_root_secret"
-    # Check if DB already exists
-    ok, out = _docker("exec", cname, "mysql", "-uroot", f"-p{root_pass}", "-e", 
-                      f"SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='{db_name}'", capture=True, timeout=10)
-    if ok and db_name in out:
-        print(f"[agent] DB '{db_name}' already exists")
-        return
-    # Create DB
-    _docker("exec", cname, "mysql", "-uroot", f"-p{root_pass}", "-e", 
-            f"CREATE DATABASE IF NOT EXISTS {db_name} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci", timeout=10)
+    root_pass = os.environ.get("MARIADB_ROOT_PASSWORD", "appvault_root_secret")
     if db_user and db_pass:
-        _docker("exec", cname, "mysql", "-uroot", f"-p{root_pass}", "-e",
-                f"CREATE USER IF NOT EXISTS '{db_user}'@'%' IDENTIFIED BY '{db_pass}'", timeout=10)
-        _docker("exec", cname, "mysql", "-uroot", f"-p{root_pass}", "-e",
-                f"GRANT ALL PRIVILEGES ON {db_name}.* TO '{db_user}'@'%'", timeout=10)
-        _docker("exec", cname, "mysql", "-uroot", f"-p{root_pass}", "-e", "FLUSH PRIVILEGES", timeout=10)
-    print(f"[agent] MariaDB: created DB '{db_name}', user '{db_user}'")
+        _docker("exec", cname, "mariadb", "-uroot", f"-p{root_pass}", "-e",
+                f"CREATE USER IF NOT EXISTS '{db_user}'@'%' IDENTIFIED BY '{db_pass}'; ALTER USER '{db_user}'@'%' IDENTIFIED BY '{db_pass}';",
+                timeout=10)
+    _docker("exec", cname, "mariadb", "-uroot", f"-p{root_pass}", "-e",
+            f"CREATE DATABASE IF NOT EXISTS `{db_name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;",
+            timeout=10)
+    if db_user:
+        _docker("exec", cname, "mariadb", "-uroot", f"-p{root_pass}", "-e",
+                f"GRANT ALL PRIVILEGES ON `{db_name}`.* TO '{db_user}'@'%'; FLUSH PRIVILEGES;",
+                timeout=10)
+    print(f"[agent] MariaDB: ensured DB '{db_name}', user '{db_user}'")
+
+
 
 def _create_postgres_db(cname, db_name, db_user, db_pass):
-    """Create a database and user in PostgreSQL."""
+    """Create/ensure the app's database and user in central PostgreSQL.
+
+    Idempotent: resets the user's password to match the app's current env each time,
+    so reinstalls (which may generate a fresh secret) always authenticate.
+    """
     if not db_name:
         return
-    root_pass = "appvault_root_secret"
-    # Check if DB exists
-    ok, out = _docker("exec", cname, "psql", "-U", "postgres", "-c", 
+    ok, out = _docker("exec", cname, "psql", "-U", "postgres", "-c",
                       f"SELECT 1 FROM pg_database WHERE datname='{db_name}'", capture=True, timeout=10)
-    if ok and "(1 row)" in out:
-        print(f"[agent] DB '{db_name}' already exists")
-        return
-    # Create user
+    db_exists = ok and "(1 row)" in out
     if db_user and db_pass:
         _docker("exec", cname, "psql", "-U", "postgres", "-c",
-                f"CREATE USER {db_user} WITH PASSWORD '{db_pass}'", timeout=10)
-    # Create DB
-    _docker("exec", cname, "psql", "-U", "postgres", "-c",
-            f"CREATE DATABASE {db_name} OWNER {db_user or 'postgres'}", timeout=10)
+                f"DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='{db_user}') THEN CREATE ROLE {db_user} LOGIN PASSWORD '{db_pass}'; ELSE ALTER ROLE {db_user} WITH PASSWORD '{db_pass}'; END IF; END $$;",
+                timeout=10)
+    if not db_exists:
+        _docker("exec", cname, "psql", "-U", "postgres", "-c",
+                f"CREATE DATABASE {db_name} OWNER {db_user or 'postgres'}", timeout=10)
     if db_user:
         _docker("exec", cname, "psql", "-U", "postgres", "-c",
                 f"GRANT ALL PRIVILEGES ON DATABASE {db_name} TO {db_user}", timeout=10)
-    print(f"[agent] PostgreSQL: created DB '{db_name}', user '{db_user}'")
+    print(f"[agent] PostgreSQL: ensured DB '{db_name}', user '{db_user}'")
 
-MONITORING_IDS = ("portainer", "uptime-kuma", "netdata")
+
 
 def _monitoring_health_dir(app_id):
     """Host path where a monitoring app's data lives (wiped on uninstall)."""
@@ -702,6 +716,8 @@ def _bootstrap_portainer():
     except Exception:
         pass
     return (user, newpw)
+
+MONITORING_IDS = ("portainer", "uptime-kuma", "netdata")
 
 def _do_install(app_id):
     """Install a Docker app locally using Docker CLI."""
@@ -818,6 +834,7 @@ def _do_install(app_id):
             run_args.extend(["-v", vol])
     
     # Environment variables
+    env_map = {}
     for e in app_def.get("env", []):
         if "=" in e:
             key, val = e.split("=", 1)
@@ -829,6 +846,7 @@ def _do_install(app_id):
             # Only add if not referencing an unset variable
             if not expanded.startswith("${") or ":-" in expanded:
                 run_args.extend(["-e", f"{key}={expanded}"])
+                env_map[key] = expanded
 
     # ownCloud trusted domains: ensure private/reachable addresses are trusted so the
     # app doesn't reject access via the tailnet/private IP (fixes "untrusted domain").
@@ -872,7 +890,7 @@ def _do_install(app_id):
     
     # Provision database in central DB if needed
     _set_progress(app_id, "Configuring database...", 70)
-    _provision_database(app_id, app_def)
+    _provision_database(app_id, app_def, env_map)
     
     # Run container
     _set_progress(app_id, "Starting container...", 80)
@@ -1302,6 +1320,8 @@ def api_catalog():
     """Return the catalog with live local status and host ports."""
     result = []
     for app in catalog_cache.get("apps", []):
+        if app.get("hidden"):
+            continue  # infra (central-* DBs etc.) not shown in the store
         status = get_app_status_local(app["id"])
         host_port = ""
         if status in ("installed", "stopped"):
