@@ -461,7 +461,7 @@ def _sync_caddy_apps():
     manual Caddyfile edits. Called after install/uninstall."""
     try:
         rules = []
-        ok, out = _docker("ps", "--filter", "label=appvault.managed=true",
+        ok, out = _docker("ps", "-a", "--filter", "label=appvault.managed=true",
                           "--format", "{{.Names}}\t{{.Label \"appvault.app\"}}", capture=True)
         if ok and out:
             for line in out.strip().splitlines():
@@ -529,7 +529,7 @@ def _ensure_caddy_publishes():
         import re
         # needed https ports: from the managed apps (what _sync_caddy_apps routes)
         ports = ["443", "29001", "29002"]
-        ok, out = _docker("ps", "--filter", "label=appvault.managed=true",
+        ok, out = _docker("ps", "-a", "--filter", "label=appvault.managed=true",
                           "--format", "{{.Names}}", capture=True)
         if ok and out:
             for cname in out.strip().splitlines():
@@ -1258,6 +1258,10 @@ def _do_restart(app_id):
     ok, err = _docker("restart", container_name, capture=True)
     if ok:
         print(f"[agent] {app_id} restarted")
+        try:
+            _sync_caddy_apps()
+        except Exception as e:
+            print(f"[agent] restart caddy sync warn: {e}")
     else:
         raise Exception(f"Failed to restart: {err}")
 
