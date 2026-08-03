@@ -320,7 +320,15 @@ def execute_job(job):
     
     try:
         if action == "install":
-            _do_install(app_id)
+            app_def = None
+            for a in catalog_cache.get("apps", []):
+                if a["id"] == app_id:
+                    app_def = a
+                    break
+            if app_def and (app_def.get("is_stack") or app_def.get("compose_url")):
+                _do_install_stack(app_id)
+            else:
+                _do_install(app_id)
         elif action == "uninstall":
             _do_uninstall(app_id)
         elif action == "restart":
