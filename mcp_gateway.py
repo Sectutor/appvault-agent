@@ -59,8 +59,9 @@ def _http_call(td, kwargs, deps):
     if cred.get("header") and cred.get("value"):
         headers[cred["header"]] = str(cred["value"])
     try:
-        if td.get("method", "GET").upper() == "POST" and rest:
-            req = Request(url, data=json.dumps(rest).encode(), headers=headers, method="POST")
+        if td.get("method", "GET").upper() in ("POST", "PUT", "PATCH") and rest:
+            req = Request(url, data=json.dumps(rest).encode(), headers=headers,
+                          method=td.get("method", "POST").upper())
         else:
             if rest:
                 url += ("&" if "?" in url else "?") + urlencode(rest)
