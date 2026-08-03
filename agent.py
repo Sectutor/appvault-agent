@@ -2398,6 +2398,32 @@ threading.Thread(target=phone_home_loop, daemon=True).start()
 # Start cloud sync in background
 threading.Thread(target=cloud_sync.sync_loop, daemon=True).start()
 
+# MCP Gateway (optional, fail-safe): exposes installed apps as LLM tools on :8087.
+# Read-only by default; MCP_ALLOW_WRITES=1 opts into write tools (Phase 2 approval gate).
+try:
+    import mcp_gateway
+    _mcp_port = int(os.environ.get("MCP_PORT", "8087"))
+    _mcp_writes = os.environ.get("MCP_ALLOW_WRITES", "0") == "1"
+
+    def _mcp_start():
+        try:
+            mcp_gateway.start_gateway(
+                catalog_getter=lambda: catalog_cache.get("apps", []),
+                docker_fn=_docker,
+                get_host_port=get_container_host_port,
+                api_key=API_KEY,
+                port=_mcp_port,
+                allow_writes=_mcp_writes,
+            )
+        except Exception as e:
+            print(f"[agent] MCP gateway failed to start: {e}")
+
+    threading.Thread(target=_mcp_start, daemon=True).start()
+    print(f"[agent] MCP gateway starting on port {_mcp_port} "
+          f"(write policy: {'allow' if _mcp_writes else 'deny'})")
+except Exception as e:
+    print(f"[agent] MCP gateway disabled: {e}")
+
 if __name__ == "__main__":
     port = int(os.environ.get("AGENT_PORT", AGENT_PORT))
     print(f"[agent] Starting AppVault Agent on port {port}")

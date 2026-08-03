@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AppVault MCP Gateway — Architecture</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'JetBrains Mono', monospace; background: #020617; min-height: 100vh; padding: 2rem; color: white; }
+    .container { max-width: 1200px; margin: 0 auto; }
+    .header { margin-bottom: 2rem; }
+    .header-row { display: flex; align-items: center; gap: 1rem; margin-bottom: 0.5rem; }
+    .pulse-dot { width: 12px; height: 12px; background: #34d399; border-radius: 50%; animation: pulse 2s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    h1 { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.025em; }
+    .subtitle { color: #94a3b8; font-size: 0.875rem; margin-left: 1.75rem; }
+    .diagram-container { background: rgba(15, 23, 42, 0.5); border-radius: 1rem; border: 1px solid #1e293b; padding: 1.5rem; overflow-x: auto; }
+    svg { width: 100%; min-width: 900px; display: block; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; margin-top: 2rem; }
+    .card { background: rgba(15, 23, 42, 0.5); border-radius: 0.75rem; border: 1px solid #1e293b; padding: 1.25rem; }
+    .card-header { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem; }
+    .card-dot { width: 8px; height: 8px; border-radius: 50%; }
+    .card-dot.cyan { background: #22d3ee; }
+    .card-dot.emerald { background: #34d399; }
+    .card-dot.violet { background: #a78bfa; }
+    .card-dot.amber { background: #fbbf24; }
+    .card-dot.rose { background: #fb7185; }
+    .card h3 { font-size: 0.875rem; font-weight: 600; }
+    .card ul { list-style: none; color: #94a3b8; font-size: 0.75rem; }
+    .card li { margin-bottom: 0.375rem; }
+    .footer { text-align: center; margin-top: 1.5rem; color: #475569; font-size: 0.75rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <div class="header">
+      <div class="header-row">
+        <div class="pulse-dot"></div>
+        <h1>AppVault MCP Gateway — Architecture</h1>
+      </div>
+      <p class="subtitle">One MCP server per VPS · every installed open-source tool becomes LLM-callable tools · built on the existing agent (:8086)</p>
+    </div>
+
+    <!-- Main Diagram -->
+    <div class="diagram-container">
+      <svg viewBox="0 0 1000 780">
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#64748b" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- ============ ARROWS (drawn early, render behind boxes) ============ -->
+
+        <!-- F1: clients -> gateway -->
+        <line x1="160" y1="137" x2="218" y2="137" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <!-- F1b: cursor client joins the same line (T-junction) -->
+        <line x1="160" y1="212" x2="178" y2="212" stroke="#22d3ee" stroke-width="1.5"/>
+        <line x1="178" y1="212" x2="178" y2="137" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="189" y="114" fill="#94a3b8" font-size="9" text-anchor="middle">MCP streamable-HTTP</text>
+        <text x="189" y="158" fill="#94a3b8" font-size="8" text-anchor="middle">+ X-Api-Key header</text>
+
+        <!-- F2: gateway <-> agent (lifecycle, logs, telemetry) -->
+        <line x1="370" y1="120" x2="408" y2="120" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <text x="389" y="114" fill="#94a3b8" font-size="8" text-anchor="middle">lifecycle · logs</text>
+
+        <!-- F4: gateway -> approval gate (write tools) -->
+        <path d="M 370 140 L 385 140 L 385 290 L 408 290" fill="none" stroke="#fb7185" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <text x="397" y="282" fill="#fb7185" font-size="8" text-anchor="middle">write tools</text>
+
+        <!-- F5: gateway -> credential vault -->
+        <line x1="295" y1="150" x2="295" y2="258" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <text x="305" y="242" fill="#94a3b8" font-size="8">creds</text>
+
+        <!-- F6: gateway -> installed apps (execute handlers) -->
+        <path d="M 370 150 L 400 150 L 400 428" fill="none" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <text transform="rotate(-90 403 300)" x="403" y="300" fill="#94a3b8" font-size="8">handlers: docker exec · http · sql</text>
+
+        <!-- F3: approval gate -> heimdall (prompt user) -->
+        <line x1="560" y1="290" x2="598" y2="290" stroke="#fb7185" stroke-width="1.5" stroke-dasharray="4,4" marker-end="url(#arrowhead)"/>
+        <text x="579" y="284" fill="#fb7185" font-size="8" text-anchor="middle">approval prompt</text>
+
+        <!-- F8: heimdall -> vault (creds stored at install) -->
+        <path d="M 620 235 L 620 330 L 372 330" fill="none" stroke="#fb7185" stroke-width="1.5" stroke-dasharray="4,4" marker-end="url(#arrowhead)"/>
+        <text x="496" y="324" fill="#fb7185" font-size="8" text-anchor="middle">creds stored at install</text>
+
+        <!-- F9: docker socket -> apps -->
+        <line x1="295" y1="405" x2="295" y2="428" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <text x="305" y="419" fill="#94a3b8" font-size="8">docker exec</text>
+
+        <!-- F7: agent <-> central (phone-home) -->
+        <path d="M 485 90 L 485 64 L 885 64 L 885 78" fill="none" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <text x="640" y="58" fill="#fbbf24" font-size="9" text-anchor="middle">phone-home: heartbeat · jobs · catalog+manifests · telemetry</text>
+
+        <!-- ============ MCP CLIENTS (external) ============ -->
+        <text x="90" y="98" fill="#94a3b8" font-size="10" font-weight="600" text-anchor="middle">MCP Clients</text>
+        <rect x="20" y="110" width="140" height="55" rx="6" fill="#0f172a"/>
+        <rect x="20" y="110" width="140" height="55" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="90" y="132" fill="white" font-size="11" font-weight="600" text-anchor="middle">Claude Desktop</text>
+        <text x="90" y="148" fill="#94a3b8" font-size="9" text-anchor="middle">LLM · tools/list</text>
+
+        <rect x="20" y="185" width="140" height="55" rx="6" fill="#0f172a"/>
+        <rect x="20" y="185" width="140" height="55" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="90" y="207" fill="white" font-size="11" font-weight="600" text-anchor="middle">Cursor / VS Code</text>
+        <text x="90" y="223" fill="#94a3b8" font-size="9" text-anchor="middle">MCP client</text>
+
+        <!-- ============ APPVALUT CLOUD (central) ============ -->
+        <rect x="800" y="80" width="170" height="120" rx="8" fill="#0f172a"/>
+        <rect x="800" y="80" width="170" height="120" rx="8" fill="rgba(120, 53, 15, 0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="885" y="102" fill="white" font-size="11" font-weight="600" text-anchor="middle">AppVault Cloud</text>
+        <text x="885" y="118" fill="#94a3b8" font-size="9" text-anchor="middle">catalog + mcp manifests</text>
+        <text x="885" y="132" fill="#94a3b8" font-size="9" text-anchor="middle">job queue</text>
+        <text x="885" y="146" fill="#94a3b8" font-size="9" text-anchor="middle">tool telemetry</text>
+        <text x="885" y="164" fill="#fbbf24" font-size="8" text-anchor="middle">airepoindex.com</text>
+
+        <!-- ============ VPS BOUNDARY ============ -->
+        <rect x="190" y="40" width="590" height="690" rx="12" fill="rgba(251, 191, 36, 0.05)" stroke="#fbbf24" stroke-width="1" stroke-dasharray="8,4"/>
+        <text x="202" y="58" fill="#fbbf24" font-size="10" font-weight="600">Customer VPS — Docker host (Contabo, Hetzner, …)</text>
+
+        <!-- ============ GATEWAY (new) ============ -->
+        <rect x="220" y="90" width="150" height="60" rx="6" fill="#0f172a"/>
+        <rect x="220" y="90" width="150" height="60" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="295" y="112" fill="white" font-size="11" font-weight="600" text-anchor="middle">MCP Gateway</text>
+        <text x="295" y="128" fill="#34d399" font-size="9" text-anchor="middle">:8087 · NEW</text>
+        <text x="295" y="142" fill="#94a3b8" font-size="8" text-anchor="middle">FastMCP · streamable-HTTP</text>
+
+        <!-- ============ AGENT (existing) ============ -->
+        <rect x="410" y="90" width="150" height="60" rx="6" fill="#0f172a"/>
+        <rect x="410" y="90" width="150" height="60" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="485" y="112" fill="white" font-size="11" font-weight="600" text-anchor="middle">Agent Core</text>
+        <text x="485" y="128" fill="#94a3b8" font-size="9" text-anchor="middle">:8086 · exists</text>
+        <text x="485" y="142" fill="#94a3b8" font-size="8" text-anchor="middle">catalog cache + manifests</text>
+
+        <!-- ============ APPROVAL GATE ============ -->
+        <rect x="410" y="260" width="150" height="60" rx="6" fill="#0f172a"/>
+        <rect x="410" y="260" width="150" height="60" rx="6" fill="rgba(136, 19, 55, 0.4)" stroke="#fb7185" stroke-width="1.5"/>
+        <text x="485" y="282" fill="white" font-size="11" font-weight="600" text-anchor="middle">Approval Gate</text>
+        <text x="485" y="298" fill="#94a3b8" font-size="9" text-anchor="middle">write-tool policy</text>
+        <text x="485" y="312" fill="#94a3b8" font-size="8" text-anchor="middle">auto / prompt / deny</text>
+
+        <!-- ============ HEIMDALL ============ -->
+        <rect x="600" y="175" width="130" height="60" rx="6" fill="#0f172a"/>
+        <rect x="600" y="175" width="130" height="60" rx="6" fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="665" y="197" fill="white" font-size="11" font-weight="600" text-anchor="middle">Heimdall UI</text>
+        <text x="665" y="213" fill="#94a3b8" font-size="9" text-anchor="middle">:8085</text>
+        <text x="665" y="227" fill="#94a3b8" font-size="8" text-anchor="middle">storefront · wizard</text>
+
+        <!-- ============ CREDENTIAL VAULT ============ -->
+        <rect x="220" y="260" width="150" height="60" rx="6" fill="#0f172a"/>
+        <rect x="220" y="260" width="150" height="60" rx="6" fill="rgba(136, 19, 55, 0.4)" stroke="#fb7185" stroke-width="1.5"/>
+        <text x="295" y="282" fill="white" font-size="11" font-weight="600" text-anchor="middle">Credential Vault</text>
+        <text x="295" y="298" fill="#94a3b8" font-size="9" text-anchor="middle">encrypted</text>
+        <text x="295" y="312" fill="#94a3b8" font-size="8" text-anchor="middle">API keys per app</text>
+
+        <!-- ============ DOCKER SOCKET ============ -->
+        <rect x="220" y="345" width="150" height="60" rx="6" fill="#0f172a"/>
+        <rect x="220" y="345" width="150" height="60" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="295" y="367" fill="white" font-size="11" font-weight="600" text-anchor="middle">Docker Socket</text>
+        <text x="295" y="385" fill="#94a3b8" font-size="9" text-anchor="middle">/var/run/docker.sock</text>
+
+        <!-- ============ INSTALLED APPS (managed group) ============ -->
+        <rect x="220" y="430" width="510" height="260" rx="8" fill="transparent" stroke="#fb7185" stroke-width="1" stroke-dasharray="4,4"/>
+        <text x="240" y="448" fill="#fb7185" font-size="8">Installed Apps — appvault.managed=true</text>
+
+        <rect x="240" y="465" width="150" height="50" rx="6" fill="#0f172a"/>
+        <rect x="240" y="465" width="150" height="50" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="315" y="487" fill="white" font-size="11" font-weight="600" text-anchor="middle">n8n</text>
+        <text x="315" y="501" fill="#94a3b8" font-size="9" text-anchor="middle">REST API</text>
+
+        <rect x="410" y="465" width="150" height="50" rx="6" fill="#0f172a"/>
+        <rect x="410" y="465" width="150" height="50" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="485" y="487" fill="white" font-size="11" font-weight="600" text-anchor="middle">Grafana</text>
+        <text x="485" y="501" fill="#94a3b8" font-size="9" text-anchor="middle">REST API</text>
+
+        <rect x="580" y="465" width="150" height="50" rx="6" fill="#0f172a"/>
+        <rect x="580" y="465" width="150" height="50" rx="6" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="655" y="487" fill="white" font-size="11" font-weight="600" text-anchor="middle">Postgres</text>
+        <text x="655" y="501" fill="#94a3b8" font-size="9" text-anchor="middle">SQL · :5432</text>
+
+        <rect x="240" y="535" width="150" height="50" rx="6" fill="#0f172a"/>
+        <rect x="240" y="535" width="150" height="50" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="315" y="557" fill="white" font-size="11" font-weight="600" text-anchor="middle">+N more apps</text>
+        <text x="315" y="571" fill="#94a3b8" font-size="9" text-anchor="middle">tools auto-register</text>
+
+        <text x="475" y="620" fill="#94a3b8" font-size="9" text-anchor="middle">each app's mcp manifest ⇒ tools appear in the client — no extra config</text>
+        <text x="475" y="636" fill="#64748b" font-size="8" text-anchor="middle">handlers: http · docker_exec · sql · docker</text>
+
+        <!-- ============ LEGEND ============ -->
+        <text x="800" y="240" fill="white" font-size="10" font-weight="600">Legend</text>
+
+        <rect x="800" y="252" width="16" height="10" rx="2" fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1"/>
+        <text x="822" y="260" fill="#94a3b8" font-size="8">Frontend / UI</text>
+
+        <rect x="800" y="268" width="16" height="10" rx="2" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1"/>
+        <text x="822" y="276" fill="#94a3b8" font-size="8">Backend (agent + gateway)</text>
+
+        <rect x="800" y="284" width="16" height="10" rx="2" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1"/>
+        <text x="822" y="292" fill="#94a3b8" font-size="8">Database / SQL</text>
+
+        <rect x="800" y="300" width="16" height="10" rx="2" fill="rgba(136, 19, 55, 0.4)" stroke="#fb7185" stroke-width="1"/>
+        <text x="822" y="308" fill="#94a3b8" font-size="8">Security (vault · gate)</text>
+
+        <rect x="800" y="316" width="16" height="10" rx="2" fill="rgba(120, 53, 15, 0.3)" stroke="#fbbf24" stroke-width="1"/>
+        <text x="822" y="324" fill="#94a3b8" font-size="8">AppVault Cloud</text>
+
+        <rect x="800" y="332" width="16" height="10" rx="2" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1"/>
+        <text x="822" y="340" fill="#94a3b8" font-size="8">External / MCP clients</text>
+
+        <line x1="800" y1="356" x2="816" y2="356" stroke="#fb7185" stroke-width="1" stroke-dasharray="3,3"/>
+        <text x="822" y="360" fill="#94a3b8" font-size="8">Security / approval flow</text>
+
+        <rect x="800" y="368" width="16" height="10" rx="2" fill="transparent" stroke="#fb7185" stroke-width="1" stroke-dasharray="3,3"/>
+        <text x="822" y="376" fill="#94a3b8" font-size="8">Managed group</text>
+      </svg>
+    </div>
+
+    <!-- Info Cards -->
+    <div class="cards">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot emerald"></div>
+          <h3>MCP Gateway :8087 — the new component</h3>
+        </div>
+        <ul>
+          <li>• FastMCP (Python) serving streamable-HTTP on the agent host</li>
+          <li>• ONE URL + one X-Api-Key for every installed tool</li>
+          <li>• tools auto-register on install / deregister on uninstall</li>
+          <li>• write-tool calls pass through the approval gate</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot amber"></div>
+          <h3>Catalog becomes the MCP library</h3>
+        </div>
+        <ul>
+          <li>• each app def gains an mcp manifest: tools, inputSchema, handler</li>
+          <li>• 4 handlers: http (REST API) · docker_exec (in-container) · sql (provisioned DBs) · docker (lifecycle/logs)</li>
+          <li>• manifests ship via existing sync_catalog — no new transport</li>
+          <li>• you author the library centrally = the moat</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot violet"></div>
+          <h3>Client setup — one config block</h3>
+        </div>
+        <ul>
+          <li>• user pastes one mcpServers entry into Claude Desktop / Cursor</li>
+          <li>• { "appvault": { "url": "http://VPS:8087/mcp", "headers": { "X-Api-Key": "…" } } }</li>
+          <li>• every tool call logged → agent heartbeat → central telemetry</li>
+          <li>• gates Pro/Power tier + usage metering</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <p class="footer">
+      AppVault · appvault-agent + MCP gateway design sketch · August 2026
+    </p>
+  </div>
+</body>
+</html>

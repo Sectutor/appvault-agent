@@ -21,10 +21,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY agent.py heimdall_bridge.py cloud_sync.py ./
+COPY agent.py heimdall_bridge.py cloud_sync.py mcp_gateway.py ./
 COPY static/ ./static/
 COPY templates/ ./templates/
 
-EXPOSE 8086
+EXPOSE 8086 8087
 
 CMD ["python3", "agent.py"]

@@ -1,1 +1,5 @@
 flask==3.0.0
+mcp==1.16.0
+uvicorn>=0.30
+cryptography>=42.0
+pydantic<2.13
