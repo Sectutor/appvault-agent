@@ -2407,10 +2407,33 @@ try:
 
     def _mcp_start():
         try:
+            def _gw_get_host_port(cname):
+                """Resolve 'host:port' for an app: published host port first,
+                else container-internal IP:port on the shared docker network
+                (Caddy setups don't publish raw host ports)."""
+                app_id = cname[4:] if cname.startswith("app-") else cname
+                hp = get_container_host_port(cname)
+                if hp:
+                    return f"127.0.0.1:{hp}"
+                cport = None
+                for a in catalog_cache.get("apps", []):
+                    if a.get("id") == app_id:
+                        cport = a.get("container_port")
+                        break
+                if not cport:
+                    return None
+                ok, out = _docker("inspect", "-f",
+                                  "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}",
+                                  cname, capture=True)
+                if ok and out and out.strip():
+                    ip = out.strip().split()[0]
+                    return f"{ip}:{cport}"
+                return None
+
             mcp_gateway.start_gateway(
                 catalog_getter=lambda: catalog_cache.get("apps", []),
                 docker_fn=_docker,
-                get_host_port=get_container_host_port,
+                get_host_port=_gw_get_host_port,
                 api_key=API_KEY,
                 port=_mcp_port,
                 allow_writes=_mcp_writes,

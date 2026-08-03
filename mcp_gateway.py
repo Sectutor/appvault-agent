@@ -51,7 +51,9 @@ def _http_call(td, kwargs, deps):
     for k in used:
         path = path.replace("{" + k + "}", str(kwargs[k]))
     rest = {k: v for k, v in kwargs.items() if k not in used}
-    url = f"http://127.0.0.1:{host_port}{path}"
+    # host_port is a "host:port" string resolved by the agent wiring
+    # (published host port, or container-internal IP:port on the docker network)
+    url = f"http://{host_port}{path}"
     headers = {}
     cred = deps["vault"](app_id)
     if cred.get("header") and cred.get("value"):
