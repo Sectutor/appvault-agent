@@ -317,16 +317,26 @@ def _make_run(td, deps):
     """
     schema = td.get("inputSchema") or {}
     required = set(schema.get("required", []))
-    parts, ns = [], {"_dispatch": _dispatch, "_td": td, "_deps": deps,
-                     "Optional": Optional, "Literal": Literal}
+    # Python requires params without defaults to precede params with defaults.
+    # Manifests may list properties in any order (and may mark a defaulted
+    # property as required), so build the signature in two passes:
+    #  1) required params (never carry a default)
+    #  2) optional/defaulted params (always carry a default)
+    parts, defaults, ns = [], [], {"_dispatch": _dispatch, "_td": td, "_deps": deps,
+                                   "Optional": Optional, "Literal": Literal}
     for pname, pspec in (schema.get("properties") or {}).items():
         if not _NAME_RE.match(pname):
             continue
-        default = pspec.get("default", ...)
-        if pname not in required and default is ...:
-            default = None
-        default_txt = "" if default is ... else " = " + repr(default)
-        parts.append(f"{pname}: {_ann(pspec, default)}{default_txt}")
+        if pname in required:
+            # required params must be provided - strip any schema default so
+            # FastMCP derives them as required in tools/list.
+            parts.append(f"{pname}: {_ann(pspec, ...)}")
+        else:
+            default = pspec.get("default", ...)
+            if default is ...:
+                default = None
+            defaults.append(f"{pname}: {_ann(pspec, default)} = {repr(default)}")
+    parts.extend(defaults)
     exec(f"def run({', '.join(parts)}):\n    return _dispatch(_td, locals(), _deps)", ns)
     run = ns["run"]
 
