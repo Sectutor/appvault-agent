@@ -1176,14 +1176,19 @@ def _do_install_stack(app_id):
                             "--format", "{{.Names}}", capture=True)
         if okc and outc and outc.strip():
             svc = outc.strip().splitlines()[0].strip()
-            _set_progress(app_id, "Waiting for app to become ready...", 95)
+            _set_progress(app_id, "Waiting for app to become ready... (first boot can take a few minutes)", 95)
             waited = 0
             while waited < 60:  # up to ~10 minutes for first-boot migrations
-                if _is_app_alive(svc, cport):
+                if _stack_web_ready(svc, cport):
                     print(f"[agent] {app_id} web service {svc} ready after ~{waited*10}s")
                     break
                 waited += 1
                 time.sleep(10)
+                if waited % 6 == 0:  # refresh progress every ~60s so the UI doesn't look stuck
+                    mins = int(waited / 6)
+                    _set_progress(app_id,
+                                  f"Waiting for app to become ready... ({mins} min, first boot can take a few minutes)",
+                                  95)
             if waited >= 60:
                 print(f"[agent] {app_id} web service not ready after 10 min; continuing")
     except Exception as e:
@@ -1416,6 +1421,43 @@ def _is_app_alive(cname, internal_port):
         if 200 <= code < 500:
             return True
     return False
+
+def _stack_web_ready(svc, cport):
+    """Robust readiness for a stack app's web service.
+
+    Prefers the container's compose healthcheck (docker health == healthy) and the
+    app's /healthz endpoint. Plain HTTP 200 on `/` is NOT enough: during first-boot
+    migrations, Twenty (and similar apps) run transient Nest command processes that
+    briefly bind the web port and return 200 before shutting down, which would
+    otherwise mark the install done prematurely. Requires two consecutive confirmations
+    10s apart so transient processes are filtered out.
+    """
+    for attempt in range(2):
+        ok_health = False
+        # 1) docker compose healthcheck (targets the real server's health endpoint)
+        okh, hout = _docker("inspect", "--format", "{{.State.Health.Status}}", svc,
+                            capture=True, timeout=15)
+        if okh and hout.strip() == "healthy":
+            ok_health = True
+        # 2) fallback: /healthz returns 200 (server-only endpoint when present)
+        if not ok_health:
+            okc, cout = _docker("exec", svc, "curl", "-s", "-o", "/dev/null", "-w",
+                                "%{http_code}", "--max-time", "5",
+                                f"http://127.0.0.1:{cport}/healthz", capture=True, timeout=15)
+            if okc and cout.strip() == "200":
+                ok_health = True
+        # 3) last resort (no healthcheck + no /healthz): plain `/` 200
+        if not ok_health:
+            okr, rout = _docker("exec", svc, "curl", "-s", "-o", "/dev/null", "-w",
+                                "%{http_code}", "--max-time", "5",
+                                f"http://127.0.0.1:{cport}/", capture=True, timeout=15)
+            if okr and rout.strip().isdigit() and 200 <= int(rout.strip()) < 500:
+                ok_health = True
+        if not ok_health:
+            return False
+        if attempt == 0:
+            time.sleep(10)
+    return True
 
 def check_apps_health():
     """Check installed apps health. Only restarts after 3 consecutive failures and grace period."""
