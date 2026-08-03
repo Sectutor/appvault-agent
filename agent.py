@@ -776,6 +776,21 @@ def _bootstrap_portainer():
 
 MONITORING_IDS = ("portainer", "uptime-kuma", "netdata")
 
+def _install_blocked_reason(app_def):
+    """Return an error message if this app may NOT be installed on this agent.
+
+    Enforces the business rule: FREE apps go to every user; PREMIUM apps require
+    a paid license. Unpublished (disabled) apps can never be installed.
+    """
+    if not app_def:
+        return "App not found in catalog"
+    if app_def.get("disabled"):
+        return "This app is currently disabled by the admin"
+    if (catalog_cache.get("plan") or "free") != "paid":
+        if app_def.get("locked") or app_def.get("requires_paid") or not app_def.get("free_tier"):
+            return "Premium app - apply a license key in Settings to unlock"
+    return None
+
 def _do_install(app_id):
     """Install a Docker app locally using Docker CLI."""
     global _install_progress
@@ -800,6 +815,12 @@ def _do_install(app_id):
     if not app_def:
         _set_progress_error(app_id, "App not found in catalog")
         raise Exception(f"App '{app_id}' not found in catalog")
+    
+    # Enforce plan gating / unpublished protection (same rule as api_install)
+    blocked = _install_blocked_reason(app_def)
+    if blocked:
+        _set_progress_error(app_id, blocked)
+        raise Exception(blocked)
     
     image = app_def.get("image")
     if not image:
@@ -1026,6 +1047,12 @@ def _do_install_stack(app_id):
     if not app_def:
         _set_progress_error(app_id, "App not found in catalog")
         raise Exception(f"App '{app_id}' not found in catalog")
+    
+    # Enforce plan gating / unpublished protection (same rule as api_install)
+    blocked = _install_blocked_reason(app_def)
+    if blocked:
+        _set_progress_error(app_id, blocked)
+        raise Exception(blocked)
     
     compose_url = app_def.get("compose_url", "")
     if not compose_url:
@@ -1612,8 +1639,8 @@ def api_catalog():
     """Return the catalog with live local status and host ports."""
     result = []
     for app in catalog_cache.get("apps", []):
-        if app.get("hidden"):
-            continue  # infra (central-* DBs etc.) not shown in the store
+        if app.get("hidden") or app.get("disabled"):
+            continue  # infra (central-* DBs etc.) / unpublished apps not shown in the store
         status = get_app_status_local(app["id"])
         host_port = ""
         if status in ("installed", "stopped"):
@@ -2245,11 +2272,12 @@ def api_app_icon(app_id):
 @app.route("/api/install/<app_id>", methods=["POST"])
 def api_install(app_id):
     """Start installing an app in the background. Returns immediately."""
-    # Reject disabled apps (admin disabled for everyone)
-    for a in catalog_cache.get("apps", []):
-        if a["id"] == app_id and a.get("disabled"):
-            return jsonify({"status": "error", "app_id": app_id,
-                            "message": "This app is currently disabled by the admin"}), 400
+    # Reject disabled apps (admin disabled for everyone) and enforce plan gating
+    app_def = next((a for a in catalog_cache.get("apps", []) if a.get("id") == app_id), None)
+    blocked = _install_blocked_reason(app_def)
+    if blocked:
+        return jsonify({"status": "error", "app_id": app_id, "message": blocked}), \
+            (400 if app_def and app_def.get("disabled") else 402)
     # Initialize progress
     _set_progress(app_id, "Queued...", 2)
     # Run install in background thread
