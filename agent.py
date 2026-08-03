@@ -1072,6 +1072,7 @@ def _do_install_stack(app_id):
     # Determine the repo URL from the compose URL
     repo_url = ""
     repo_dir = stack_dir
+    repo_rel_path = ""  # relative compose path inside the repo (from the URL)
     if "raw.githubusercontent.com" in compose_url:
         # Extract GitHub repo URL: https://raw.githubusercontent.com/user/repo/branch/file
         parts = compose_url.replace("https://raw.githubusercontent.com/", "").split("/")
@@ -1079,6 +1080,8 @@ def _do_install_stack(app_id):
             user, repo, branch = parts[0], parts[1], parts[2]
             repo_url = f"https://github.com/{user}/{repo}.git"
             repo_dir = os.path.join(stack_dir, "repo")
+            if len(parts) > 3:
+                repo_rel_path = "/".join(parts[3:])
     
     # Clone the full repo if we have a git URL (needed for build-from-source)
     if repo_url:
@@ -1107,13 +1110,27 @@ def _do_install_stack(app_id):
                         with open(ef_path, 'w') as f:
                             f.write("# Auto-created by AppVault\n")
                         print(f"[agent] Created missing env file: {ef_path}")
+                        # Prefer a sibling .env.example as a starting point so
+                        # services get sane defaults (e.g. Dify's docker/.env.example)
+                        example = ef_path + ".example"
+                        if os.path.exists(example):
+                            shutil.copy2(example, ef_path)
+                            print(f"[agent] Seeded env file from example: {ef_path}")
         else:
             print(f"[agent] Git clone failed: {r.stderr[:200]}")
         
-        # Use compose from repo root
-        compose_path = os.path.join(repo_dir, "docker-compose.yml")
+        # Use compose from the URL's repo-relative path when present (e.g.
+        # docker/docker-compose.yaml for Dify/Formbricks, packages/twenty-docker
+        # for Twenty); otherwise fall back to the repo root.
+        if repo_rel_path:
+            compose_path = os.path.join(repo_dir, repo_rel_path)
+        else:
+            compose_path = os.path.join(repo_dir, "docker-compose.yml")
+            if not os.path.exists(compose_path):
+                compose_path = os.path.join(repo_dir, "docker-compose.yaml")
         if not os.path.exists(compose_path):
-            compose_path = os.path.join(repo_dir, "docker-compose.yaml")
+            _set_progress_error(app_id, f"Compose file not found: {compose_path}")
+            raise Exception(f"Compose file not found: {compose_path}")
         print(f"[agent] Using compose file: {compose_path}")
 
     # ADDITIVE: direct-HTTP compose URLs (e.g. central-hosted compose) are downloaded
@@ -1191,6 +1208,12 @@ def _do_install_stack(app_id):
                         with open(ef_path, 'w') as f:
                             f.write("# Auto-created by AppVault\n")
                         print(f"[agent] Created missing env file: {ef_path}")
+                        # Prefer a sibling .env.example as a starting point so
+                        # services get sane defaults (e.g. Dify's docker/.env.example)
+                        example = ef_path + ".example"
+                        if os.path.exists(example):
+                            shutil.copy2(example, ef_path)
+                            print(f"[agent] Seeded env file from example: {ef_path}")
                         # Retry
                         ok, err = _docker("compose", "-f", compose_path, "up", "-d", svc, capture=True, timeout=300)
                         if ok:
