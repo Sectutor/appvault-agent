@@ -904,6 +904,17 @@ def _do_install(app_id):
             if expanded == "__AUTO__":
                 import secrets as _secrets
                 expanded = _secrets.token_urlsafe(48)
+            # ADDITIVE: substitute AppVault placeholders so app env can reference the
+            # public URL and HTTPS proxy port (works for every client, e.g. Documenso's
+            # NEXT_PUBLIC_WEBAPP_URL / NEXTAUTH_URL must be the browser-reachable URL).
+            try:
+                _hp = str(_app_https_ports().get(app_id, _https_port(app_id)))
+                expanded = expanded.replace("{PUBLIC_URL}", public_base())
+                expanded = expanded.replace("{PUBLIC_HOST}", public_base_host())
+                expanded = expanded.replace("{HTTPS_PORT}", _hp)
+                expanded = expanded.replace("{PUBLIC_BASE}", f"{public_base()}:{_hp}")
+            except Exception as _e:
+                print(f"[agent] env placeholder substitution warn: {_e}")
             # Only add if not referencing an unset variable
             if not expanded.startswith("${") or ":-" in expanded:
                 run_args.extend(["-e", f"{key}={expanded}"])
