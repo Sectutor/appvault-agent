@@ -1255,7 +1255,20 @@ def _do_install_stack(app_id):
                     print(f"[agent] {svc} still failed after remap: {err[:200]}")
             else:
                 print(f"[agent] {svc} failed: {err[:200]}")
-    
+
+    # Connect stack services to the shared network so the MCP gateway can
+    # reach them by container IP (stacks otherwise get their own default net).
+    try:
+        net = _caddy_net()
+        for svc in services:
+            okc, outc = _docker("compose", "-f", compose_path, "ps", "-q", svc,
+                                capture=True, timeout=30)
+            cid = outc.strip().splitlines()[0] if (okc and outc.strip()) else ""
+            if cid:
+                _docker("network", "connect", net, cid, capture=True, timeout=30)
+    except Exception as e:
+        print(f"[agent] stack network connect warning: {e}")
+
     _set_progress(app_id, "Finalizing...", 95)
 
     # ADDITIVE: wait for the stack's web service (labeled appvault.app=<app_id>) to
@@ -2416,25 +2429,39 @@ try:
     def _mcp_start():
         try:
             def _gw_get_host_port(cname):
-                """Resolve 'host:port' for an app. The agent runs IN a container,
-                so prefer the container's internal IP on the shared docker network
-                (works for Caddy-proxied apps too). Fall back to a published host
-                port only for host-mode agents."""
+                """Resolve 'host:port' for an app, preferring the IP on the SAME
+                docker network as the agent (apps can sit on several networks)."""
                 app_id = cname[4:] if cname.startswith("app-") else cname
                 cport = None
                 for a in catalog_cache.get("apps", []):
                     if a.get("id") == app_id:
                         cport = a.get("container_port")
                         break
-                if cport:
+                if not cport:
+                    return None
+                # agent's own networks (hostname inside docker == container id)
+                my_nets = set()
+                try:
                     ok, out = _docker("inspect", "-f",
-                                      "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}",
-                                      cname, capture=True)
-                    if ok and out and out.strip():
-                        return f"{out.strip().split()[0]}:{cport}"
-                hp = get_container_host_port(cname)
-                if hp:
-                    return f"127.0.0.1:{hp}"
+                                      "{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}",
+                                      socket.gethostname(), capture=True)
+                    if ok:
+                        my_nets = set(out.strip().split())
+                except Exception:
+                    pass
+                ok, out = _docker("inspect", "-f",
+                                  "{{range $k,$v := .NetworkSettings.Networks}}{{$k}}={{$v.IPAddress}} {{end}}",
+                                  cname, capture=True)
+                if ok and out:
+                    pairs = [p for p in out.strip().split() if "=" in p]
+                    for pair in pairs:
+                        net, ip = pair.split("=", 1)
+                        if net in my_nets and ip:
+                            return f"{ip}:{cport}"
+                    for pair in pairs:
+                        ip = pair.split("=", 1)[1]
+                        if ip:
+                            return f"{ip}:{cport}"
                 return None
 
             mcp_gateway.start_gateway(
