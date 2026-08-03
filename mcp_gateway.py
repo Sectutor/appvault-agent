@@ -60,6 +60,7 @@ def _http_call(td, kwargs, deps):
         headers[cred["header"]] = str(cred["value"])
     try:
         if td.get("method", "GET").upper() in ("POST", "PUT", "PATCH") and rest:
+            headers.setdefault("Content-Type", "application/json")
             req = Request(url, data=json.dumps(rest).encode(), headers=headers,
                           method=td.get("method", "POST").upper())
         else:
