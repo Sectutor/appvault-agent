@@ -197,6 +197,12 @@ class Vault:
     def get(self, app_id):
         return self._data.get(app_id) or {}
 
+    def set(self, app_id, cred):
+        """Store (or replace) a credential dict for an app, e.g.
+        {'header': 'Authorization', 'value': 'Basic <b64>'}. Persists."""
+        self._data[app_id] = cred
+        self._save(self._data)
+
     def set(self, app_id, creds):
         self._data[app_id] = creds
         self._save(self._data)

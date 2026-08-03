@@ -2428,6 +2428,29 @@ try:
 
     def _mcp_start():
         try:
+            # Persistent credential vault seeded from a JSON file the operator
+            # drops at <STORAGE_PATH>/gateway_creds.json:
+            #   {"wordpress": {"header": "Authorization", "value": "Basic ..."},
+            #    "write_policy": {"apps": {"wordpress": "auto"}}}
+            _vault = mcp_gateway.Vault(
+                path=os.path.join(STORAGE_PATH, "gateway_vault.json"))
+            _policy = {}
+            _seed = os.path.join(STORAGE_PATH, "gateway_creds.json")
+            if os.path.exists(_seed):
+                with open(_seed) as _f:
+                    _seed_data = json.load(_f)
+                _policy = _seed_data.pop("write_policy", {}) or {}
+                for _app, _cred in _seed_data.items():
+                    if isinstance(_cred, dict) and _cred.get("header") and _cred.get("value"):
+                        _vault.set(_app, _cred)
+                        print(f"[agent] MCP vault: seeded credentials for {_app}")
+            _env_policy = os.environ.get("GATEWAY_WRITE_POLICY", "")
+            if _env_policy:
+                try:
+                    _policy = json.loads(_env_policy)
+                except Exception:
+                    pass
+
             def _gw_get_host_port(cname):
                 """Resolve 'host:port' for an app, preferring the IP on the SAME
                 docker network as the agent (apps can sit on several networks)."""
@@ -2468,6 +2491,8 @@ try:
                 catalog_getter=lambda: catalog_cache.get("apps", []),
                 docker_fn=_docker,
                 get_host_port=_gw_get_host_port,
+                vault=_vault,
+                write_policy=_policy,
                 api_key=API_KEY,
                 port=_mcp_port,
                 allow_writes=_mcp_writes,
