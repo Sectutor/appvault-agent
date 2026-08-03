@@ -1166,7 +1166,30 @@ def _do_install_stack(app_id):
                 print(f"[agent] {svc} failed: {err[:200]}")
     
     _set_progress(app_id, "Finalizing...", 95)
-    
+
+    # ADDITIVE: wait for the stack's web service (labeled appvault.app=<app_id>) to
+    # become responsive before finalizing. Prevents a 502 / "Unable to Reach Back-end"
+    # window for clients during first-boot DB migrations (e.g. Twenty takes ~5 min).
+    try:
+        cport = str(app_def.get("container_port", "3000"))
+        okc, outc = _docker("ps", "-a", "--filter", f"label=appvault.app={app_id}",
+                            "--format", "{{.Names}}", capture=True)
+        if okc and outc and outc.strip():
+            svc = outc.strip().splitlines()[0].strip()
+            _set_progress(app_id, "Waiting for app to become ready...", 95)
+            waited = 0
+            while waited < 60:  # up to ~10 minutes for first-boot migrations
+                if _is_app_alive(svc, cport):
+                    print(f"[agent] {app_id} web service {svc} ready after ~{waited*10}s")
+                    break
+                waited += 1
+                time.sleep(10)
+            if waited >= 60:
+                print(f"[agent] {app_id} web service not ready after 10 min; continuing")
+    except Exception as e:
+        print(f"[agent] Wait-for-ready skipped for {app_id}: {e}")
+    # END ADDITIVE
+
     try:
         from heimdall_bridge import add_heimdall_tile
         tile_url = f"{public_base()}:{app_def.get('container_port','3000')}"
@@ -1191,6 +1214,28 @@ def _do_uninstall(app_id):
 
     container_name = f"app-{app_id}"
     if not container_exists(container_name):
+        # ADDITIVE: stack apps run compose containers labeled appvault.app=<app_id>
+        # (e.g. twenty-server-1), so uninstall must tear the whole stack down.
+        okc, outc = _docker("ps", "-a", "--filter", f"label=appvault.app={app_id}",
+                            "--format", "{{.Names}}", capture=True)
+        if okc and outc and outc.strip():
+            print(f"[agent] {app_id} is a stack app; removing stack...")
+            stack_dir = os.path.join(os.environ.get("STORAGE_PATH", "/data"), "stacks", app_id)
+            compose_path = os.path.join(stack_dir, "docker-compose.yml")
+            if os.path.exists(compose_path):
+                _docker("compose", "-f", compose_path, "down", "-v", "--remove-orphans",
+                        capture=True, timeout=300)
+            else:
+                for cname in outc.strip().splitlines():
+                    _docker("stop", cname.strip())
+                    _docker("rm", cname.strip())
+                _docker("volume", "prune", "-f", capture=True)
+            try:
+                _sync_caddy_apps()
+            except Exception:
+                pass
+            print(f"[agent] {app_id} stack removed")
+            return
         print(f"[agent] {app_id} not found, skipping")
         return
 
