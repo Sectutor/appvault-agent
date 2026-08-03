@@ -1092,6 +1092,28 @@ def _do_install_stack(app_id):
         print(f"[agent] Compose downloaded to {compose_path}")
 
     _set_progress(app_id, "Pulling images...", 40)
+
+    # ADDITIVE: inject the public SERVER_URL for stack apps whose frontend uses it
+    # as its API base (e.g. Twenty). Without this, the browser calls
+    # http://localhost:3000 (the user's own machine) -> "Unable to Reach Back-end".
+    if app_def.get("is_stack") or app_def.get("compose_url"):
+        try:
+            import re as _re
+            hp = str(_app_https_ports().get(app_id, _https_port(app_id)))
+            base = f"{public_base()}:{hp}"
+            with open(compose_path, "r", encoding="utf-8") as _f:
+                _content = _f.read()
+            _new = _content
+            _new = _re.sub(r'SERVER_URL:\s*"[^"]*"', f'SERVER_URL: "{base}"', _new)
+            _new = _re.sub(r"SERVER_URL:\s*'[^']*'", f"SERVER_URL: '{base}'", _new)
+            _new = _re.sub(r'SERVER_URL\s*=\s*\S+', f'SERVER_URL={base}', _new)
+            if _new != _content:
+                with open(compose_path, "w", encoding="utf-8") as _f:
+                    _f.write(_new)
+                print(f"[agent] Injected SERVER_URL={base} into {app_id} compose")
+        except Exception as _e:
+            print(f"[agent] SERVER_URL injection skipped for {app_id}: {_e}")
+
     ok, pull_out = _docker("compose", "-f", compose_path, "pull", capture=True, timeout=600)
     if not ok:
         print(f"[agent] Pull warning: {pull_out[:200]}")
