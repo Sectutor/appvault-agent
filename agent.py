@@ -1763,6 +1763,7 @@ def api_catalog():
         "version": catalog_cache.get("version", 0),
         "agent_id": agent_state.get("agent_id", ""),
         "central": CENTRAL_URL,
+        "plan": catalog_cache.get("plan", "free"),
     })
 
 @app.route("/api/health")
@@ -2006,6 +2007,73 @@ def api_license():
         return jsonify({"status": "ok", "license_key": key, "applied": not cleared, "cleared": cleared})
     return jsonify({"status": "error", "license_key": key, "applied": False,
                     "message": "License saved but central re-registration failed"}), 502
+@app.route("/api/checkout", methods=["POST"])
+def api_checkout():
+    """Agent-initiated checkout: create a Stripe Checkout session for this agent.
+
+    The agent calls the central server's /api/agent/checkout with its own
+    agent_id + api_key so the license auto-binds to THIS agent after payment.
+    The return_url is this store's URL (whatever the user typed in the browser),
+    so after paying they land right back here and we refresh the license.
+    """
+    data = request.json or {}
+    billing = data.get("billing", "monthly")
+    return_url = request.host_url.rstrip("/")  # e.g. http://store-host:5000
+    central = central_request("POST", "/api/agent/checkout", data={
+        "agent_id": agent_state.get("agent_id", AGENT_ID),
+        "api_key": agent_state.get("api_key", API_KEY),
+        "billing": billing,
+        "return_url": return_url,
+        "cancel_url": return_url,
+    })
+    if not central or not central.get("url"):
+        return jsonify({"status": "error", "message": "Checkout could not be created (central server unreachable or not configured)"}), 502
+    return jsonify({"status": "ok", "url": central["url"]})
+
+
+@app.route("/api/license/refresh", methods=["POST"])
+def api_license_refresh():
+    """Pull the latest license + plan from the central server and apply locally.
+
+    Called after the user completes payment so the agent immediately switches
+    to 'paid' (unlocking premium apps) without waiting for the next heartbeat.
+    """
+    central = central_request("POST", "/api/agent/subscription", data={
+        "agent_id": agent_state.get("agent_id", AGENT_ID),
+        "api_key": agent_state.get("api_key", API_KEY),
+    })
+    if not central:
+        return jsonify({"status": "error", "message": "Central server unreachable"}), 502
+
+    key = central.get("license_key") or ""
+    if key and key != agent_state.get("license_key"):
+        agent_state["license_key"] = key
+        save_agent_state(agent_state)
+
+    ok = register_with_central()
+    try:
+        sync_catalog(force=True)
+    except Exception as e:
+        print(f"[agent] Catalog re-sync after license refresh failed: {e}")
+
+    return jsonify({
+        "status": "ok" if ok else "error",
+        "plan": central.get("plan", "free"),
+        "license_key": key,
+        "grace_days_remaining": central.get("grace_days_remaining"),
+    })
+
+
+@app.route("/api/billing-portal", methods=["POST"])
+def api_billing_portal():
+    """Create a Stripe Customer Portal session so the user can manage/cancel."""
+    central = central_request("POST", "/api/agent/billing-portal", data={
+        "agent_id": agent_state.get("agent_id", AGENT_ID),
+        "api_key": agent_state.get("api_key", API_KEY),
+    })
+    if not central or not central.get("url"):
+        return jsonify({"status": "error", "message": "No subscription found or central unreachable"}), 502
+    return jsonify({"status": "ok", "url": central["url"]})
 
 
 

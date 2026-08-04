@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -65,7 +65,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 <div class="controls" style="padding-top:4px;padding-bottom:4px;gap:8px;">
   <span style="font-size:12px;color:#94a3b8;font-weight:600;">🔑 License:</span>
   <input id="license-input" type="text" placeholder="Enter your license key (e.g. APPVAULT-XXXX-XXXX-XXXX-XXXX)" style="flex:0 0 340px;padding:8px 14px;border-radius:8px;border:1px solid #334155;background:#1e293b;color:#e2e8f0;font-size:13px;">
-  <button class="btn btn-install" onclick="applyLicense()" style="padding:8px 18px;">Apply</button>
+  <button class="btn btn-install" onclick="applyLicense()" style="padding:8px 18px;">Apply</button> <button id="manage-sub-btn" class="btn btn-restart" onclick="openBillingPortal()" style="padding:8px 18px;display:none;">Manage subscription</button>
   <span id="license-status" style="font-size:12px;color:#94a3b8;"></span>
 </div>
 
@@ -126,6 +126,67 @@ async function applyLicense() {
   }
 }
 
+async function openCheckout() {
+  showToast('Preparing checkout...', 'info');
+  try {
+    const r = await api('/api/checkout', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ billing: 'monthly' }) });
+    if (r.status === 'ok' && r.url) {
+      sessionStorage.setItem('av_checkout_started', '1');
+      window.open(r.url, '_blank');
+      showToast('Checkout opened in a new tab - after payment your apps unlock automatically', 'success');
+    } else {
+      showToast(r.message || 'Checkout unavailable', 'error');
+    }
+  } catch (e) {
+    showToast('Checkout failed: ' + e.message, 'error');
+  }
+}
+
+async function refreshLicense() {
+  const status = document.getElementById('license-status');
+  if (status) { status.textContent = 'Checking payment status...'; status.style.color = '#fbbf24'; }
+  try {
+    const r = await api('/api/license/refresh', { method: 'POST' });
+    if (r.status === 'ok' && r.plan === 'paid') {
+      sessionStorage.removeItem('av_checkout_started');
+      if (status) { status.textContent = 'Premium unlocked - all apps available!'; status.style.color = '#4ade80'; }
+      showToast('Premium unlocked - all apps available!', 'success');
+      setTimeout(loadCatalog, 800);
+      return true;
+    } else if (r.grace_days_remaining) {
+      if (status) { status.textContent = 'Grace period: ' + r.grace_days_remaining + ' days remaining'; status.style.color = '#f59e0b'; }
+      setTimeout(loadCatalog, 800);
+      return true;
+    }
+    if (status) { status.textContent = r.message || 'Not paid yet'; status.style.color = '#94a3b8'; }
+    return false;
+  } catch (e) {
+    if (status) { status.textContent = 'Refresh failed: ' + e.message; status.style.color = '#f87171'; }
+    return false;
+  }
+}
+
+async function openBillingPortal() {
+  showToast('Opening billing portal...', 'info');
+  try {
+    const r = await api('/api/billing-portal', { method: 'POST' });
+    if (r.status === 'ok' && r.url) { window.open(r.url, '_blank'); }
+    else { showToast(r.message || 'No subscription found', 'error'); }
+  } catch (e) {
+    showToast('Billing portal failed: ' + e.message, 'error');
+  }
+}
+
+async function checkPostCheckout() {
+  // If user just went through checkout, poll until payment lands (or tab closes)
+  if (!sessionStorage.getItem('av_checkout_started')) return;
+  let attempts = 0;
+  const timer = setInterval(async () => {
+    attempts++;
+    const done = await refreshLicense();
+    if (done || attempts >= 20) { clearInterval(timer); }
+  }, 4000);
+}
 let catalogData = null;
 let currentCategory = 'all';
 
@@ -134,10 +195,23 @@ async function loadCatalog() {
   catalogData = data;
   document.getElementById('agentInfo').textContent =
     data.agent_id ?
-      'Agent: ' + data.agent_id.slice(0, 12) + '…  ·  Central: ' + data.central :
-      'Connected  ·  ' + data.apps.length + ' apps';
+      'Agent: ' + data.agent_id.slice(0, 12) + '  |  Central: ' + data.central :
+      'Connected  |  ' + data.apps.length + ' apps';
   document.getElementById('footer').textContent =
-    'AppVault Agent  ·  v' + (data.version || '1.0') + '  ·  ' + data.apps.length + ' apps in catalog';
+    'AppVault Agent  |  v' + (data.version || '1.0') + '  |  ' + data.apps.length + ' apps in catalog';
+  // Show plan + manage subscription button
+  var ls = document.getElementById('license-status');
+  var manageBtn = document.getElementById('manage-sub-btn');
+  if (data.plan === 'paid') {
+    if (manageBtn) manageBtn.style.display = 'inline-block';
+    if (ls && !ls.textContent) { ls.textContent = 'Pro plan active'; ls.style.color = '#4ade80'; }
+  } else if (data.plan === 'grace_period') {
+    if (manageBtn) manageBtn.style.display = 'inline-block';
+    if (ls && !ls.textContent) { ls.textContent = 'Grace period - renew to keep premium'; ls.style.color = '#f59e0b'; }
+  } else {
+    if (manageBtn) manageBtn.style.display = 'none';
+    if (ls && !ls.textContent) { ls.textContent = 'Free plan - upgrade to unlock premium apps'; ls.style.color = '#94a3b8'; }
+  }
   render();
 }
 
@@ -161,13 +235,6 @@ function render() {
   if (currentCategory !== 'all') {
     filtered = filtered.filter(a => a.category === currentCategory);
   }
-  if (search) {
-    filtered = filtered.filter(a =>
-      a.name.toLowerCase().includes(search) ||
-      a.description.toLowerCase().includes(search)
-    );
-  }
-
   if (filtered.length === 0) {
     container.innerHTML = '<div class="empty">No apps found</div>';
     return;
@@ -188,8 +255,7 @@ function cardHtml(app) {
     buttons = '<button class="btn btn-restart" onclick="restart(\'' + app.id + '\')">🔁 Start</button> '
       + '<button class="btn btn-uninstall" onclick="uninstall(\'' + app.id + '\', \'' + app.name + '\')">🗑 Remove</button>';
   } else if (app.locked || app.requires_paid) {
-    var upUrl = (catalogData && catalogData.central ? catalogData.central : '') + '/pricing';
-    buttons = '<button class="btn btn-install" onclick="window.open(\'' + upUrl + '\', \'_blank\')">\U0001F451 Upgrade to unlock</button>';
+    buttons = '<button class="btn btn-install" onclick="openCheckout()">&#x1F451; Upgrade to unlock</button>';
   } else {
     buttons = '<button class="btn btn-install" data-id="' + app.id + '" onclick="install(this)">⬇ Install</button>';
   }
@@ -260,6 +326,7 @@ async function loadLicense() {
 // Refresh every 15s
 loadLicense();
 loadCatalog();
+checkPostCheckout();
 setInterval(loadCatalog, 15000);
 
 // ---- Security self-configuration UI ----
