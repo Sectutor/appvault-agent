@@ -1729,7 +1729,10 @@ def ping_central():
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def get_app_status_local(app_id):
-    """Check if a Docker app is installed locally."""
+    """Check if a Docker app is installed locally (cached 15s)."""
+    return _cached_docker_port(("st", app_id), _get_app_status_local_uncached, app_id)
+
+def _get_app_status_local_uncached(app_id):
     cname = f"app-{app_id}"
     if container_running(cname):
         return "installed"
