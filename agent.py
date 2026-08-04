@@ -353,8 +353,25 @@ def execute_job(job):
         })
         print(f"[agent] Job #{job_id} failed: {e}")
 
+_PORT_CACHE = {}
+_PORT_CACHE_TTL = 15  # seconds; docker port lookups are expensive (~300ms each via CLI)
+
+def _cached_docker_port(key, fn, *args):
+    """Cache docker port lookups for _PORT_CACHE_TTL seconds."""
+    hit = _PORT_CACHE.get(key)
+    if hit and time.time() - hit[0] < _PORT_CACHE_TTL:
+        return hit[1]
+    val = fn(*args)
+    _PORT_CACHE[key] = (time.time(), val)
+    if len(_PORT_CACHE) > 300:
+        _PORT_CACHE.clear()
+    return val
+
 def get_container_host_port(container_name):
-    """Get the first host port mapped to a container."""
+    """Get the first host port mapped to a container (cached 15s)."""
+    return _cached_docker_port(("hp", container_name), _get_container_host_port_uncached, container_name)
+
+def _get_container_host_port_uncached(container_name):
     ok, out = _docker("port", container_name, capture=True)
     if ok and out:
         lines = out.strip().split('\n')
@@ -368,7 +385,10 @@ def get_container_host_port(container_name):
     return None
 
 def get_container_port_host(container_name, container_port):
-    """Get the host port mapped to a specific container port (e.g. setup wizard port)."""
+    """Get the host port mapped to a specific container port (cached 15s)."""
+    return _cached_docker_port(("ph", container_name, container_port), _get_container_port_host_uncached, container_name, container_port)
+
+def _get_container_port_host_uncached(container_name, container_port):
     ok, out = _docker("port", container_name, f"{container_port}/tcp", capture=True)
     if ok and out:
         line = out.strip().split('\n')[0]
@@ -2625,5 +2645,5 @@ if __name__ == "__main__":
     print(f"[agent] Starting AppVault Agent on port {port}")
     print(f"[agent] Central server: {CENTRAL_URL}")
     print(f"[agent] Agent name: {AGENT_NAME}")
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
 
