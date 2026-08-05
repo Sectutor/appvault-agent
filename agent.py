@@ -1992,6 +1992,14 @@ def _get_app_status_local_uncached(app_id):
         return "installed" if container_running(first) else "stopped"
     return "available"
 
+def _get_app_image_uncached(app_id):
+    """Installed image string for an app (cached 15s), e.g. 'n8nio/n8n:latest'."""
+    ok, out = _docker("inspect", "--format", "{{.Config.Image}}", f"app-{app_id}", capture=True, timeout=15)
+    return out.strip() if (ok and out and out.strip()) else ""
+
+def get_app_image(app_id):
+    return _cached_docker_port(("img", app_id), _get_app_image_uncached, app_id)
+
 @app.route("/api/catalog")
 def api_catalog():
     """Return the catalog with live local status and host ports."""
@@ -2005,6 +2013,15 @@ def api_catalog():
             cname = f"app-{app['id']}"
             host_port = get_container_host_port(cname) or app.get("container_port", "")
         entry = {**app, "status": status, "host_port": host_port}
+        # Update availability: installed image vs catalog image. The catalog is
+        # the update channel — bump the image tag there, agents sync, clients
+        # see "Update available" and update in place (data preserved, verified).
+        if status in ("installed", "stopped"):
+            inst_img = get_app_image(app["id"])
+            entry["installed_image"] = inst_img
+            # stacks update from their compose repo — no image tag to compare
+            if inst_img and app.get("image") and not (app.get("is_stack") or app.get("compose_url")):
+                entry["update_available"] = inst_img != app["image"]
         # Surface a failed-install reason (verified-install engine) so the store
         # shows WHY an app is not available instead of a silent dead end.
         if app["id"] in _install_error:
@@ -2759,6 +2776,70 @@ def api_install_status(app_id):
         "error": ""
     })
     return jsonify(prog)
+
+@app.route("/api/update/<app_id>", methods=["POST"])
+def api_update(app_id):
+    """Update an installed app to the catalog's image — data preserved, verified.
+
+    Data safety guarantees:
+      - volumes (named + unified data dir) are NEVER touched
+      - dependency containers (DBs) are kept as-is
+      - the update waits for the app's healthcheck before reporting success
+      - on failure the engine rolls back to the previous image (still local)
+    The catalog is the update channel: bump the image tag in catalog.json,
+    agents sync, clients see "Update available" and update in place.
+    """
+    app_def = next((a for a in catalog_cache.get("apps", []) if a.get("id") == app_id), None)
+    if not app_def:
+        return jsonify({"status": "error", "app_id": app_id, "message": "App not found in catalog"}), 404
+    if get_app_status_local(app_id) not in ("installed", "stopped"):
+        return jsonify({"status": "error", "app_id": app_id, "message": f"{app_id} is not installed"}), 400
+    op_lock = _app_op_lock(app_id)
+    if not op_lock.acquire(blocking=False):
+        return jsonify({"status": "busy", "app_id": app_id,
+                        "message": "Another operation is already running for this app"}), 409
+    _set_progress(app_id, "Checking for updates...", 5)
+    def _update_thread():
+        try:
+            old_image = get_app_image(app_id)
+            new_image = app_def.get("image", "")
+            if not new_image:
+                _set_progress_error(app_id, "Catalog has no image for this app")
+                return
+            if old_image == new_image:
+                _set_progress_done(app_id, f"{app_id} is already up to date")
+                return
+            print(f"[agent] UPDATE {app_id}: {old_image} -> {new_image}")
+            if app_def.get("is_stack") or app_def.get("compose_url"):
+                # stack: re-run the verified stack installer (containers recreated,
+                # compose-managed volumes persist)
+                _do_install_stack(app_id)
+                _set_progress_done(app_id, f"{app_id} updated")
+                return
+            # single-image: spec-based recreate with the new image + verify
+            try:
+                app_def["image"] = new_image
+                _do_install(app_id)
+            except Exception as _upd_err:
+                # rollback: previous image is still local; same volumes/ports/deps
+                _set_progress(app_id, f"Update failed — rolling back to {old_image}...", 50)
+                app_def["image"] = old_image
+                try:
+                    _do_install(app_id)
+                    _set_progress_error(app_id, f"Update to {new_image} failed; rolled back to {old_image}")
+                    _install_error[app_id] = f"Update to {new_image} failed; rolled back to {old_image}"
+                except Exception as _rb_err:
+                    msg = f"Update failed and rollback failed: {_rb_err}"
+                    _set_progress_error(app_id, msg)
+                    _install_error[app_id] = msg
+                return
+            _set_progress_done(app_id, f"{app_id} updated to {new_image}")
+        except Exception as e:
+            _set_progress_error(app_id, str(e)[:200])
+        finally:
+            op_lock.release()
+    threading.Thread(target=_update_thread, daemon=True).start()
+    return jsonify({"status": "started", "app_id": app_id, "message": f"Updating {app_id}..."})
 
 @app.route("/api/uninstall/<app_id>", methods=["POST"])
 def api_uninstall(app_id):
