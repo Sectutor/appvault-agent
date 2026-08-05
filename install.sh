@@ -222,6 +222,34 @@ ufw --force enable >/dev/null 2>&1
 ufw status verbose | tee -a "$LOG"
 log "Firewall active: deny-all inbound; store public on 8085 (until Tailscale onboarding locks it)"
 
+# ── 8a. Cloud-level firewall (best-effort) ─────────────────────────────
+# Most providers (OVH, Contabo, Hetzner, DO) have no network-level firewall —
+# the host ufw above is the only gate. GCP is the exception: its VPC firewall
+# is default-deny, so open the bootstrap port via the instance's own service
+# account (metadata token). If that fails, print the manual step.
+BOOTSTRAP_PORT="${STORE_PORT:-8085}"
+if curl -fsSL --max-time 2 -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/project/project-id" >/dev/null 2>&1; then
+  GCP_PROJECT="$(curl -fsSL --max-time 2 -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/project/project-id" 2>/dev/null)"
+  GCP_TOKEN="$(curl -fsSL --max-time 2 -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" 2>/dev/null | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')"
+  GCP_RULE="$([ -n "$STORE_PORT" ] && echo appvault-store-random || echo appvault-store)"
+  GCP_SRC="${CUR_IP}/32"
+  [ -z "$CUR_IP" ] && GCP_SRC="0.0.0.0/0"   # random-port path: unguessable port, any source
+  if [ -n "$GCP_TOKEN" ]; then
+    GCP_RESP=$(curl -s -X POST "https://compute.googleapis.com/compute/v1/projects/${GCP_PROJECT}/global/firewalls" \
+      -H "Authorization: Bearer ${GCP_TOKEN}" -H "Content-Type: application/json" \
+      -d "{\"name\":\"${GCP_RULE}\",\"allowed\":[{\"IPProtocol\":\"tcp\",\"ports\":[\"${BOOTSTRAP_PORT}\"]}],\"sourceRanges\":[\"${GCP_SRC}\"]}" 2>/dev/null)
+    if echo "$GCP_RESP" | grep -q '"kind"'; then
+      log "GCP VPC firewall rule created: tcp:${BOOTSTRAP_PORT} for ${GCP_SRC}"
+    else
+      log "WARNING: could not create the GCP firewall rule automatically (permissions?). Manual step:"
+      log "  gcloud compute firewall-rules create ${GCP_RULE} --allow tcp:${BOOTSTRAP_PORT} --source-ranges ${GCP_SRC}"
+    fi
+  else
+    log "WARNING: GCP detected but no service-account token — manual step:"
+    log "  gcloud compute firewall-rules create ${GCP_RULE} --allow tcp:${BOOTSTRAP_PORT} --source-ranges ${GCP_SRC}"
+  fi
+fi
+
 # ── 8b. Onboarding helper: tailscale-onboard.sh (run from the store UI) ──
 cat > "$INSTALL_DIR/tailscale-onboard.sh" <<'TSEOF'
 #!/bin/bash
