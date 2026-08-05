@@ -9,7 +9,10 @@
 #    • Deny-all firewall applied LAST (lockout-proof ordering)
 #
 #  Usage (as root):
-#    bash install.sh --license KEY [--ts-authkey KEY] [--agent-name NAME]
+#    bash install.sh [--license KEY] [--ts-authkey KEY] [--agent-name NAME] [--public-url URL]
+#
+#  No license needed to install. Free plan: starter apps free, premium locked.
+#  Add --license KEY after paying (or apply the key later in Settings → License).
 #
 #  cloud-init (user-data) — paste at VPS provider purchase:
 #    #cloud-config
@@ -49,12 +52,15 @@ die()  { echo "[install] ERROR: $*" | tee -a "$LOG"; exit 1; }
 
 # ── 1. Preflight ──────────────────────────────────────────────────────
 [ "$(id -u)" -eq 0 ] || die "Run as root (or with sudo)"
-[ -n "$LICENSE_KEY" ] || die "No license key. Pass --license KEY"
 command -v curl >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq curl ca-certificates; }
 
 OS_ID="$(. /etc/os-release && echo "$ID")"
 OS_VER="$(. /etc/os-release && echo "$VERSION_ID")"
-log "Preflight OK — OS: $OS_ID $OS_VER, license: ${LICENSE_KEY:0:6}…"
+if [ -n "$LICENSE_KEY" ]; then
+  log "Preflight OK — OS: $OS_ID $OS_VER, license: ${LICENSE_KEY:0:6}…"
+else
+  log "Preflight OK — OS: $OS_ID $OS_VER, no license (free plan: starter apps, premium locked)."
+fi
 
 # Disk space check (need ~10GB)
 AVAIL_KB=$(df -k / | awk 'NR==2{print $4}')
@@ -203,7 +209,7 @@ cat <<EOF | tee -a "$LOG"
 
 ════════════════════════════════════════════════════════════════════
 ✅  AppVault installed — INVISIBLE to the internet
-    License : ${LICENSE_KEY:0:6}…   Agent: $AGENT_NAME
+    Plan     : ${LICENSE_KEY:+Paid (${LICENSE_KEY:0:6}…)}Free (starter apps, premium locked)   Agent: $AGENT_NAME
     Store UI: $ACCESS   (local only / via Tailscale)
     Admin   : http://127.0.0.1:8001/admin
     API key : saved in $INSTALL_DIR/.env (also shown below)
