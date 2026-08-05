@@ -1053,8 +1053,12 @@ def _do_install(app_id):
         # Monitoring consoles publish NO host ports. They are reached ONLY via Caddy
         # reverse_proxy across the shared bridge net (Caddy exposes :29001/:29002/:29003).
         pass
-    elif container_port and (_is_proxy_disabled(app_id) or app_def.get("publish_host_port")):
-        host_port = _stable_host_port(container_name, app_id, container_port)
+    elif container_port and (
+        _is_proxy_disabled(app_id)                       # VPN/network-only apps
+        or app_def.get("publish_host_port")              # explicit opt-in (extra daemons)
+        or not (PUBLIC_URL and "://" in PUBLIC_URL)      # DIRECT mode: host port is the
+    ):                                                   #   ONLY way clients reach apps —
+        host_port = _stable_host_port(container_name, app_id, container_port)  #   always publish
         run_args.extend(["-p", f"{host_port}:{container_port}"])
 
     extra_ports = app_def.get("extra_ports", {}) if app_id not in MONITORING_IDS else {}
