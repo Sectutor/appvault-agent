@@ -872,6 +872,14 @@ def _host_free_disk_gb():
     except Exception:
         return None
 
+def _host_used_disk_gb():
+    """Used disk in GB on the docker root fs."""
+    try:
+        import shutil
+        return shutil.disk_usage("/").used // (1024 ** 3)
+    except Exception:
+        return None
+
 def _resource_blocked_reason(app_def):
     """Refuse installs that cannot possibly work on this host (memory/disk)."""
     need_mem = app_def.get("min_mem_mb") or 0
@@ -2041,6 +2049,8 @@ def api_catalog():
 def api_health():
     """Health check."""
     d = docker_info()
+    mem_free = _host_free_mem_mb()
+    disk_free = _host_free_disk_gb()
     return jsonify({
         "status": "ok",
         "agent_id": agent_state.get("agent_id", ""),
@@ -2048,6 +2058,10 @@ def api_health():
         "docker_version": d["version"],
         "central": CENTRAL_URL,
         "central_status": "unknown",
+        # system pressure — surfaced so the dashboard can warn BEFORE the box dies
+        "mem_free_mb": mem_free,
+        "disk_free_gb": disk_free,
+        "disk_percent": (100 - round(100 * disk_free / (disk_free + _host_used_disk_gb()))) if disk_free is not None and _host_used_disk_gb() is not None else None,
         "catalog_version": catalog_cache.get("version", 0),
         "catalog_apps": len(catalog_cache.get("apps", [])),
         "version": APP_VERSION,
