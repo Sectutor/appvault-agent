@@ -1191,6 +1191,15 @@ def _do_install(app_id):
         _rollback_install(app_id, created_deps)
         raise Exception(f"Failed to start container: {err}")
 
+    # Put the app on Caddy's network IMMEDIATELY (before verification) so the
+    # healthcheck probes (caddy name-resolved / agent IP) can actually reach it.
+    # Previously this happened after verification, leaving the app reachable
+    # only on its main network during the wait — unreachable from agent/caddy.
+    try:
+        _docker("network", "connect", _caddy_net(), container_name, capture=True, timeout=30)
+    except Exception:
+        pass
+
     # VERIFY: wait until the app actually serves HTTP (per spec healthcheck).
     # This is the productization guarantee — "installed" means "responds".
     boot_timeout = app_def.get("boot_timeout") or 150
