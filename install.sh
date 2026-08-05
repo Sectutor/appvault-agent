@@ -194,8 +194,11 @@ if [ -n "$CUR_IP" ] && echo "$CUR_IP" | grep -qE '^(10\.|172\.(1[6-9]|2[0-9]|3[0
   fi
 fi
 STORE_PORT=""
+SKIP_STORE=""
 if [ -n "$CUR_IP" ] && [ "$CUR_IP" != "127.0.0.1" ]; then
   STORE_VISIBILITY="your IP only ($CUR_IP)"
+elif [ -n "$SKIP_STORE" ]; then
+  STORE_VISIBILITY="closed until Tailscale onboarding"
 else
   STORE_PORT=$(( 42000 + (RANDOM % 7999) ))
   sed -i "s/0.0.0.0:8085:80/0.0.0.0:${STORE_PORT}:80/" "$INSTALL_DIR/docker-compose.yml"
