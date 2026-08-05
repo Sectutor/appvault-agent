@@ -913,19 +913,21 @@ def _wait_app_healthy(app_id, app_def, cname, boot_timeout):
                 rout = "200"  # wget exit 0 = served
         # 3) host-side probe via the container IP — covers scratch images
         #    (e.g. traefik) that ship no shell/curl/wget at all. The agent shares
-        #    a docker network with app containers, so the IP is reachable.
+        #    a docker network with app containers; try EVERY container IP since
+        #    multi-network apps may expose the reachable IP on any of them.
         if not (okr and rout.strip().isdigit()):
             okip, ipout = _docker("inspect", "--format",
                                   "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}",
                                   cname, capture=True, timeout=15)
-            ip = (ipout.strip().split() or [""])[0] if (okip and ipout) else ""
-            if ip:
+            ips = (ipout.strip().split() if (okip and ipout) else [])
+            for ip in ips:
                 try:
                     import urllib.request
                     req = urllib.request.Request(f"http://{ip}:{cport}{path}", method="GET")
                     with urllib.request.urlopen(req, timeout=6) as resp:
                         rout = str(resp.status)
                         okr = True
+                        break
                 except Exception as _e:
                     okr = False
                     last_detail = f"host probe {ip}:{cport} failed ({type(_e).__name__})"
