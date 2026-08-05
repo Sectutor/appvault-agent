@@ -416,6 +416,17 @@ def _stable_host_port(container_name, app_id, container_port):
     stable = 30000 + (h % 9000)  # 30000-38999
     return str(stable)
 
+def _stack_project(app_id):
+    """Explicit compose project name for a stack app.
+
+    NEVER rely on the compose file's directory name for the project — stack dirs
+    are generic ('repo') and collide with OTHER compose projects on the same
+    docker daemon, silently reusing unrelated containers (e.g. a host's
+    repo-db-1). A unique project name keeps every stack's containers isolated
+    and deterministic on every client machine.
+    """
+    return f"{app_id}_stack"
+
 
 
 def _is_proxy_disabled(app_id):
@@ -1360,12 +1371,13 @@ def _do_install_stack(app_id):
     except Exception as _e:
         print(f"[agent] port stabilization skipped for {app_id}: {_e}")
 
-    ok, pull_out = _docker("compose", "-f", compose_path, "pull", capture=True, timeout=600)
+    _proj = _stack_project(app_id)
+    ok, pull_out = _docker("compose", "-p", _proj, "-f", compose_path, "pull", capture=True, timeout=600)
     if not ok:
         print(f"[agent] Pull warning: {pull_out[:200]}")
     
     _set_progress(app_id, "Building services...", 55)
-    ok, build_out = _docker("compose", "-f", compose_path, "build", capture=True, timeout=600)
+    ok, build_out = _docker("compose", "-p", _proj, "-f", compose_path, "build", capture=True, timeout=600)
     if ok:
         print(f"[agent] Build complete")
     else:
@@ -1373,13 +1385,13 @@ def _do_install_stack(app_id):
     
     _set_progress(app_id, "Starting services...", 70)
     
-    ok, services_out = _docker("compose", "-f", compose_path, "config", "--services", capture=True, timeout=30)
+    ok, services_out = _docker("compose", "-p", _proj, "-f", compose_path, "config", "--services", capture=True, timeout=30)
     services = services_out.strip().split('\n') if ok else []
     
     for i, svc in enumerate(services):
         pct = 70 + int((i / max(len(services), 1)) * 25)
         _set_progress(app_id, f"Starting {svc}...", pct)
-        ok, err = _docker("compose", "-f", compose_path, "up", "-d", svc, capture=True, timeout=300)
+        ok, err = _docker("compose", "-p", _proj, "-f", compose_path, "up", "-d", svc, capture=True, timeout=300)
         if ok:
             print(f"[agent] {svc} started")
         else:
@@ -1406,7 +1418,7 @@ def _do_install_stack(app_id):
                             shutil.copy2(example, ef_path)
                             print(f"[agent] Seeded env file from example: {ef_path}")
                         # Retry
-                        ok, err = _docker("compose", "-f", compose_path, "up", "-d", svc, capture=True, timeout=300)
+                        ok, err = _docker("compose", "-p", _proj, "-f", compose_path, "up", "-d", svc, capture=True, timeout=300)
                         if ok:
                             print(f"[agent] {svc} started after creating env file")
                             continue
@@ -1431,7 +1443,7 @@ def _do_install_stack(app_id):
                 content = re.sub(r'"?\d+:\d+"?', remap_port, content)
                 with open(compose_path, 'w') as f:
                     f.write(content)
-                ok, err = _docker("compose", "-f", compose_path, "up", "-d", svc, capture=True, timeout=300)
+                ok, err = _docker("compose", "-p", _proj, "-f", compose_path, "up", "-d", svc, capture=True, timeout=300)
                 if ok:
                     print(f"[agent] {svc} started with remapped ports")
                 else:
@@ -1444,7 +1456,7 @@ def _do_install_stack(app_id):
     try:
         net = _caddy_net()
         for svc in services:
-            okc, outc = _docker("compose", "-f", compose_path, "ps", "-q", svc,
+            okc, outc = _docker("compose", "-p", _proj, "-f", compose_path, "ps", "-q", svc,
                                 capture=True, timeout=30)
             cid = outc.strip().splitlines()[0] if (okc and outc.strip()) else ""
             if cid:
@@ -1553,11 +1565,16 @@ def _do_uninstall(app_id):
                             "--format", "{{.Names}}", capture=True)
         if okc and outc and outc.strip():
             print(f"[agent] {app_id} is a stack app; removing stack...")
-            stack_dir = os.path.join(os.environ.get("STORAGE_PATH", "/data"), "stacks", app_id)
-            compose_path = os.path.join(stack_dir, "docker-compose.yml")
-            if os.path.exists(compose_path):
-                _docker("compose", "-f", compose_path, "down", "-v", "--remove-orphans",
-                        capture=True, timeout=300)
+            stack_root = os.path.join(os.environ.get("STORAGE_PATH", "/data"), "stacks", app_id)
+            compose_path = ""
+            for cand in (os.path.join(stack_root, "docker-compose.yml"),
+                         os.path.join(stack_root, "repo", "docker-compose.yml")):
+                if os.path.exists(cand):
+                    compose_path = cand
+                    break
+            if compose_path:
+                _docker("compose", "-p", _stack_project(app_id), "-f", compose_path, "down",
+                        "-v", "--remove-orphans", capture=True, timeout=300)
             else:
                 for cname in outc.strip().splitlines():
                     _docker("stop", cname.strip())
