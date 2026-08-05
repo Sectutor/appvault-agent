@@ -301,4 +301,39 @@ cat <<EOF | tee -a "$LOG"
     🚪 Lost SSH? Use your provider's web console (escape hatch)
 ════════════════════════════════════════════════════════════════════
 EOF
+
+# ── 9b. REACHABILITY VERIFICATION — the install is not complete until ─
+# the store actually answers from the internet. Some clouds (GCP, AWS)
+# block ports at their own network level; if the store can't be reached,
+# we say so, print the fix, and keep verifying instead of claiming DONE.
+PROBE_URL="http://${PUB_IP:-127.0.0.1}:8085"
+VERIFIED=""
+if [ -n "${PUB_IP:-}" ]; then
+  log "Verifying your store is reachable from the internet: $PROBE_URL"
+  for i in $(seq 1 30); do
+    R="$(curl -fsSL --max-time 8 https://appvault.airepoindex.com/api/probe -H "Content-Type: application/json" -d "{\"url\":\"$PROBE_URL\"}" 2>/dev/null || true)"
+    if echo "$R" | grep -q '"reachable": *true'; then
+      VERIFIED="1"
+      break
+    fi
+    if [ "$i" -eq 3 ]; then
+      log "⚠️  Your cloud provider is blocking port 8085 (the store can't be reached from the internet yet)."
+      if curl -fsSL --max-time 2 -H "Metadata-Flavor: Google" "http://metadata.google.internal" >/dev/null 2>&1; then
+        log "    Google Cloud: open https://console.cloud.google.com/networking/firewalls"
+        log "    → CREATE FIREWALL RULE → name: appvault-store → TCP 8085 → source 0.0.0.0/0 → CREATE"
+        log "    (or run from your computer: gcloud compute firewall-rules create appvault-store --allow tcp:8085 --source-ranges 0.0.0.0/0)"
+      else
+        log "    Open port 8085 (TCP) in your provider's control panel (AWS: security group, Azure: NSG, OVH/Hetzner/Contabo: usually none needed)."
+      fi
+      log "    Waiting and re-checking every 10s…"
+    fi
+    sleep 10
+  done
+fi
+if [ -n "$VERIFIED" ]; then
+  log "✅ Store verified reachable: $PROBE_URL — install complete"
+else
+  log "⚠️  Install finished, but the store could not be verified from the internet yet."
+  log "    Once you open port 8085, the store will be at $PROBE_URL"
+fi
 log "DONE — AppVault invisible VPS ready"
