@@ -931,6 +931,18 @@ def _wait_app_healthy(app_id, app_def, cname, boot_timeout):
                 except Exception as _e:
                     okr = False
                     last_detail = f"host probe {ip}:{cport} failed ({type(_e).__name__})"
+        # 4) probe via the Caddy container — Caddy sits on the app network and
+        #    resolves app containers BY NAME (busybox wget ships in alpine).
+        #    Covers deployments where the agent's own network can't reach apps.
+        if not (okr and rout.strip().isdigit()):
+            okw, wout = _docker("exec", "appvault-caddy", "wget", "-q", "-O", "/dev/null",
+                                "--timeout=5", f"http://{cname}:{cport}{path}",
+                                capture=True, timeout=15)
+            if okw and wout.strip() == "":
+                rout = "200"  # wget exit 0 = served
+                okr = True
+            else:
+                last_detail = f"caddy probe {cname}:{cport} failed"
         if okr and rout.strip().isdigit():
             code = int(rout.strip())
             if code in expect:
