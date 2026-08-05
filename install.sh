@@ -21,7 +21,7 @@
 #      - curl -fsSL https://install.appvault.com/install.sh -o /root/install.sh
 #      - bash /root/install.sh
 # ═══════════════════════════════════════════════════════════════════════
-set -uo pipefail
+set -o pipefail
 
 # ── Config (env or flags) ──────────────────────────────────────────────
 TS_AUTH_KEY="${TS_AUTH_KEY:-}"
@@ -169,41 +169,17 @@ if [ -n "$TS_AUTH_KEY" ]; then
   if [ -n "$TS_IP" ]; then log "Tailscale up — private IP: $TS_IP"; else log "Tailscale not ready yet (will retry on boot)"; fi
 fi
 
-# ── 6b. Bootstrap access decision (BEFORE stack start) ────────────────
-# Detect the SSH session's IP robustly — works even under `sudo bash -c`
-# (sudo strips SSH_CLIENT; that unbound-variable crash killed the firewall
-# step on older installers). Fallback: `ss` reads the live SSH connection.
+# ── 6b. Detect the SSH session's IP (for the 24h SSH fallback rule) ───
 CUR_IP="${SSH_CLIENT:-}"
 if [ -z "$CUR_IP" ] || [ "$CUR_IP" = "127.0.0.1" ]; then
   CUR_IP="$(ss -tn '( sport = :22 )' 2>/dev/null | awk 'NR>1{print $4}' | cut -d: -f1 | head -1)"
 fi
 CUR_IP="${CUR_IP%% *}"
-# Relay/cloud-shell detection: if the SSH peer is an internal address, the
-# real client IP is invisible to the box — ask the user for it interactively.
-if [ -n "$CUR_IP" ] && echo "$CUR_IP" | grep -qE '^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|100\.64\.)'; then
-  log "Your SSH connection comes from an internal address (${CUR_IP}) — cloud shell or relay in use."
-  printf "[install] Enter your PUBLIC IP (whatismyip.com) to open the store for it, or press Enter to skip (use Tailscale): "
-  read -r USER_PUB_IP
-  if [ -n "$USER_PUB_IP" ]; then
-    CUR_IP="$USER_PUB_IP"
-    log "Store will be opened for your public IP: $CUR_IP"
-  else
-    CUR_IP=""
-    SKIP_STORE=1
-    log "No public IP given — store stays closed until Tailscale onboarding (run: sudo bash /opt/appvault/tailscale-onboard.sh)"
-  fi
-fi
-STORE_PORT=""
-SKIP_STORE=""
-if [ -n "$CUR_IP" ] && [ "$CUR_IP" != "127.0.0.1" ]; then
-  STORE_VISIBILITY="your IP only ($CUR_IP)"
-elif [ -n "$SKIP_STORE" ]; then
-  STORE_VISIBILITY="closed until Tailscale onboarding"
-else
-  STORE_PORT=$(( 42000 + (RANDOM % 7999) ))
-  sed -i "s/0.0.0.0:8085:80/0.0.0.0:${STORE_PORT}:80/" "$INSTALL_DIR/docker-compose.yml"
-  STORE_VISIBILITY="random port ${STORE_PORT} (no SSH IP detected)"
-fi
+# No prompts, no IP questions: the store opens publicly for a short bootstrap
+# window so the user can get in immediately. The Tailscale onboarding (guided
+# in the store UI on first app launch) locks it down. The store holds no
+# secrets: admin is disabled on client installs and the agent API is localhost.
+STORE_VISIBILITY="public during bootstrap"
 
 # ── 7. Start the stack + phone-home ───────────────────────────────────
 log "Starting AppVault stack…"
@@ -225,15 +201,9 @@ if [ -n "$CUR_IP" ] && [ "$CUR_IP" != "127.0.0.1" ]; then
   # schedule rule removal in 24h
   ( sleep 86400; ufw delete allow from "$CUR_IP" to any port 22 proto tcp >/dev/null 2>&1 ) &
 fi
-# STORE: bootstrap access (decided in 6b) — allowlist the installer's SSH IP,
-# or the random port when no IP was detectable. No public exposure either way.
-if [ -n "$SKIP_STORE" ]; then
-  log "Store remains closed (Tailscale onboarding will open it on the tailnet)"
-elif [ -n "$STORE_PORT" ]; then
-  ufw allow "${STORE_PORT}/tcp" comment "store bootstrap (random port)" >/dev/null 2>&1
-else
-  ufw allow from "$CUR_IP" to any port 8085 proto tcp comment "store bootstrap (installer IP)" >/dev/null 2>&1
-fi
+# STORE: public bootstrap window (short) — the user can open the store right
+# away with zero configuration. Tailscale onboarding (guided in the UI) locks it.
+ufw allow 8085/tcp comment "store bootstrap (public)" >/dev/null 2>&1
 # Tailscale subnet — private lane (SSH + API + admin stay tailnet-only)
 ufw allow from 100.64.0.0/10 to any port 22 proto tcp comment "tailscale ssh" >/dev/null 2>&1
 ufw allow from 100.64.0.0/10 to any port 8086 proto tcp comment "tailscale api" >/dev/null 2>&1
@@ -245,28 +215,24 @@ log "Firewall active: deny-all inbound; store public on 8085 (until Tailscale on
 # ── 8a. Cloud-level firewall (best-effort) ─────────────────────────────
 # Most providers (OVH, Contabo, Hetzner, DO) have no network-level firewall —
 # the host ufw above is the only gate. GCP is the exception: its VPC firewall
-# is default-deny, so open the bootstrap port via the instance's own service
-# account (metadata token). If that fails, print the manual step.
-BOOTSTRAP_PORT="${STORE_PORT:-8085}"
-if [ -z "$SKIP_STORE" ] && curl -fsSL --max-time 2 -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/project/project-id" >/dev/null 2>&1; then
+# is default-deny, so open port 8085 via the instance's own service account
+# (metadata token). If that fails, print the manual step + the fix.
+if curl -fsSL --max-time 2 -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/project/project-id" >/dev/null 2>&1; then
   GCP_PROJECT="$(curl -fsSL --max-time 2 -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/project/project-id" 2>/dev/null)"
   GCP_TOKEN="$(curl -fsSL --max-time 2 -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" 2>/dev/null | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')"
-  GCP_RULE="$([ -n "$STORE_PORT" ] && echo appvault-store-random || echo appvault-store)"
-  GCP_SRC="${CUR_IP}/32"
-  [ -z "$CUR_IP" ] && GCP_SRC="0.0.0.0/0"   # random-port path: unguessable port, any source
   if [ -n "$GCP_TOKEN" ]; then
     GCP_RESP=$(curl -s -X POST "https://compute.googleapis.com/compute/v1/projects/${GCP_PROJECT}/global/firewalls" \
       -H "Authorization: Bearer ${GCP_TOKEN}" -H "Content-Type: application/json" \
-      -d "{\"name\":\"${GCP_RULE}\",\"allowed\":[{\"IPProtocol\":\"tcp\",\"ports\":[\"${BOOTSTRAP_PORT}\"]}],\"sourceRanges\":[\"${GCP_SRC}\"]}" 2>/dev/null)
+      -d '{"name":"appvault-store","allowed":[{"IPProtocol":"tcp","ports":["8085"]}],"sourceRanges":["0.0.0.0/0"]}' 2>/dev/null)
     if echo "$GCP_RESP" | grep -q '"kind"'; then
-      log "GCP VPC firewall rule created: tcp:${BOOTSTRAP_PORT} for ${GCP_SRC}"
+      log "GCP VPC firewall rule created: tcp:8085 (public bootstrap)"
     else
-      log "WARNING: could not create the GCP firewall rule automatically (permissions?). Manual step:"
-      log "  gcloud compute firewall-rules create ${GCP_RULE} --allow tcp:${BOOTSTRAP_PORT} --source-ranges ${GCP_SRC}"
+      log "WARNING: your cloud (GCP) blocks port 8085 and the installer lacks permission to open it."
+      log "  Fix: recreate the VM with 'Allow full access to all Cloud APIs' (Access scopes), or run from your own machine:"
+      log "  gcloud compute firewall-rules create appvault-store --allow tcp:8085 --source-ranges 0.0.0.0/0"
     fi
   else
-    log "WARNING: GCP detected but no service-account token — manual step:"
-    log "  gcloud compute firewall-rules create ${GCP_RULE} --allow tcp:${BOOTSTRAP_PORT} --source-ranges ${GCP_SRC}"
+    log "WARNING: GCP detected but no service-account token — open port 8085 in the GCP firewall (VPC network → Firewall → tcp:8085, source 0.0.0.0/0)"
   fi
 fi
 
@@ -324,7 +290,7 @@ cat <<EOF | tee -a "$LOG"
 ════════════════════════════════════════════════════════════════════
 ✅  AppVault installed
     Plan     : Free (10 starter apps) — apply a license key later in Settings → License   Agent: $AGENT_NAME
-    Store UI: $ACCESS   (bootstrap: ${STORE_VISIBILITY:-your IP only} — no public exposure)
+    Store UI: $ACCESS   (${STORE_VISIBILITY:-public} — open this in your browser)
     🔒 Tip    : open an app once, and AppVault will guide you to make
                  this server fully invisible via Tailscale (30 seconds)
     API key : saved in $INSTALL_DIR/.env (also shown below)
