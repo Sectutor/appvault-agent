@@ -9,21 +9,21 @@
 #    • Deny-all firewall applied LAST (lockout-proof ordering)
 #
 #  Usage (as root):
-#    bash install.sh [--license KEY] [--ts-authkey KEY] [--agent-name NAME] [--public-url URL]
+#    bash -c "$(curl -fsSL https://raw.githubusercontent.com/Sectutor/appvault-agent/main/install.sh)"
 #
-#  No license needed to install. Free plan: starter apps free, premium locked.
-#  Add --license KEY after paying (or apply the key later in Settings → License).
+#  No license needed — anyone can install. Free plan: 10 starter apps free,
+#  premium apps locked. After paying, apply the key in the dashboard
+#  (Settings → License) to unlock full access.
 #
 #  cloud-init (user-data) — paste at VPS provider purchase:
 #    #cloud-config
 #    runcmd:
 #      - curl -fsSL https://install.appvault.com/install.sh -o /root/install.sh
-#      - bash /root/install.sh --license LICENSE_KEY --ts-authkey TS_AUTH_KEY
+#      - bash /root/install.sh
 # ═══════════════════════════════════════════════════════════════════════
 set -uo pipefail
 
 # ── Config (env or flags) ──────────────────────────────────────────────
-LICENSE_KEY="${LICENSE_KEY:-}"
 TS_AUTH_KEY="${TS_AUTH_KEY:-}"
 AGENT_NAME="${AGENT_NAME:-}"
 PUBLIC_URL="${PUBLIC_URL:-}"
@@ -38,7 +38,6 @@ LOG="/var/log/appvault-install.log"
 # Parse flags
 while [ $# -gt 0 ]; do
   case "$1" in
-    --license)      LICENSE_KEY="${2:-}"; shift 2 ;;
     --ts-authkey)   TS_AUTH_KEY="${2:-}"; shift 2 ;;
     --agent-name)   AGENT_NAME="${2:-}"; shift 2 ;;
     --public-url)   PUBLIC_URL="${2:-}"; shift 2 ;;
@@ -56,11 +55,7 @@ command -v curl >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -q
 
 OS_ID="$(. /etc/os-release && echo "$ID")"
 OS_VER="$(. /etc/os-release && echo "$VERSION_ID")"
-if [ -n "$LICENSE_KEY" ]; then
-  log "Preflight OK — OS: $OS_ID $OS_VER, license: ${LICENSE_KEY:0:6}…"
-else
-  log "Preflight OK — OS: $OS_ID $OS_VER, no license (free plan: starter apps, premium locked)."
-fi
+log "Preflight OK — OS: $OS_ID $OS_VER (free plan: starter apps, premium locked)"
 
 # Disk space check (need ~10GB)
 AVAIL_KB=$(df -k / | awk 'NR==2{print $4}')
@@ -81,8 +76,6 @@ SESSION_SECRET="$(head -c 40 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -
 mkdir -p "$INSTALL_DIR" "$DATA_DIR"
 
 cat > "$INSTALL_DIR/.env" <<EOF
-LICENSE_KEY=$LICENSE_KEY
-PAID_LICENSE_KEYS=$LICENSE_KEY
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=$(head -c 16 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 16)
 SESSION_SECRET=$SESSION_SECRET
@@ -209,7 +202,7 @@ cat <<EOF | tee -a "$LOG"
 
 ════════════════════════════════════════════════════════════════════
 ✅  AppVault installed — INVISIBLE to the internet
-    Plan     : ${LICENSE_KEY:+Paid (${LICENSE_KEY:0:6}…)}Free (starter apps, premium locked)   Agent: $AGENT_NAME
+    Plan     : Free (10 starter apps) — apply a license key later in Settings → License   Agent: $AGENT_NAME
     Store UI: $ACCESS   (local only / via Tailscale)
     Admin   : http://127.0.0.1:8001/admin
     API key : saved in $INSTALL_DIR/.env (also shown below)
