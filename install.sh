@@ -79,6 +79,7 @@ SESSION_SECRET="$(head -c 40 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -
 mkdir -p "$INSTALL_DIR" "$DATA_DIR"
 
 cat > "$INSTALL_DIR/.env" <<EOF
+DISABLE_ADMIN=true
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=$(head -c 16 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 16)
 SESSION_SECRET=$SESSION_SECRET
