@@ -178,6 +178,21 @@ if [ -z "$CUR_IP" ] || [ "$CUR_IP" = "127.0.0.1" ]; then
   CUR_IP="$(ss -tn '( sport = :22 )' 2>/dev/null | awk 'NR>1{print $4}' | cut -d: -f1 | head -1)"
 fi
 CUR_IP="${CUR_IP%% *}"
+# Relay/cloud-shell detection: if the SSH peer is an internal address, the
+# real client IP is invisible to the box — ask the user for it interactively.
+if [ -n "$CUR_IP" ] && echo "$CUR_IP" | grep -qE '^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|100\.64\.)'; then
+  log "Your SSH connection comes from an internal address (${CUR_IP}) — cloud shell or relay in use."
+  printf "[install] Enter your PUBLIC IP (whatismyip.com) to open the store for it, or press Enter to skip (use Tailscale): "
+  read -r USER_PUB_IP
+  if [ -n "$USER_PUB_IP" ]; then
+    CUR_IP="$USER_PUB_IP"
+    log "Store will be opened for your public IP: $CUR_IP"
+  else
+    CUR_IP=""
+    SKIP_STORE=1
+    log "No public IP given — store stays closed until Tailscale onboarding (run: sudo bash /opt/appvault/tailscale-onboard.sh)"
+  fi
+fi
 STORE_PORT=""
 if [ -n "$CUR_IP" ] && [ "$CUR_IP" != "127.0.0.1" ]; then
   STORE_VISIBILITY="your IP only ($CUR_IP)"
@@ -209,7 +224,9 @@ if [ -n "$CUR_IP" ] && [ "$CUR_IP" != "127.0.0.1" ]; then
 fi
 # STORE: bootstrap access (decided in 6b) — allowlist the installer's SSH IP,
 # or the random port when no IP was detectable. No public exposure either way.
-if [ -n "$STORE_PORT" ]; then
+if [ -n "$SKIP_STORE" ]; then
+  log "Store remains closed (Tailscale onboarding will open it on the tailnet)"
+elif [ -n "$STORE_PORT" ]; then
   ufw allow "${STORE_PORT}/tcp" comment "store bootstrap (random port)" >/dev/null 2>&1
 else
   ufw allow from "$CUR_IP" to any port 8085 proto tcp comment "store bootstrap (installer IP)" >/dev/null 2>&1
@@ -228,7 +245,7 @@ log "Firewall active: deny-all inbound; store public on 8085 (until Tailscale on
 # is default-deny, so open the bootstrap port via the instance's own service
 # account (metadata token). If that fails, print the manual step.
 BOOTSTRAP_PORT="${STORE_PORT:-8085}"
-if curl -fsSL --max-time 2 -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/project/project-id" >/dev/null 2>&1; then
+if [ -z "$SKIP_STORE" ] && curl -fsSL --max-time 2 -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/project/project-id" >/dev/null 2>&1; then
   GCP_PROJECT="$(curl -fsSL --max-time 2 -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/project/project-id" 2>/dev/null)"
   GCP_TOKEN="$(curl -fsSL --max-time 2 -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" 2>/dev/null | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')"
   GCP_RULE="$([ -n "$STORE_PORT" ] && echo appvault-store-random || echo appvault-store)"
