@@ -832,6 +832,18 @@ def _install_blocked_reason(app_def):
 
 _install_error = {}  # app_id -> reason string (persisted across installs until next attempt)
 
+# Per-app operation locks: install/uninstall/restart on the same app must never
+# run concurrently (an async uninstall racing an install deleted the fresh DB
+# container in testing). Each operation holds its app's lock for its duration.
+_op_locks = {}
+_op_locks_guard = threading.Lock()
+
+def _app_op_lock(app_id):
+    with _op_locks_guard:
+        if app_id not in _op_locks:
+            _op_locks[app_id] = threading.Lock()
+        return _op_locks[app_id]
+
 def _host_free_mem_mb():
     """Free memory in MB (Linux /proc/meminfo)."""
     try:
@@ -1326,6 +1338,28 @@ def _do_install_stack(app_id):
         except Exception as _e:
             print(f"[agent] SERVER_URL injection skipped for {app_id}: {_e}")
 
+    # ADDITIVE: stabilize the web service's host port. Stack composes often use a
+    # bare `- "9000"` (random host port) — that drifts on every reinstall and makes
+    # launch URLs unpredictable. Rewrite the container_port mapping to a
+    # deterministic stable host port so every client install behaves identically.
+    try:
+        import re as _re3
+        _cport3 = str(app_def.get("container_port", "") or "")
+        if _cport3:
+            with open(compose_path, "r", encoding="utf-8") as _f:
+                _content3 = _f.read()
+            _stable3 = _stable_host_port(f"app-{app_id}", app_id, _cport3)
+            _new3 = _re3.sub(
+                rf'^(\s*-\s*)["\']?{_cport3}["\']?\s*$',
+                lambda m: m.group(1) + f'"{_stable3}:{_cport3}"',
+                _content3, flags=_re3.M)
+            if _new3 != _content3:
+                with open(compose_path, "w", encoding="utf-8") as _f:
+                    _f.write(_new3)
+                print(f"[agent] Stabilized {app_id} web port -> {_stable3}:{_cport3}")
+    except Exception as _e:
+        print(f"[agent] port stabilization skipped for {app_id}: {_e}")
+
     ok, pull_out = _docker("compose", "-f", compose_path, "pull", capture=True, timeout=600)
     if not ok:
         print(f"[agent] Pull warning: {pull_out[:200]}")
@@ -1476,7 +1510,7 @@ def _do_install_stack(app_id):
         if _svc_match is None:  # fallback: first service with any ports mapping
             for _idx, _m in enumerate(_svc_matches):
                 _end = _svc_matches[_idx + 1].start() if _idx + 1 < len(_svc_matches) else len(_content)
-                if re.search(r'^\s*ports:', _content[_m.end():_end], _re2.M):
+                if _re2.search(r'^\s*ports:', _content[_m.end():_end], _re2.M):
                     _svc_match = _m
                     break
         if _svc_match and "appvault.managed" not in _content:
@@ -2609,6 +2643,11 @@ def api_install(app_id):
             (400 if app_def and app_def.get("disabled") else 402)
     # Initialize progress
     _set_progress(app_id, "Queued...", 2)
+    # Serialize per-app operations: no concurrent install/uninstall/restart
+    op_lock = _app_op_lock(app_id)
+    if not op_lock.acquire(blocking=False):
+        return jsonify({"status": "busy", "app_id": app_id,
+                        "message": "Another operation is already running for this app"}), 409
     # Run install in background thread
     def _install_thread():
         try:
@@ -2624,6 +2663,8 @@ def api_install(app_id):
                 _do_install(app_id)
         except Exception as e:
             _set_progress_error(app_id, str(e)[:200])
+        finally:
+            op_lock.release()
     threading.Thread(target=_install_thread, daemon=True).start()
     return jsonify({"status": "started", "app_id": app_id, "message": f"Installing {app_id}..."})
 
@@ -2643,6 +2684,10 @@ def api_install_status(app_id):
 def api_uninstall(app_id):
     """Uninstall an app locally in the background (returns immediately)."""
     _set_progress(app_id, "Uninstalling...", 5)
+    op_lock = _app_op_lock(app_id)
+    if not op_lock.acquire(blocking=False):
+        return jsonify({"status": "busy", "app_id": app_id,
+                        "message": "Another operation is already running for this app"}), 409
     def _uninstall_thread():
         try:
             _set_progress(app_id, "Removing container...", 30)
@@ -2650,6 +2695,8 @@ def api_uninstall(app_id):
             _set_progress_done(app_id, f"{app_id} uninstalled")
         except Exception as e:
             _set_progress_error(app_id, str(e))
+        finally:
+            op_lock.release()
     threading.Thread(target=_uninstall_thread, daemon=True).start()
     return jsonify({"status": "started", "app_id": app_id, "message": f"Uninstalling {app_id}..."})
 
@@ -2665,20 +2712,32 @@ def api_uninstall_status(app_id):
 @app.route("/api/restart/<app_id>", methods=["POST"])
 def api_restart(app_id):
     """Restart an app locally."""
+    op_lock = _app_op_lock(app_id)
+    if not op_lock.acquire(blocking=False):
+        return jsonify({"status": "busy", "app_id": app_id,
+                        "message": "Another operation is already running for this app"}), 409
     try:
         _do_restart(app_id)
         return jsonify({"status": "ok", "app_id": app_id, "message": f"{app_id} restarted"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+    finally:
+        op_lock.release()
 
 @app.route("/api/stop/<app_id>", methods=["POST"])
 def api_stop(app_id):
     """Stop an app locally (frees its memory; data preserved)."""
+    op_lock = _app_op_lock(app_id)
+    if not op_lock.acquire(blocking=False):
+        return jsonify({"status": "busy", "app_id": app_id,
+                        "message": "Another operation is already running for this app"}), 409
     try:
         _do_stop(app_id)
         return jsonify({"status": "ok", "app_id": app_id, "message": f"{app_id} stopped"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+    finally:
+        op_lock.release()
 
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # HEIMDALL â€” auto-configure on startup
