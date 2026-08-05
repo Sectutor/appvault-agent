@@ -190,9 +190,18 @@ if [ -n "$CUR_IP" ] && [ "$CUR_IP" != "127.0.0.1" ]; then
   # schedule rule removal in 24h
   ( sleep 86400; ufw delete allow from "$CUR_IP" to any port 22 proto tcp >/dev/null 2>&1 ) &
 fi
-# STORE: public during bootstrap — anyone can reach the store UI right after
-# install. The Tailscale onboarding (first app start) locks this down.
-ufw allow 8085/tcp comment "store bootstrap (public)" >/dev/null 2>&1
+# STORE: bootstrap access — allowlist ONLY the installer's SSH IP (no public
+# exposure). If no SSH client IP is detectable (console/cloud-init installs),
+# fall back to a random unguessable port instead of 8085.
+if [ -n "$CUR_IP" ] && [ "$CUR_IP" != "127.0.0.1" ]; then
+  ufw allow from "$CUR_IP" to any port 8085 proto tcp comment "store bootstrap (installer IP)" >/dev/null 2>&1
+  STORE_VISIBILITY="your IP only ($CUR_IP)"
+else
+  STORE_PORT=$(( 42000 + (RANDOM % 7999) ))
+  sed -i "s/0.0.0.0:8085:80/0.0.0.0:${STORE_PORT}:80/" "$INSTALL_DIR/docker-compose.yml"
+  ufw allow "${STORE_PORT}/tcp" comment "store bootstrap (random port)" >/dev/null 2>&1
+  STORE_VISIBILITY="random port ${STORE_PORT}"
+fi
 # Tailscale subnet — private lane (SSH + API + admin stay tailnet-only)
 ufw allow from 100.64.0.0/10 to any port 22 proto tcp comment "tailscale ssh" >/dev/null 2>&1
 ufw allow from 100.64.0.0/10 to any port 8086 proto tcp comment "tailscale api" >/dev/null 2>&1
@@ -230,8 +239,11 @@ for i in $(seq 1 30); do
   sleep 2
 done
 [ -z "$TS_IP" ] && { log "ERROR: not on the tailnet yet — approve the login URL, then rerun"; exit 1; }
-# Lock the firewall: store now tailnet-only
-ufw delete allow 8085/tcp >/dev/null 2>&1 || true
+# Lock the firewall: remove EVERY bootstrap rule for the store port,
+# then allow only the tailnet
+for r in $(ufw status numbered | grep "8085" | awk -F'[][]' '{print $2}' | sort -rn); do
+  echo y | ufw delete "$r" >/dev/null 2>&1 || true
+done
 ufw allow from 100.64.0.0/10 to any port 8085 proto tcp comment "tailscale store" >/dev/null 2>&1
 ufw --force enable >/dev/null 2>&1
 cat > "$INSTALL_DIR/tailscale-status.json" <<EOF
@@ -252,9 +264,9 @@ cat <<EOF | tee -a "$LOG"
 ════════════════════════════════════════════════════════════════════
 ✅  AppVault installed
     Plan     : Free (10 starter apps) — apply a license key later in Settings → License   Agent: $AGENT_NAME
-    Store UI: $ACCESS   (PUBLIC for now — open this in your browser)
+    Store UI: $ACCESS   (bootstrap: ${STORE_VISIBILITY:-your IP only} — no public exposure)
     🔒 Tip    : open an app once, and AppVault will guide you to make
-                 this server invisible via Tailscale (30 seconds)
+                 this server fully invisible via Tailscale (30 seconds)
     API key : saved in $INSTALL_DIR/.env (also shown below)
     API_KEY : $API_KEY
 
