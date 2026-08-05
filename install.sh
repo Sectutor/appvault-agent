@@ -169,6 +169,24 @@ if [ -n "$TS_AUTH_KEY" ]; then
   if [ -n "$TS_IP" ]; then log "Tailscale up — private IP: $TS_IP"; else log "Tailscale not ready yet (will retry on boot)"; fi
 fi
 
+# ── 6b. Bootstrap access decision (BEFORE stack start) ────────────────
+# Detect the SSH session's IP robustly — works even under `sudo bash -c`
+# (sudo strips SSH_CLIENT; that unbound-variable crash killed the firewall
+# step on older installers). Fallback: `ss` reads the live SSH connection.
+CUR_IP="${SSH_CLIENT:-}"
+if [ -z "$CUR_IP" ] || [ "$CUR_IP" = "127.0.0.1" ]; then
+  CUR_IP="$(ss -tn '( sport = :22 )' 2>/dev/null | awk 'NR>1{print $4}' | cut -d: -f1 | head -1)"
+fi
+CUR_IP="${CUR_IP%% *}"
+STORE_PORT=""
+if [ -n "$CUR_IP" ] && [ "$CUR_IP" != "127.0.0.1" ]; then
+  STORE_VISIBILITY="your IP only ($CUR_IP)"
+else
+  STORE_PORT=$(( 42000 + (RANDOM % 7999) ))
+  sed -i "s/0.0.0.0:8085:80/0.0.0.0:${STORE_PORT}:80/" "$INSTALL_DIR/docker-compose.yml"
+  STORE_VISIBILITY="random port ${STORE_PORT} (no SSH IP detected)"
+fi
+
 # ── 7. Start the stack + phone-home ───────────────────────────────────
 log "Starting AppVault stack…"
 docker compose -f "$INSTALL_DIR/docker-compose.yml" --env-file "$INSTALL_DIR/.env" up -d || die "Stack start failed"
@@ -184,23 +202,17 @@ ufw default deny incoming >/dev/null 2>&1
 ufw default allow outgoing >/dev/null 2>&1
 
 # Allow the SSH session's current IP for 24h (fallback in case Tailscale isn't ready)
-CUR_IP="${SSH_CLIENT%% *}"
 if [ -n "$CUR_IP" ] && [ "$CUR_IP" != "127.0.0.1" ]; then
   ufw allow from "$CUR_IP" to any port 22 proto tcp comment "installer fallback (24h)" >/dev/null 2>&1
   # schedule rule removal in 24h
   ( sleep 86400; ufw delete allow from "$CUR_IP" to any port 22 proto tcp >/dev/null 2>&1 ) &
 fi
-# STORE: bootstrap access — allowlist ONLY the installer's SSH IP (no public
-# exposure). If no SSH client IP is detectable (console/cloud-init installs),
-# fall back to a random unguessable port instead of 8085.
-if [ -n "$CUR_IP" ] && [ "$CUR_IP" != "127.0.0.1" ]; then
-  ufw allow from "$CUR_IP" to any port 8085 proto tcp comment "store bootstrap (installer IP)" >/dev/null 2>&1
-  STORE_VISIBILITY="your IP only ($CUR_IP)"
-else
-  STORE_PORT=$(( 42000 + (RANDOM % 7999) ))
-  sed -i "s/0.0.0.0:8085:80/0.0.0.0:${STORE_PORT}:80/" "$INSTALL_DIR/docker-compose.yml"
+# STORE: bootstrap access (decided in 6b) — allowlist the installer's SSH IP,
+# or the random port when no IP was detectable. No public exposure either way.
+if [ -n "$STORE_PORT" ]; then
   ufw allow "${STORE_PORT}/tcp" comment "store bootstrap (random port)" >/dev/null 2>&1
-  STORE_VISIBILITY="random port ${STORE_PORT}"
+else
+  ufw allow from "$CUR_IP" to any port 8085 proto tcp comment "store bootstrap (installer IP)" >/dev/null 2>&1
 fi
 # Tailscale subnet — private lane (SSH + API + admin stay tailnet-only)
 ufw allow from 100.64.0.0/10 to any port 22 proto tcp comment "tailscale ssh" >/dev/null 2>&1
