@@ -57,9 +57,12 @@ OS_ID="$(. /etc/os-release && echo "$ID")"
 OS_VER="$(. /etc/os-release && echo "$VERSION_ID")"
 log "Preflight OK — OS: $OS_ID $OS_VER (free plan: starter apps, premium locked)"
 
-# Disk space check (need ~10GB)
+# Disk space check — core install (Docker + 3 images) needs ~4GB.
+# Under 10GB: installs fine but with limited room for apps (warn only).
 AVAIL_KB=$(df -k / | awk 'NR==2{print $4}')
-[ "${AVAIL_KB:-0}" -ge 10485760 ] || die "Need ~10GB free disk (have $((AVAIL_KB/1024/1024)) GB)"
+AVAIL_GB=$((AVAIL_KB/1024/1024))
+[ "$AVAIL_GB" -ge 4 ] || die "Need at least 4GB free disk for the core install (have ${AVAIL_GB} GB)"
+[ "$AVAIL_GB" -ge 10 ] || log "WARNING: ${AVAIL_GB} GB free — core install fits, but limited space for apps (recommend ≥10GB)"
 
 # ── 2. Install Docker (idempotent) ────────────────────────────────────
 if ! command -v docker >/dev/null 2>&1; then
