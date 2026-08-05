@@ -824,6 +824,95 @@ def _install_blocked_reason(app_def):
             return "Premium app - apply a license key in Settings to unlock"
     return None
 
+# ── VERIFIED INSTALL ENGINE ─────────────────────────────────────────────
+# Productization guarantee: an install only reports success after the app
+# actually serves HTTP. If it can't, the install fails fast with a reason,
+# rolls back its containers, and the store shows the error. Every client
+# install follows the same spec → same result.
+
+_install_error = {}  # app_id -> reason string (persisted across installs until next attempt)
+
+def _host_free_mem_mb():
+    """Free memory in MB (Linux /proc/meminfo)."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) // 1024
+    except Exception:
+        pass
+    return None
+
+def _host_free_disk_gb():
+    """Free disk in GB on the docker root fs."""
+    try:
+        import shutil
+        return shutil.disk_usage("/").free // (1024 ** 3)
+    except Exception:
+        return None
+
+def _resource_blocked_reason(app_def):
+    """Refuse installs that cannot possibly work on this host (memory/disk)."""
+    need_mem = app_def.get("min_mem_mb") or 0
+    need_disk = app_def.get("min_disk_gb") or 0
+    free_mem = _host_free_mem_mb()
+    free_disk = _host_free_disk_gb()
+    if need_mem and free_mem is not None and free_mem < need_mem:
+        return f"Not enough memory: needs {need_mem} MB free, only {free_mem} MB available"
+    if need_disk and free_disk is not None and free_disk < need_disk:
+        return f"Not enough disk: needs {need_disk} GB free, only {free_disk} GB available"
+    return None
+
+def _wait_app_healthy(app_id, app_def, cname, boot_timeout):
+    """Wait until the app's web server responds (per spec healthcheck) or timeout.
+
+    Returns (ok, detail). Uses the container's native docker healthcheck when the
+    image defines one; otherwise probes the spec's healthcheck path via curl
+    inside the container (no host-port dependency, works on every network).
+    """
+    hc = app_def.get("healthcheck") or {}
+    path = hc.get("path", "/")
+    cport = str(hc.get("port") or app_def.get("container_port") or "80")
+    expect = hc.get("expect") or [200, 301, 302, 307, 401, 403, 404]
+    deadline = time.time() + int(boot_timeout or 150)
+    last_detail = "not started"
+    while time.time() < deadline:
+        # 1) native docker healthcheck if the image defines one
+        okh, hout = _docker("inspect", "--format", "{{.State.Health.Status}}", cname, capture=True, timeout=15)
+        if okh and hout.strip() == "healthy":
+            return True, "healthy"
+        # 2) HTTP probe inside the container (works without host port binding)
+        okr, rout = _docker("exec", cname, "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                            "--max-time", "5", f"http://127.0.0.1:{cport}{path}", capture=True, timeout=15)
+        if okr and rout.strip().isdigit():
+            code = int(rout.strip())
+            if code in expect:
+                return True, f"HTTP {code} on {path}"
+            last_detail = f"HTTP {code} on {path} (wanted {expect})"
+        # container still alive?
+        okc, _cout = _docker("inspect", "--format", "{{.State.Running}}", cname, capture=True, timeout=15)
+        if not (okc and _cout.strip() == "true"):
+            okx, xout = _docker("logs", "--tail", "5", cname, capture=True, timeout=15)
+            last_detail = "container exited: " + (xout.strip().splitlines() or ["?"])[-1][:120]
+        time.sleep(5)
+    return False, last_detail
+
+def _rollback_install(app_id, containers):
+    """Remove containers created by a failed install (app + its deps)."""
+    for cname in containers:
+        try:
+            _docker("rm", "-f", cname, capture=True, timeout=30)
+            print(f"[agent] rollback: removed {cname}")
+        except Exception as e:
+            print(f"[agent] rollback warning ({cname}): {e}")
+
+def _install_log_tail(cname, lines=25):
+    ok, out = _docker("logs", "--tail", str(lines), cname, capture=True, timeout=20)
+    if ok and out:
+        return out.strip().splitlines()[-lines:]
+    return []
+
+
 def _do_install(app_id):
     """Install a Docker app locally using Docker CLI."""
     global _install_progress
@@ -854,7 +943,14 @@ def _do_install(app_id):
     if blocked:
         _set_progress_error(app_id, blocked)
         raise Exception(blocked)
-    
+
+    # Resource gate: refuse installs this host cannot possibly run
+    res_blocked = _resource_blocked_reason(app_def)
+    if res_blocked:
+        _set_progress_error(app_id, res_blocked)
+        _install_error[app_id] = res_blocked
+        raise Exception(res_blocked)
+
     image = app_def.get("image")
     if not image:
         _set_progress_error(app_id, "No Docker image defined")
@@ -988,6 +1084,7 @@ def _do_install(app_id):
         run_args.extend(["-e", "OWNCLOUD_TRUSTED_DOMAINS=" + ",".join(td_hosts)])
 
     # Provision dependency containers the app requires (Redis/Postgres/etc.)
+    created_deps = []
     for dep in app_def.get("deps", []):
         dname = dep.get("name", "")
         dimg = dep.get("image", "")
@@ -1005,11 +1102,18 @@ def _do_install(app_id):
         for v in dep.get("volumes", []):
             dargs.extend(["-v", v])
         dargs.append(dimg)
-        _docker(*dargs, capture=True)
+        dok, derr = _docker(*dargs, capture=True)
+        if not dok:
+            _set_progress_error(app_id, f"Failed to start dependency {dname}: {derr[:120]}")
+            _rollback_install(app_id, created_deps)
+            raise Exception(f"Failed to start dependency {dname}: {derr}")
+        created_deps.append(dname)
         try:
             _docker("network", "connect", _caddy_net(), dname)
         except Exception:
             pass
+        # give freshly created deps a moment to init before the app starts
+        time.sleep(4)
 
     # Add image
     run_args.append(image)
@@ -1025,8 +1129,28 @@ def _do_install(app_id):
     if not ok:
         _set_progress_error(app_id, f"Failed to start: {err[:150]}")
         print(f"[agent] Docker run failed: {err}")
+        _rollback_install(app_id, created_deps)
         raise Exception(f"Failed to start container: {err}")
-    
+
+    # VERIFY: wait until the app actually serves HTTP (per spec healthcheck).
+    # This is the productization guarantee — "installed" means "responds".
+    boot_timeout = app_def.get("boot_timeout") or 150
+    _set_progress(app_id, f"Waiting for {app_def.get('name', app_id)} to become ready (up to {boot_timeout}s)...", 85)
+    healthy, detail = _wait_app_healthy(app_id, app_def, container_name, boot_timeout)
+    if not healthy:
+        tail = _install_log_tail(container_name)
+        snippet = " | ".join(tail[-3:])[:300] if tail else ""
+        reason = f"App did not become ready within {boot_timeout}s ({detail})"
+        if snippet:
+            reason += f" — logs: {snippet}"
+        print(f"[agent] VERIFY FAILED {app_id}: {reason}")
+        _set_progress_error(app_id, reason)
+        _install_error[app_id] = reason
+        _rollback_install(app_id, created_deps + [container_name])
+        raise Exception(reason)
+    print(f"[agent] VERIFY OK {app_id}: {detail}")
+    _install_error.pop(app_id, None)
+
     _set_progress(app_id, "Finalizing...", 90)
 
     # Ensure the app is on Caddy's network so Caddy can reverse-proxy it by name.
@@ -1655,6 +1779,19 @@ def check_apps_health():
         # Skip database apps (no web UI)
         if app_def.get("category", "").lower() == "database":
             continue
+        # Skip apps still inside their boot window — slow first boots (Nextcloud,
+        # AI stacks) are NOT unhealthy. boot_timeout doubles as the grace period.
+        boot_timeout = int(app_def.get("boot_timeout") or 150)
+        oks, sout = _docker("inspect", "--format", "{{.State.StartedAt}}", cname, capture=True, timeout=15)
+        if oks and sout.strip():
+            try:
+                from datetime import datetime
+                started = datetime.fromisoformat(sout.strip().replace("Z", "+00:00"))
+                import datetime as _dt
+                if (datetime.now(_dt.timezone.utc) - started).total_seconds() < boot_timeout:
+                    continue
+            except Exception:
+                pass
         internal_port = _get_internal_port(cname)
         alive = _is_app_alive(cname, internal_port)
         if alive:
@@ -1760,6 +1897,10 @@ def api_catalog():
             cname = f"app-{app['id']}"
             host_port = get_container_host_port(cname) or app.get("container_port", "")
         entry = {**app, "status": status, "host_port": host_port}
+        # Surface a failed-install reason (verified-install engine) so the store
+        # shows WHY an app is not available instead of a silent dead end.
+        if app["id"] in _install_error:
+            entry["install_error"] = _install_error[app["id"]]
         # Launch URL, computed per deployment mode:
         #  - PROXY mode (PUBLIC_URL set, e.g. VPS with Caddy/traefik): the app is
         #    reachable at https://PUBLIC_URL:<per-app-https-port>/<web_path>. The UI
