@@ -902,9 +902,15 @@ def _wait_app_healthy(app_id, app_def, cname, boot_timeout):
         okh, hout = _docker("inspect", "--format", "{{.State.Health.Status}}", cname, capture=True, timeout=15)
         if okh and hout.strip() == "healthy":
             return True, "healthy"
-        # 2) HTTP probe inside the container (works without host port binding)
+        # 2) HTTP probe inside the container (works without host port binding).
+        #    Try curl first; alpine/distroless images often only ship wget.
         okr, rout = _docker("exec", cname, "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
                             "--max-time", "5", f"http://127.0.0.1:{cport}{path}", capture=True, timeout=15)
+        if not (okr and rout.strip().isdigit()):
+            okr, rout = _docker("exec", cname, "wget", "-q", "-O", "/dev/null", "--timeout=5",
+                                f"http://127.0.0.1:{cport}{path}", capture=True, timeout=15)
+            if okr and rout.strip():
+                rout = "200"  # wget exit 0 = served
         if okr and rout.strip().isdigit():
             code = int(rout.strip())
             if code in expect:
