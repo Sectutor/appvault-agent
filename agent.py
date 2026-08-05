@@ -1760,17 +1760,24 @@ def api_catalog():
             cname = f"app-{app['id']}"
             host_port = get_container_host_port(cname) or app.get("container_port", "")
         entry = {**app, "status": status, "host_port": host_port}
-        # Reverse-proxied launch URL (HTTPS through Caddy at /<app-id>/). The store's
-        # Launch button uses this so apps open over HTTPS at https://PUBLIC_URL/<app-id>/.
+        # Launch URL, computed per deployment mode:
+        #  - PROXY mode (PUBLIC_URL set, e.g. VPS with Caddy/traefik): the app is
+        #    reachable at https://PUBLIC_URL:<per-app-https-port>/<web_path>. The UI
+        #    trusts this URL verbatim.
+        #  - DIRECT mode (no PUBLIC_URL, e.g. local installs): apps are reachable at
+        #    http://<dashboard-host>:<live-host-port><web_path>. No launch_url is
+        #    emitted — the UI derives it from the live host_port + location.hostname,
+        #    which also works when the dashboard is accessed remotely.
         if status in ("installed", "stopped"):
-            # Per-app HTTPS port serving at root (+ web_path if the app serves under a subpath,
-            # e.g. pihole at /admin/) so Launch opens the correct location.
-            hpj = _app_https_ports().get(app["id"], _https_port(app["id"]))
-            wp = (app.get("web_path") or "").strip("/")
-            launch = f"{public_base()}:{hpj}/"
-            if wp:
-                launch += wp + "/"
-            entry["launch_url"] = launch
+            if PUBLIC_URL and "://" in PUBLIC_URL:
+                hpj = _app_https_ports().get(app["id"], _https_port(app["id"]))
+                wp = (app.get("web_path") or "").strip("/")
+                launch = f"{PUBLIC_URL}:{hpj}/"
+                if wp:
+                    launch += wp + "/"
+                entry["launch_url"] = launch
+            else:
+                entry["launch_url"] = ""
         if status in ("installed", "stopped") and app.get("extra_ports"):
             cname = f"app-{app['id']}"
             path = app.get("web_path", "/")
