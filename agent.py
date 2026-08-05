@@ -2745,6 +2745,17 @@ def api_app_icon(app_id):
 # LOCAL APP MANAGEMENT (install/uninstall/restart)
 # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+@app.route("/api/tailscale/status")
+def api_tailscale_status():
+    """Tailscale onboarding state (written by /opt/appvault/tailscale-onboard.sh)."""
+    try:
+        with open("/opt/appvault/tailscale-status.json") as f:
+            st = json.load(f)
+        return jsonify({"tailscale": st})
+    except Exception:
+        return jsonify({"tailscale": {"joined": False, "onboard_script": "sudo bash /opt/appvault/tailscale-onboard.sh"}})
+
+
 @app.route("/api/install/<app_id>", methods=["POST"])
 def api_install(app_id):
     """Start installing an app in the background. Returns immediately."""

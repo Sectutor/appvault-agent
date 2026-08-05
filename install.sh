@@ -137,7 +137,7 @@ services:
     image: ${STORE_IMAGE}
     container_name: appvault-store
     restart: unless-stopped
-    ports: ["127.0.0.1:8085:80"]
+    ports: ["0.0.0.0:8085:80"]
     volumes:
       - heimdall-config:/config
     environment:
@@ -177,7 +177,7 @@ sleep 10
 log "Containers: $(docker ps --filter name=appvault --format '{{.Names}}' | tr '\n' ' ')"
 
 # ── 8. FIREWALL — applied LAST (lockout-proof) ────────────────────────
-log "Applying firewall (deny-all inbound)…"
+log "Applying firewall (deny-all inbound, store PUBLIC for bootstrap)…"
 export DEBIAN_FRONTEND=noninteractive
 command -v ufw >/dev/null 2>&1 || apt-get install -y -qq ufw
 ufw default deny incoming >/dev/null 2>&1
@@ -190,29 +190,75 @@ if [ -n "$CUR_IP" ] && [ "$CUR_IP" != "127.0.0.1" ]; then
   # schedule rule removal in 24h
   ( sleep 86400; ufw delete allow from "$CUR_IP" to any port 22 proto tcp >/dev/null 2>&1 ) &
 fi
-# Tailscale subnet — always allowed (private admin lane)
+# STORE: public during bootstrap — anyone can reach the store UI right after
+# install. The Tailscale onboarding (first app start) locks this down.
+ufw allow 8085/tcp comment "store bootstrap (public)" >/dev/null 2>&1
+# Tailscale subnet — private lane (SSH + API + admin stay tailnet-only)
 ufw allow from 100.64.0.0/10 to any port 22 proto tcp comment "tailscale ssh" >/dev/null 2>&1
-ufw allow from 100.64.0.0/10 to any port 8085 proto tcp comment "tailscale store" >/dev/null 2>&1
 ufw allow from 100.64.0.0/10 to any port 8086 proto tcp comment "tailscale api" >/dev/null 2>&1
 ufw allow from 100.64.0.0/10 to any port 8001 proto tcp comment "tailscale admin" >/dev/null 2>&1
 ufw --force enable >/dev/null 2>&1
 ufw status verbose | tee -a "$LOG"
-log "Firewall active: deny-all inbound (SSH only via Tailscale + 24h fallback)"
+log "Firewall active: deny-all inbound; store public on 8085 (until Tailscale onboarding locks it)"
+
+# ── 8b. Onboarding helper: tailscale-onboard.sh (run from the store UI) ──
+cat > "$INSTALL_DIR/tailscale-onboard.sh" <<'TSEOF'
+#!/bin/bash
+# AppVault — make this server invisible: join Tailscale, then lock the firewall.
+# Usage: sudo bash tailscale-onboard.sh [--authkey KEY]
+set -euo pipefail
+INSTALL_DIR="/opt/appvault"
+log() { echo "[tailscale-onboard] $*"; }
+AUTHKEY=""
+[ "${1:-}" = "--authkey" ] && AUTHKEY="${2:-}"
+if ! command -v tailscale >/dev/null 2>&1; then
+  log "Installing Tailscale…"
+  curl -fsSL https://tailscale.com/install.sh | sh >/dev/null 2>&1 || { log "ERROR: tailscale install failed"; exit 1; }
+fi
+if ! tailscale status >/dev/null 2>&1; then
+  if [ -n "$AUTHKEY" ]; then
+    log "Joining Tailscale with auth key…"
+    tailscale up --authkey="$AUTHKEY" >/dev/null 2>&1 || { log "ERROR: join failed (check the key)"; exit 1; }
+  else
+    log "Run this on the server to approve (opens a URL): tailscale up"
+    tailscale up 2>/dev/null || true
+  fi
+fi
+for i in $(seq 1 30); do
+  TS_IP=$(tailscale ip -4 2>/dev/null | head -1 || true)
+  [ -n "$TS_IP" ] && break
+  sleep 2
+done
+[ -z "$TS_IP" ] && { log "ERROR: not on the tailnet yet — approve the login URL, then rerun"; exit 1; }
+# Lock the firewall: store now tailnet-only
+ufw delete allow 8085/tcp >/dev/null 2>&1 || true
+ufw allow from 100.64.0.0/10 to any port 8085 proto tcp comment "tailscale store" >/dev/null 2>&1
+ufw --force enable >/dev/null 2>&1
+cat > "$INSTALL_DIR/tailscale-status.json" <<EOF
+{"joined": true, "ip": "$TS_IP", "store_url": "http://$TS_IP:8085", "locked": true}
+EOF
+log "Invisible! Store is now tailnet-only: http://$TS_IP:8085"
+TSEOF
+chmod +x "$INSTALL_DIR/tailscale-onboard.sh"
 
 # ── 9. Success screen ─────────────────────────────────────────────────
+PUB_IP=""
+curl -fsSL -H "Metadata-Flavor: Google" --max-time 3 "http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip" >/dev/null 2>&1 && PUB_IP=$(curl -fsSL -H "Metadata-Flavor: Google" --max-time 3 "http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip" 2>/dev/null)
+[ -z "$PUB_IP" ] && PUB_IP=$(curl -fsSL --max-time 5 https://ifconfig.me 2>/dev/null || true)
 ACCESS="http://127.0.0.1:8085"
-[ -n "$TS_IP" ] && ACCESS="http://$TS_IP:8085"
+[ -n "$PUB_IP" ] && ACCESS="http://$PUB_IP:8085"
 cat <<EOF | tee -a "$LOG"
 
 ════════════════════════════════════════════════════════════════════
-✅  AppVault installed — INVISIBLE to the internet
+✅  AppVault installed
     Plan     : Free (10 starter apps) — apply a license key later in Settings → License   Agent: $AGENT_NAME
-    Store UI: $ACCESS   (local only / via Tailscale)
-    Admin   : http://127.0.0.1:8001/admin
+    Store UI: $ACCESS   (PUBLIC for now — open this in your browser)
+    🔒 Tip    : open an app once, and AppVault will guide you to make
+                 this server invisible via Tailscale (30 seconds)
     API key : saved in $INSTALL_DIR/.env (also shown below)
     API_KEY : $API_KEY
 
-    🔒 Firewall: deny-all inbound — zero open ports (verified)
+    🔒 Firewall: deny-all inbound; store public until Tailscale onboarding
     📡 Phone-home: $CENTRAL_URL (catalog, updates, license)
     🚪 Lost SSH? Use your provider's web console (escape hatch)
 ════════════════════════════════════════════════════════════════════
