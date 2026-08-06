@@ -194,7 +194,18 @@ def main():
     if not targets:
         print("no matching apps; try: python certify_app.py <app_id> [more ids] | --all | --list")
         sys.exit(1)
-    for app in targets:
+    # --parallel N — concurrent certification (pulls overlap; big speedup)
+    from concurrent.futures import ThreadPoolExecutor
+    parallel = 1
+    if "--parallel" in args:
+        try:
+            parallel = max(1, min(4, int(args[args.index("--parallel") + 1])))
+        except Exception:
+            parallel = 1
+    if parallel > 1:
+        print(f"parallel: {parallel} workers", flush=True)
+
+    def _certify_one(app):
         print(f"\n=== certifying {app['id']} ({app.get('image')}) ===", flush=True)
         try:
             r = certify(app)
@@ -204,12 +215,24 @@ def main():
                  "notes": [f"harness exception: {e}"]}
             print(f"  !! harness exception: {e}", flush=True)
         print(json.dumps(r, indent=1), flush=True)
-        report[app["id"]] = r
-        # incremental report — a crash never loses the completed apps
-        out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "cert-report.json")
-        with open(out, "w", encoding="utf-8") as f:
-            json.dump(report, f, indent=1)
-        print(f"  [{len(report)}/{len(targets)} done]", flush=True)
+        return app["id"], r
+
+    if parallel > 1:
+        with ThreadPoolExecutor(max_workers=parallel) as pool:
+            for app_id, r in pool.map(_certify_one, targets):
+                report[app_id] = r
+                out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "cert-report.json")
+                with open(out, "w", encoding="utf-8") as f:
+                    json.dump(report, f, indent=1)
+                print(f"  [{len(report)}/{len(targets)} done]", flush=True)
+    else:
+        for app in targets:
+            app_id, r = _certify_one(app)
+            report[app_id] = r
+            out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "cert-report.json")
+            with open(out, "w", encoding="utf-8") as f:
+                json.dump(report, f, indent=1)
+            print(f"  [{len(report)}/{len(targets)} done]", flush=True)
     print(f"\nreport: {out}")
     passed = [k for k, v in report.items() if v["certified"]]
     print(f"certified: {len(passed)}/{len(report)} — {passed}")
