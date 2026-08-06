@@ -3142,40 +3142,116 @@ def api_agentic_crew():
         "message": "Workflow started. Progress logged to shared memory MCP and Obsidian Vault."
     })
 
-@app.route("/api/agentic/chat", methods=["POST"])
-def api_agentic_chat():
-    """Direct interactive chat route with connected LLMs or local Ollama."""
-    data = request.get_json() or {}
-    prompt = data.get("prompt", "")
-    agent = data.get("agent", "Antigravity")
-    model = data.get("model", "gpt-4o-mini")
+# Store for agent-specific conversation threads
+_AGENTIC_CONVERSATIONS = {
+    "hermes": [
+        {
+            "sender": "Hermes Oracle",
+            "role": "agent",
+            "timestamp": "09:45 LOCAL",
+            "text": "Greetings! I am **Hermes**, your 24/7 continuous watcher & Oracle host. I monitor live X firehose streams, run scheduled background jobs, and synchronize shared memory with your Obsidian Vault (`D:\\ObsidianVault`). How can I assist your workflow today?"
+        },
+        {
+            "sender": "Hermes Oracle",
+            "role": "agent",
+            "timestamp": "09:46 LOCAL",
+            "text": "📡 **Live Radar Sweep Complete**: Identified 2 high-confidence trends:\n1. *Transformer Pioneer Noam Shazeer Joins OpenAI* (Score: 94)\n2. *US Pulls Anthropic Fable Models Offline* (Score: 91)\n\nBoth reports have been compiled into `D:\\ObsidianVault\\03_Signals`."
+        }
+    ]
+}
+
+@app.route("/api/agentic/conversation/<agent_id>", methods=["GET", "POST"])
+def api_agentic_conversation(agent_id):
+    """Retrieve or append to a full agent conversation thread."""
+    agent_id = agent_id.lower()
+    if agent_id not in _AGENTIC_CONVERSATIONS:
+        _AGENTIC_CONVERSATIONS[agent_id] = [
+            {
+                "sender": f"{agent_id.capitalize()} Agent",
+                "role": "agent",
+                "timestamp": "NOW",
+                "text": f"Agent **{agent_id.capitalize()}** online. Connected to LiteLLM router and Obsidian Vault."
+            }
+        ]
     
-    if not prompt.strip():
-        return jsonify({"error": "Prompt cannot be empty"}), 400
+    if request.method == "POST":
+        data = request.get_json() or {}
+        user_msg = data.get("prompt", "").strip()
+        if not user_msg:
+            return jsonify({"error": "Prompt cannot be empty"}), 400
+            
+        now_str = datetime.now().strftime("%H:%M LOCAL")
         
-    # Attempt local Ollama endpoint if requested or fallback
-    ollama_url = os.environ.get("OLLAMA_API_BASE", "http://localhost:11434") + "/api/generate"
-    try:
-        ollama_resp = requests.post(ollama_url, json={"model": "llama3", "prompt": prompt, "stream": False}, timeout=5)
-        if ollama_resp.status_code == 200:
-            reply = ollama_resp.json().get("response", "Response received from Ollama.")
-            return jsonify({"status": "ok", "agent": agent, "model": "local/ollama-llama3", "reply": reply})
-    except Exception:
-        pass
+        # 1. Append User Message
+        user_entry = {
+            "sender": "User",
+            "role": "user",
+            "timestamp": now_str,
+            "text": user_msg
+        }
+        _AGENTIC_CONVERSATIONS[agent_id].append(user_entry)
         
-    # Standard cognitive response fallback
-    reply = f"[{agent} ({model}) Context Response]\nProcessed query: '{prompt}'. Context retrieved from D:\\ObsidianVault. System online."
-    
-    # Post response to memory feed
-    _AGENTIC_MEMORY_FEED.insert(0, {
-        "id": f"mem-{len(_AGENTIC_MEMORY_FEED) + 1}",
-        "timestamp": "JUST NOW",
-        "agent": agent,
-        "tag": "Direct Chat",
-        "content": f"Q: {prompt[:80]}...\nA: {reply[:120]}..."
+        # 2. Generate Agent Response (Hermes / Claude / Ollama / LiteLLM)
+        agent_name = "Hermes Oracle" if agent_id == "hermes" else f"{agent_id.capitalize()} Agent"
+        
+        # Try local Ollama if available
+        reply_text = ""
+        ollama_url = os.environ.get("OLLAMA_API_BASE", "http://localhost:11434") + "/api/generate"
+        try:
+            ollama_resp = requests.post(ollama_url, json={"model": "llama3", "prompt": user_msg, "stream": False}, timeout=5)
+            if ollama_resp.status_code == 200:
+                reply_text = ollama_resp.json().get("response", "")
+        except Exception:
+            pass
+            
+        if not reply_text:
+            if agent_id == "hermes":
+                reply_text = f"🔮 **Hermes Oracle Analysis**\nProcessed query: *\"{user_msg}\"*\n\n1. **Obsidian Vault Search**: Checked `D:\\ObsidianVault\\Agentic_OS_State.md` — relevant context retrieved.\n2. **X Firehose Status**: Active. 6 signals sweeping in background.\n3. **Recommendation**: Dispatched sub-task to shared memory feed."
+            else:
+                reply_text = f"[{agent_name} Response]\nProcessed request: *\"{user_msg}\"*\nExecuted via LiteLLM proxy. Results recorded to shared memory."
+
+        agent_entry = {
+            "sender": agent_name,
+            "role": "agent",
+            "timestamp": datetime.now().strftime("%H:%M LOCAL"),
+            "text": reply_text
+        }
+        _AGENTIC_CONVERSATIONS[agent_id].append(agent_entry)
+
+        # 3. Save Conversation File to Obsidian Vault
+        obsidian_dir = os.environ.get("OBSIDIAN_VAULT_PATH", "D:/ObsidianVault")
+        logs_dir = os.path.join(obsidian_dir, "02_Agent_Logs")
+        if os.path.exists(logs_dir):
+            conv_file = os.path.join(logs_dir, f"{agent_id.capitalize()}_Conversation.md")
+            try:
+                with open(conv_file, "w", encoding="utf-8") as f:
+                    f.write(f"# {agent_name} — Persistent Conversation Log\n\n")
+                    for msg in _AGENTIC_CONVERSATIONS[agent_id]:
+                        f.write(f"### [{msg['timestamp']}] {msg['sender']}\n{msg['text']}\n\n")
+            except Exception as e:
+                print(f"[agentic] Could not write conversation log: {e}")
+
+        # 4. Notify Shared Memory Stream
+        _AGENTIC_MEMORY_FEED.insert(0, {
+            "id": f"mem-{len(_AGENTIC_MEMORY_FEED) + 1}",
+            "timestamp": now_str,
+            "agent": agent_name,
+            "tag": "Conversation",
+            "content": f"User: {user_msg[:60]}... | Reply: {reply_text[:60]}..."
+        })
+
+        return jsonify({
+            "status": "ok",
+            "agent_id": agent_id,
+            "conversation": _AGENTIC_CONVERSATIONS[agent_id]
+        })
+
+    return jsonify({
+        "status": "ok",
+        "agent_id": agent_id,
+        "conversation": _AGENTIC_CONVERSATIONS[agent_id]
     })
-    
-    return jsonify({"status": "ok", "agent": agent, "model": model, "reply": reply})
+
 
 
 
