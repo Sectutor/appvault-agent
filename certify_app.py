@@ -129,12 +129,9 @@ def certify(app):
     deadline = time.time() + int(app.get("boot_timeout") or 60)
     while time.time() < deadline:
         final_url, status = http_probe(url, timeout=10)
-        if status and status < 500:
-            break
-        if status == 503:  # still booting — keep waiting
-            time.sleep(5)
-            continue
-        if status and status >= 500:
+        # only a real page (2xx/3xx/401/403) counts — 404/503/5xx = still
+        # booting or wrong path; keep probing until the deadline
+        if status and status != 404 and 200 <= status < 500:
             break
         time.sleep(5)
     result["http_status"] = status
