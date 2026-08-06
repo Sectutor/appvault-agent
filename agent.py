@@ -3268,11 +3268,59 @@ def api_agentic_conversation(agent_id):
             "conversation": _AGENTIC_CONVERSATIONS[agent_id]
         })
 
-    return jsonify({
-        "status": "ok",
-        "agent_id": agent_id,
-        "conversation": _AGENTIC_CONVERSATIONS[agent_id]
-    })
+        return jsonify({
+            "status": "ok",
+            "agent_id": agent_id,
+            "conversation": _AGENTIC_CONVERSATIONS.get(agent_id, [])
+        })
+
+# ── HERMES CONFIG & SESSIONS PROXY ENDPOINTS ──
+HERMES_CORE_URL = os.environ.get("HERMES_AGENT_URL", "http://localhost:8095")
+
+@app.route("/api/agentic/hermes/config", methods=["GET", "POST", "OPTIONS"])
+def api_hermes_config_proxy():
+    """Read or update live Hermes Agent LLM configuration."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    try:
+        if request.method == "POST":
+            resp = requests.post(f"{HERMES_CORE_URL}/api/v1/config", json=request.get_json() or {}, timeout=5)
+        else:
+            resp = requests.get(f"{HERMES_CORE_URL}/api/v1/config", timeout=5)
+        return (resp.text, resp.status_code, resp.headers.items())
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Could not connect to Hermes Core :8095 - {e}"}), 502
+
+@app.route("/api/agentic/hermes/sessions", methods=["GET", "POST", "OPTIONS"])
+def api_hermes_sessions_proxy():
+    """List or create Hermes Agent conversation sessions."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    try:
+        if request.method == "POST":
+            resp = requests.post(f"{HERMES_CORE_URL}/api/v1/sessions", json=request.get_json() or {}, timeout=5)
+        else:
+            resp = requests.get(f"{HERMES_CORE_URL}/api/v1/sessions", timeout=5)
+        return (resp.text, resp.status_code, resp.headers.items())
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Could not connect to Hermes Core :8095 - {e}"}), 502
+
+@app.route("/api/agentic/hermes/sessions/<session_id>", methods=["GET", "POST", "DELETE", "OPTIONS"])
+def api_hermes_session_detail_proxy(session_id):
+    """Retrieve, delete, or send prompt into a specific Hermes session."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    try:
+        if request.method == "DELETE":
+            resp = requests.delete(f"{HERMES_CORE_URL}/api/v1/sessions/{session_id}", timeout=5)
+        elif request.method == "POST":
+            resp = requests.post(f"{HERMES_CORE_URL}/api/v1/sessions/{session_id}/chat", json=request.get_json() or {}, timeout=12)
+        else:
+            resp = requests.get(f"{HERMES_CORE_URL}/api/v1/sessions/{session_id}", timeout=5)
+        return (resp.text, resp.status_code, resp.headers.items())
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Could not connect to Hermes Core :8095 - {e}"}), 502
+
 
 
 
