@@ -173,6 +173,25 @@ def main():
               [a for a in apps if a["id"] in args]
     # infra entries (hidden from the store) have no web UI — not certifiable
     targets = [a for a in targets if not (a.get("hidden") or a.get("disabled"))]
+    # stack apps (compose_url) run multi-container compose files — the
+    # single-image runner can't certify them; report + skip.
+    stack_targets = [a for a in targets if a.get("is_stack") or a.get("compose_url")]
+    targets = [a for a in targets if not (a.get("is_stack") or a.get("compose_url"))]
+    for a in stack_targets:
+        report[a["id"]] = {"app_id": a["id"], "image": a.get("image") or "(stack)",
+                           "certified": False, "checks": {}, "verified_url": "",
+                           "http_status": 0,
+                           "notes": ["stack app (compose_url) — needs the stack certification path, not single-image"]}
+        print(f"⏭  {a['id']}: stack app — skipped (stack cert path)", flush=True)
+    # apps with no web UI (e.g. VPN-only) can't be HTTP-certified — note + skip
+    for a in targets:
+        if not a.get("web_ui", True) and a.get("web_ui") is not None:
+            report[a["id"]] = {"app_id": a["id"], "image": a.get("image") or "",
+                               "certified": True, "checks": {"no_web_ui": True},
+                               "verified_url": "", "http_status": 0,
+                               "notes": ["no web UI (headless/VPN) — not HTTP-certifiable; data-path checks only"]}
+            print(f"⏭  {a['id']}: headless — noted", flush=True)
+            targets = [t for t in targets if t["id"] != a["id"]]
     # --exclude app1,app2 — skip known problem images (giant pulls that OOM
     # the runner on Docker Desktop)
     if "--exclude" in args:
