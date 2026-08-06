@@ -138,12 +138,20 @@ if ($needsReboot) {
 Step "Checking Docker Desktop"
 # Refresh PATH so a fresh Docker Desktop install is visible in THIS session
 $env:Path = [Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [Environment]::GetEnvironmentVariable("Path","User")
-$dockerExe = "$env:ProgramFiles\Docker\Docker\resources\bin\docker.exe"
-$dockerDesktopExe = "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
-$dockerExists = (Test-Path $dockerExe) -or (Get-Command docker -ErrorAction SilentlyContinue)
+# Find Docker wherever it lives: machine install, per-user install, or PATH
+$dockerCandidates = @(
+    "$env:ProgramFiles\Docker\Docker\resources\bin\docker.exe",
+    "$env:LOCALAPPDATA\Docker\Docker\resources\bin\docker.exe",
+    (Get-Command docker -ErrorAction SilentlyContinue).Source
+) | Where-Object { $_ -and (Test-Path $_) }
+$docker = if ($dockerCandidates) { $dockerCandidates[0] } else { "docker" }
+$dockerDesktopExe = @(
+    "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe",
+    "$env:LOCALAPPDATA\Docker\Docker\Docker Desktop.exe"
+) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+$dockerExists = [bool]$dockerCandidates -or [bool](Get-Command docker -ErrorAction SilentlyContinue)
 
 if ($dockerExists) {
-    $docker = if (Test-Path $dockerExe) { $dockerExe } else { "docker" }
     try { $version = & $docker --version 2>$null } catch { $version = "docker CLI found" }
     Success "Docker already installed: $version"
 } else {
@@ -165,12 +173,14 @@ if ($dockerExists) {
     
     # Verify installation (PATH refresh again — the installer updates PATH)
     $env:Path = [Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [Environment]::GetEnvironmentVariable("Path","User")
-    if (Test-Path $dockerExe) {
-        $docker = $dockerExe
+    $dockerCandidates = @(
+        "$env:ProgramFiles\Docker\Docker\resources\bin\docker.exe",
+        "$env:LOCALAPPDATA\Docker\Docker\resources\bin\docker.exe",
+        (Get-Command docker -ErrorAction SilentlyContinue).Source
+    ) | Where-Object { $_ -and (Test-Path $_) }
+    $docker = if ($dockerCandidates) { $dockerCandidates[0] } else { "docker" }
+    if ($dockerCandidates) {
         Success "Docker Desktop installed: $(& $docker --version)"
-    } elseif (Get-Command docker -ErrorAction SilentlyContinue) {
-        $docker = "docker"
-        Success "Docker Desktop installed: $(docker --version)"
     } else {
         Warn "Docker Desktop installer may still be running in background."
         Warn "  After it finishes, Docker will appear in your Start menu."
@@ -189,29 +199,31 @@ try {
 
 if (-not $dockerOK) {
     Warn "Docker is not running — starting Docker Desktop..."
-    if (-not (Test-Path $dockerDesktopExe)) {
+    if (-not $dockerDesktopExe) {
         $dockerDesktopExe = (Get-ItemProperty "HKLM:\SOFTWARE\Docker Inc.\Docker Desktop" -ErrorAction SilentlyContinue).AppPath
     }
-    if (Test-Path $dockerDesktopExe) {
+    if ($dockerDesktopExe -and (Test-Path $dockerDesktopExe)) {
         Start-Process $dockerDesktopExe
     } else {
         Warn "  Docker Desktop.exe not found — please start it from the Start menu."
         Start-Process "shell:AppsFolder\Docker Desktop" -ErrorAction SilentlyContinue
     }
-    Write-Host "  Waiting for Docker to start (up to 180 seconds)..."
-    Write-Host "  ⚠️  If Docker Desktop shows 'Docker Desktop requires a newer WSL kernel' or a login prompt,"
-    Write-Host "     complete those dialogs — the installer waits for the engine."
+    # An outdated WSL kernel is the #1 reason the engine stays down while the
+    # Docker Desktop GUI is up — update it proactively.
+    try { wsl --update 2>$null | Out-Null } catch {}
+    Write-Host "  Waiting for the Docker engine (up to 5 minutes)..."
+    Write-Host "  ⚠️  If a dialog appears (license, WSL update, sign-in), accept it — the installer keeps waiting."
     
-    $maxWait = 180
+    $maxWait = 300
     $waited = 0
     while ($waited -lt $maxWait) {
         try {
             & $docker info 2>&1 | Out-Null
             if ($LASTEXITCODE -eq 0) { break }
         } catch {}
-        Start-Sleep -Seconds 5
-        $waited += 5
-        Write-Host "  ... still waiting ($waited seconds)"
+        Start-Sleep -Seconds 3
+        $waited += 3
+        if ($waited % 30 -eq 0) { Write-Host "  ... still waiting ($waited seconds)" }
     }
 }
 
