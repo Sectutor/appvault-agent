@@ -174,18 +174,28 @@ def main():
         return
     targets = [a for a in apps] if (args and args[0] == "--all") else \
               [a for a in apps if a["id"] in args]
+    # infra entries (hidden from the store) have no web UI — not certifiable
+    targets = [a for a in targets if not (a.get("hidden") or a.get("disabled"))]
     if not targets:
         print("no matching apps; try: python certify_app.py <app_id> [more ids] | --all | --list")
         sys.exit(1)
     report = {}
     for app in targets:
-        print(f"\n=== certifying {app['id']} ({app.get('image')}) ===")
-        r = certify(app)
-        print(json.dumps(r, indent=1))
+        print(f"\n=== certifying {app['id']} ({app.get('image')}) ===", flush=True)
+        try:
+            r = certify(app)
+        except Exception as e:
+            r = {"app_id": app["id"], "image": app.get("image"), "certified": False,
+                 "checks": {}, "verified_url": "", "http_status": 0,
+                 "notes": [f"harness exception: {e}"]}
+            print(f"  !! harness exception: {e}", flush=True)
+        print(json.dumps(r, indent=1), flush=True)
         report[app["id"]] = r
-    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "cert-report.json")
-    with open(out, "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=1)
+        # incremental report — a crash never loses the completed apps
+        out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "cert-report.json")
+        with open(out, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=1)
+        print(f"  [{len(report)}/{len(targets)} done]", flush=True)
     print(f"\nreport: {out}")
     passed = [k for k, v in report.items() if v["certified"]]
     print(f"certified: {len(passed)}/{len(report)} — {passed}")
