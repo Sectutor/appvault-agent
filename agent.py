@@ -63,7 +63,7 @@ def add_cors_headers(response):
 # without a pre-provisioned API key. Mutating/admin actions (install/uninstall/restart)
 # still require a valid X-Api-Key.
 PUBLIC_READ_PREFIXES = ("/api/catalog", "/api/health", "/api/info", "/api/agent/status", "/api/stats",
-                        "/api/apps/health", "/api/education/", "/api/icon/", "/api/ping/", "/api/security", "/api/monitoring")
+                        "/api/apps/health", "/api/education/", "/api/icon/", "/api/ping/", "/api/security", "/api/monitoring", "/api/agentic")
 
 @app.before_request
 def require_api_key():
@@ -3018,12 +3018,12 @@ _AGENTIC_ROSTER = [
     {"id": "fusion", "name": "Fusion Engine", "type": "Orchestrator", "status": "online", "model": "litellm/router", "role": "Multi-Agent Workflow Fusion", "mcp_enabled": True}
 ]
 
-@app.route("/api/agentic/roster", methods=["GET"])
+@app.route("/api/agentic/roster", methods=["GET", "OPTIONS"])
 def api_agentic_roster():
     """Return live roster of AI agents and orchestration backends."""
     return jsonify({"status": "ok", "agents": _AGENTIC_ROSTER, "total": len(_AGENTIC_ROSTER)})
 
-@app.route("/api/agentic/memory", methods=["GET", "POST"])
+@app.route("/api/agentic/memory", methods=["GET", "POST", "OPTIONS"])
 def api_agentic_memory():
     """Read or append to the unified Agentic OS shared memory stream and sync to Obsidian Vault."""
     if request.method == "POST":
@@ -3052,7 +3052,7 @@ def api_agentic_memory():
     
     return jsonify({"status": "ok", "memory": _AGENTIC_MEMORY_FEED})
 
-@app.route("/api/agentic/oracle", methods=["POST"])
+@app.route("/api/agentic/oracle", methods=["POST", "OPTIONS"])
 def api_agentic_oracle():
     """Trigger Hermes Live Radar / Oracle web sweep and write to Obsidian Vault."""
     data = request.get_json() or {}
@@ -3107,7 +3107,7 @@ def api_agentic_oracle():
         ]
     })
 
-@app.route("/api/agentic/crew", methods=["POST"])
+@app.route("/api/agentic/crew", methods=["POST", "OPTIONS"])
 def api_agentic_crew():
     """Trigger real multi-agent CrewAI workflow via crewai-runner service on port 8000."""
     data = request.get_json() or {}
@@ -3160,7 +3160,7 @@ _AGENTIC_CONVERSATIONS = {
     ]
 }
 
-@app.route("/api/agentic/conversation/<agent_id>", methods=["GET", "POST"])
+@app.route("/api/agentic/conversation/<agent_id>", methods=["GET", "POST", "OPTIONS"])
 def api_agentic_conversation(agent_id):
     """Retrieve or append to a full agent conversation thread."""
     agent_id = agent_id.lower()
