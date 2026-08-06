@@ -3013,7 +3013,7 @@ _AGENTIC_ROSTER = [
     {"id": "openclaw", "name": "OpenClaw Gateway", "type": "Autonomous Swarm", "category": "orchestrators", "status": "active", "model": "local/ollama-llama3", "role": "Web Scraping & Swarm Gateway", "mcp_enabled": True},
 
     # 🤖 AUTONOMOUS AGENTS
-    {"id": "hermes", "name": "Hermes Oracle Core", "type": "24/7 Watcher Daemon", "category": "agents", "status": "online", "model": "xai/grok-beta", "role": "Continuous Signal Sweeper (:8095)", "mcp_enabled": True},
+    {"id": "hermes", "name": "Hermes Agent", "type": "24/7 Watcher Daemon", "category": "agents", "status": "online", "model": "xai/grok-beta", "role": "Continuous Signal Sweeper (:8095)", "mcp_enabled": True},
     {"id": "claude", "name": "Claude 3.5 Sonnet", "type": "Core AI Agent", "category": "agents", "status": "online", "model": "anthropic/claude-3-5-sonnet", "role": "Deep Reasoning & Architecture", "mcp_enabled": True},
     {"id": "antigravity", "name": "Antigravity AI", "type": "Pair Developer", "category": "agents", "status": "active", "model": "gemini-3.6-flash", "role": "Full-Stack Codebase Builder", "mcp_enabled": True},
     {"id": "codex", "name": "Codex Agent", "type": "Code Synthesizer", "category": "agents", "status": "idle", "model": "openai/gpt-4o", "role": "Refactoring & Spec Generation", "mcp_enabled": True},
@@ -3155,13 +3155,13 @@ def api_agentic_crew():
 _AGENTIC_CONVERSATIONS = {
     "hermes": [
         {
-            "sender": "Hermes Oracle",
+            "sender": "Hermes Agent",
             "role": "agent",
             "timestamp": "09:45 LOCAL",
-            "text": "Greetings! I am **Hermes**, your 24/7 continuous watcher & Oracle host. I monitor live X firehose streams, run scheduled background jobs, and synchronize shared memory with your Obsidian Vault (`D:\\ObsidianVault`). How can I assist your workflow today?"
+            "text": "Greetings! I am **Hermes Agent**, your 24/7 continuous watcher & signal engine. I monitor live X firehose streams, run scheduled background jobs, and synchronize shared memory with your Obsidian Vault (`D:\\ObsidianVault`). How can I assist your workflow today?"
         },
         {
-            "sender": "Hermes Oracle",
+            "sender": "Hermes Agent",
             "role": "agent",
             "timestamp": "09:46 LOCAL",
             "text": "📡 **Live Radar Sweep Complete**: Identified 2 high-confidence trends:\n1. *Transformer Pioneer Noam Shazeer Joins OpenAI* (Score: 94)\n2. *US Pulls Anthropic Fable Models Offline* (Score: 91)\n\nBoth reports have been compiled into `D:\\ObsidianVault\\03_Signals`."
@@ -3201,7 +3201,7 @@ def api_agentic_conversation(agent_id):
         _AGENTIC_CONVERSATIONS[agent_id].append(user_entry)
         
         # 2. Generate Agent Response (Hermes Core :8095 / Ollama / LiteLLM)
-        agent_name = "Hermes Oracle" if agent_id == "hermes" else f"{agent_id.capitalize()} Agent"
+        agent_name = "Hermes Agent" if agent_id == "hermes" else f"{agent_id.capitalize()} Agent"
         reply_text = ""
         
         # If Hermes agent, call live Hermes daemon on port 8095
@@ -3226,7 +3226,7 @@ def api_agentic_conversation(agent_id):
             
         if not reply_text:
             if agent_id == "hermes":
-                reply_text = f"🔮 **Hermes Oracle Analysis**\nProcessed query: *\"{user_msg}\"*\n\n1. **Obsidian Vault Search**: Checked `D:\\ObsidianVault\\Agentic_OS_State.md` — relevant context retrieved.\n2. **X Firehose Status**: Active. 6 signals sweeping in background.\n3. **Recommendation**: Dispatched sub-task to shared memory feed."
+                reply_text = f"🔮 **Hermes Agent Analysis**\nProcessed query: *\"{user_msg}\"*\n\n1. **Obsidian Vault Search**: Checked `D:\\ObsidianVault\\Agentic_OS_State.md` — relevant context retrieved.\n2. **X Firehose Status**: Active. 6 signals sweeping in background.\n3. **Recommendation**: Dispatched sub-task to shared memory feed."
             else:
                 reply_text = f"[{agent_name} Response]\nProcessed request: *\"{user_msg}\"*\nExecuted via LiteLLM proxy. Results recorded to shared memory."
 
