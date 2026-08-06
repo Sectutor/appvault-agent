@@ -92,12 +92,14 @@ $features = @(
 )
 
 foreach ($f in $features) {
-    $state = Get-WindowsOptionalFeature -Online -FeatureName $f.Name
-    if ($state.State -eq "Enabled") {
+    # Use dism.exe — Get-WindowsOptionalFeature is Windows PowerShell 5.1 only
+    # and fails with "Class not registered" under PowerShell 7.
+    $out = & dism.exe /online /Get-FeatureInfo /FeatureName:$($f.Name) 2>$null | Out-String
+    if ($out -match "State\s*:\s*Enabled") {
         Success "$($f.Label) — already enabled"
     } else {
         Warn "$($f.Label) — not enabled, installing..."
-        Enable-WindowsOptionalFeature -Online -FeatureName $f.Name -All -NoRestart
+        & dism.exe /online /Enable-Feature /FeatureName:$($f.Name) /All /NoRestart 2>$null | Out-Null
         $needsReboot = $true
         Success "$($f.Label) — installed (reboot pending)"
     }
@@ -134,10 +136,16 @@ if ($needsReboot) {
 # STEP 7: Check/Install Docker Desktop
 # ═══════════════════════════════════════════
 Step "Checking Docker Desktop"
-$dockerExists = Get-Command docker -ErrorAction SilentlyContinue
+# Refresh PATH so a fresh Docker Desktop install is visible in THIS session
+$env:Path = [Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [Environment]::GetEnvironmentVariable("Path","User")
+$dockerExe = "$env:ProgramFiles\Docker\Docker
+esources\bin\docker.exe"
+$dockerDesktopExe = "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
+$dockerExists = (Test-Path $dockerExe) -or (Get-Command docker -ErrorAction SilentlyContinue)
 
 if ($dockerExists) {
-    $version = docker --version
+    $docker = if (Test-Path $dockerExe) { $dockerExe } else { "docker" }
+    try { $version = & $docker --version 2>$null } catch { $version = "docker CLI found" }
     Success "Docker already installed: $version"
 } else {
     Warn "Docker Desktop not found — downloading..."
@@ -156,13 +164,17 @@ if ($dockerExists) {
     Write-Host "  Installing Docker Desktop (may take 5 minutes)..."
     Start-Process $installer -Wait -ArgumentList "install", "--quiet"
     
-    # Verify installation
-    $dockerExists = Get-Command docker -ErrorAction SilentlyContinue
-    if (-not $dockerExists) {
+    # Verify installation (PATH refresh again — the installer updates PATH)
+    $env:Path = [Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [Environment]::GetEnvironmentVariable("Path","User")
+    if (Test-Path $dockerExe) {
+        $docker = $dockerExe
+        Success "Docker Desktop installed: $(& $docker --version)"
+    } elseif (Get-Command docker -ErrorAction SilentlyContinue) {
+        $docker = "docker"
+        Success "Docker Desktop installed: $(docker --version)"
+    } else {
         Warn "Docker Desktop installer may still be running in background."
         Warn "  After it finishes, Docker will appear in your Start menu."
-    } else {
-        Success "Docker Desktop installed: $(docker --version)"
     }
 }
 
@@ -172,20 +184,30 @@ if ($dockerExists) {
 Step "Starting Docker"
 $dockerOK = $false
 try {
-    $info = docker info 2>&1
+    $info = & $docker info 2>&1
     $dockerOK = $LASTEXITCODE -eq 0
 } catch {}
 
 if (-not $dockerOK) {
     Warn "Docker is not running — starting Docker Desktop..."
-    Start-Process "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
-    Write-Host "  Waiting for Docker to start (up to 120 seconds)..."
+    if (-not (Test-Path $dockerDesktopExe)) {
+        $dockerDesktopExe = (Get-ItemProperty "HKLM:\SOFTWARE\Docker Inc.\Docker Desktop" -ErrorAction SilentlyContinue).AppPath
+    }
+    if (Test-Path $dockerDesktopExe) {
+        Start-Process $dockerDesktopExe
+    } else {
+        Warn "  Docker Desktop.exe not found — please start it from the Start menu."
+        Start-Process "shell:AppsFolder\Docker Desktop" -ErrorAction SilentlyContinue
+    }
+    Write-Host "  Waiting for Docker to start (up to 180 seconds)..."
+    Write-Host "  ⚠️  If Docker Desktop shows 'Docker Desktop requires a newer WSL kernel' or a login prompt,"
+    Write-Host "     complete those dialogs — the installer waits for the engine."
     
-    $maxWait = 120
+    $maxWait = 180
     $waited = 0
     while ($waited -lt $maxWait) {
         try {
-            docker info 2>&1 | Out-Null
+            & $docker info 2>&1 | Out-Null
             if ($LASTEXITCODE -eq 0) { break }
         } catch {}
         Start-Sleep -Seconds 5
@@ -195,34 +217,37 @@ if (-not $dockerOK) {
 }
 
 try {
-    docker info 2>&1 | Out-Null
+    & $docker info 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) {
         Success "Docker is running"
     } else {
-        Fail "Docker failed to start. Launch Docker Desktop manually."
+        Fail "Docker failed to start. Launch Docker Desktop manually, accept the license, and rerun this installer."
     }
 } catch {
-    Fail "Docker failed to start. Launch Docker Desktop manually."
+    Fail "Docker failed to start. Launch Docker Desktop manually, accept the license, and rerun this installer."
 }
 
 # ═══════════════════════════════════════════
 # STEP 9: Pull AppVault Agent and start
 # ═══════════════════════════════════════════
 Step "Starting AppVault Agent"
-Write-Host "  Pulling AppVault image..."
-docker pull ghcr.io/sectutor/appvault-releases:latest 2>&1 | Out-Null
+# Shared API key for agent + store proxy
+$apiKey = -join ((48..57)+(65..90)+(97..122) | Get-Random -Count 32 | ForEach-Object {[char]$_})
+Write-Host "  Pulling AppVault images..."
+& $docker pull ghcr.io/sectutor/appvault-agent:latest 2>&1 | Out-Null
+& $docker pull ghcr.io/sectutor/appvault-releases:v10 2>&1 | Out-Null
 
 # Create data directory
 mkdir "$env:USERPROFILE\.appvault\data" -Force | Out-Null
 mkdir "$env:USERPROFILE\.appvault\apps" -Force | Out-Null
 
 # Stop any existing agent
-docker stop appvault-agent 2>$null | Out-Null
-docker rm appvault-agent 2>$null | Out-Null
+& $docker stop appvault-agent 2>$null | Out-Null
+& $docker rm appvault-agent 2>$null | Out-Null
 
 # Start agent
 Write-Host "  Starting AppVault Agent on port 8086..."
-docker run -d `
+& $docker run -d `
   --name appvault-agent `
   --restart unless-stopped `
   -p 8086:8086 `
@@ -230,21 +255,24 @@ docker run -d `
   -v "$env:USERPROFILE\.appvault\data:/data" `
   -v "$env:USERPROFILE\.appvault\apps:/data/apps" `
   -e AGENT_PORT=8086 `
+  -e API_KEY=$apiKey `
   -e CENTRAL_URL=https://appvault.airepoindex.com `
   -e AGENT_NAME="$env:COMPUTERNAME-agent" `
   -e STORAGE_PATH=/data `
-  ghcr.io/sectutor/appvault-releases:latest
+  ghcr.io/sectutor/appvault-agent:latest
 
 # Start Heimdall
 Write-Host "  Starting App Store on port 8085..."
-docker stop appvault-heimdall 2>$null | Out-Null
-docker rm appvault-heimdall 2>$null | Out-Null
+& $docker stop appvault-heimdall 2>$null | Out-Null
+& $docker rm appvault-heimdall 2>$null | Out-Null
 
-docker run -d `
+& $docker run -d `
   --name appvault-heimdall `
   --restart unless-stopped `
   -p 8085:80 `
   -v "$env:USERPROFILE\.appvault\heimdall-config:/config" `
+  -e API_KEY=$apiKey `
+  -e CENTRAL_URL=https://appvault.airepoindex.com `
   -e PUID=1000 `
   -e PGID=1000 `
   -e TZ=Etc/UTC `
