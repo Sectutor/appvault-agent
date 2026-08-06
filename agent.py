@@ -467,6 +467,32 @@ def _caddy_net():
     return os.environ.get("APPVAULT_NETWORK", "appvault_appvault-net")
 
 
+def _resolve_net():
+    """Docker network apps join: APPVAULT_NETWORK env → the network this agent
+    itself is attached to → 'bridge'. Fixes 'network webdev_appvault-net not
+    found' on installs that never set APPVAULT_NETWORK (Windows/Docker Desktop,
+    bare installs) — apps always land on a network that actually exists."""
+    env_net = os.environ.get("APPVAULT_NETWORK", "").strip()
+    if env_net:
+        return env_net
+    cid = os.environ.get("HOSTNAME", "")
+    if cid:
+        try:
+            ok, out = _docker("inspect", cid, "--format",
+                              "{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}",
+                              capture=True, timeout=15)
+            if ok and out:
+                nets = out.split()
+                for n in nets:
+                    if n not in ("none", "host", "bridge"):
+                        return n
+                if nets:
+                    return nets[0]
+        except Exception:
+            pass
+    return "bridge"
+
+
 def _https_port(app_id):
     """Deterministic HTTPS proxy port for an app (20000-28999), used for per-app HTTPS."""
     import hashlib
@@ -689,7 +715,7 @@ def _provision_database(app_id, app_def, env_map=None):
             continue
         print(f"[agent] Starting central DB: {central_db}")
         image = db_def.get("image", "mariadb:10.11")
-        net_name = os.environ.get("APPVAULT_NETWORK", "webdev_appvault-net")
+        net_name = _resolve_net()
         cport = {"central-mariadb": "3306", "central-postgres": "5432", "central-redis": "6379"}.get(central_db, "3306")
         run_args = [
             "run", "-d",
@@ -1059,7 +1085,7 @@ def _do_install(app_id):
     _set_progress(app_id, "Setting up container...", 60)
     
     # Build docker run command
-    net_name = os.environ.get("APPVAULT_NETWORK", "webdev_appvault-net")
+    net_name = _resolve_net()
     run_args = [
         "run", "-d",
         "--name", container_name,
