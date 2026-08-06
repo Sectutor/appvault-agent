@@ -22,7 +22,8 @@ function Warn($msg) {
 
 function Fail($msg) {
     Write-Host "  ❌ $msg" -ForegroundColor Red
-    exit 1
+    # throw (not exit) — exit would close the user's PowerShell window
+    throw $msg
 }
 
 function CheckAdmin() {
@@ -59,7 +60,7 @@ if ($hasVT) {
     Warn "  → Reboot, press F2/Del/ESC during startup to enter BIOS"
     Warn "  → After enabling, run this installer again"
     $continue = Read-Host "Do you want to continue anyway? (y/N)"
-    if ($continue -ne "y") { exit 1 }
+    if ($continue -ne "y") { return }
 }
 
 # ═══════════════════════════════════════════
@@ -123,10 +124,10 @@ if ($needsReboot) {
     $rebootNow = Read-Host "Reboot now? (Y/n)"
     if ($rebootNow -ne "n") {
         Restart-Computer -Confirm:$false
-        exit 0
+        return
     }
     Write-Host "`nAfter reboot, run this installer again to continue."
-    exit 0
+    return
 }
 
 # ═══════════════════════════════════════════
