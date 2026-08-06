@@ -2627,6 +2627,9 @@ def api_education(app_id):
     cname = f"app-{app_id}"
     result["is_running"] = container_running(cname)
     result["host_port"] = get_container_host_port(cname) or app_def.get("container_port", "")
+    # Live launch URL — always the real mapped port + web path, never a placeholder
+    if result["host_port"]:
+        result["launch_url"] = f"http://localhost:{result['host_port']}{(app_def.get('web_path') or '/')}"
     result["web_path"] = app_def.get("web_path", "/")
     # ADDITIVE: stack apps run compose containers labeled appvault.app=<app_id>;
     # report live status/host port from the first labeled container if app-<id> is absent.
