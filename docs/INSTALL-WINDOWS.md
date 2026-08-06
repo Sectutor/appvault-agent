@@ -10,6 +10,7 @@
 | **RAM** | 8 GB recommended (4 GB minimum) |
 | **Free disk space** | **At least 10 GB** (Docker Desktop + WSL + AppVault ≈ 4–6 GB, plus room for your apps) |
 | **Docker Desktop** | **REQUIRED — install it first** (see Step 1 below) |
+| **WSL2** | Required **by Docker Desktop** — installed and configured **automatically** (Docker Desktop and the AppVault installer both handle it). No separate action needed. Only prerequisite: virtualization enabled in BIOS (above) |
 | **Internet** | Needed for the install (images are downloaded automatically) |
 | **Administrator rights** | The installer needs to run as Administrator |
 
