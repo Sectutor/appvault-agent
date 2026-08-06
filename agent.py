@@ -9,8 +9,10 @@ AppVault Agent â€” runs on user machine (local or VPS).
 """
 
 import os, json, threading, time, uuid, hashlib, socket, sys, subprocess, shutil
+import urllib.request
+import urllib.error
 from datetime import datetime
-from flask import Flask, jsonify, request, render_template, send_from_directory
+from flask import Flask, jsonify, request, render_template, send_from_directory, Response
 from datetime import timedelta
 from functools import wraps
 import cloud_sync
@@ -41,6 +43,24 @@ def public_base():
 CATALOG_CACHE_PATH = os.path.join(STORAGE_PATH, "catalog_cache.json")
 AGENT_STATE_PATH = os.path.join(STORAGE_PATH, "agent_state.json")
 HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", "60"))  # seconds between heartbeats
+
+def _http_call(url, method="GET", json_data=None, timeout=5):
+    try:
+        req = urllib.request.Request(url, method=method)
+        req.add_header("Content-Type", "application/json")
+        data_bytes = json.dumps(json_data).encode("utf-8") if json_data is not None else None
+        with urllib.request.urlopen(req, data=data_bytes, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8")
+            return json.loads(body), resp.status
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode("utf-8")
+            return json.loads(body), e.code
+        except Exception:
+            return {"error": "HTTP Error"}, e.code
+    except Exception as e:
+        return {"error": str(e)}, 502
+
 CATALOG_VERSION_FILE = os.path.join(STORAGE_PATH, "catalog_version.txt")
 
 os.makedirs(STORAGE_PATH, exist_ok=True)
@@ -77,7 +97,7 @@ def require_api_key():
         # license, security, and app install/uninstall/restart. Install is a local user
         # action on a private install; the agent API key is for central control jobs.
         if path.startswith(("/api/license", "/api/security", "/api/install",
-                            "/api/uninstall", "/api/restart", "/api/stop")):
+                            "/api/uninstall", "/api/restart", "/api/stop", "/api/agentic")):
             return None
         is_public_read = request.method == "GET" and path.startswith(PUBLIC_READ_PREFIXES)
         requires_key = not is_public_read
@@ -3206,11 +3226,11 @@ def api_agentic_conversation(agent_id):
         
         # If Hermes agent, call live Hermes daemon on port 8095
         if agent_id == "hermes":
-            hermes_url = os.environ.get("HERMES_AGENT_URL", "http://localhost:8095") + "/api/v1/chat"
+            hermes_url = _get_hermes_core_url() + "/api/v1/chat"
             try:
-                h_resp = requests.post(hermes_url, json={"prompt": user_msg, "user": "User"}, timeout=8)
-                if h_resp.status_code == 200:
-                    reply_text = h_resp.json().get("reply", "")
+                res_data, status_code = _http_call(hermes_url, method="POST", json_data={"prompt": user_msg, "user": "User"}, timeout=8)
+                if status_code == 200 and isinstance(res_data, dict):
+                    reply_text = res_data.get("reply", "")
             except Exception as e:
                 print(f"[agentic] Warning: Hermes Core :8095 fallback: {e}")
 
@@ -3218,9 +3238,9 @@ def api_agentic_conversation(agent_id):
         if not reply_text:
             ollama_url = os.environ.get("OLLAMA_API_BASE", "http://localhost:11434") + "/api/generate"
             try:
-                ollama_resp = requests.post(ollama_url, json={"model": "llama3", "prompt": user_msg, "stream": False}, timeout=5)
-                if ollama_resp.status_code == 200:
-                    reply_text = ollama_resp.json().get("response", "")
+                res_data, status_code = _http_call(ollama_url, method="POST", json_data={"model": "llama3", "prompt": user_msg, "stream": False}, timeout=5)
+                if status_code == 200 and isinstance(res_data, dict):
+                    reply_text = res_data.get("response", "")
             except Exception:
                 pass
             
@@ -3275,7 +3295,24 @@ def api_agentic_conversation(agent_id):
         })
 
 # ── HERMES CONFIG & SESSIONS PROXY ENDPOINTS ──
-HERMES_CORE_URL = os.environ.get("HERMES_AGENT_URL", "http://localhost:8095")
+def _get_hermes_core_url():
+    urls = [
+        os.environ.get("HERMES_AGENT_URL"),
+        "http://appvault-hermes-agent:8095",
+        "http://hermes-agent:8095",
+        "http://host.docker.internal:8095",
+        "http://127.0.0.1:8095",
+        "http://localhost:8095"
+    ]
+    for u in urls:
+        if not u: continue
+        try:
+            res, status_code = _http_call(f"{u.rstrip('/')}/health", timeout=1.5)
+            if status_code == 200:
+                return u.rstrip('/')
+        except Exception:
+            pass
+    return "http://localhost:8095"
 
 @app.route("/api/agentic/hermes/config", methods=["GET", "POST", "OPTIONS"])
 def api_hermes_config_proxy():
@@ -3283,11 +3320,11 @@ def api_hermes_config_proxy():
     if request.method == "OPTIONS":
         return jsonify({"status": "ok"})
     try:
-        if request.method == "POST":
-            resp = requests.post(f"{HERMES_CORE_URL}/api/v1/config", json=request.get_json() or {}, timeout=5)
-        else:
-            resp = requests.get(f"{HERMES_CORE_URL}/api/v1/config", timeout=5)
-        return (resp.text, resp.status_code, resp.headers.items())
+        base_url = _get_hermes_core_url()
+        method = "POST" if request.method == "POST" else "GET"
+        payload = request.get_json() if request.method == "POST" else None
+        res, status_code = _http_call(f"{base_url}/api/v1/config", method=method, json_data=payload, timeout=5)
+        return jsonify(res), status_code
     except Exception as e:
         return jsonify({"status": "error", "message": f"Could not connect to Hermes Core :8095 - {e}"}), 502
 
@@ -3297,11 +3334,11 @@ def api_hermes_sessions_proxy():
     if request.method == "OPTIONS":
         return jsonify({"status": "ok"})
     try:
-        if request.method == "POST":
-            resp = requests.post(f"{HERMES_CORE_URL}/api/v1/sessions", json=request.get_json() or {}, timeout=5)
-        else:
-            resp = requests.get(f"{HERMES_CORE_URL}/api/v1/sessions", timeout=5)
-        return (resp.text, resp.status_code, resp.headers.items())
+        base_url = _get_hermes_core_url()
+        method = "POST" if request.method == "POST" else "GET"
+        payload = request.get_json() if request.method == "POST" else None
+        res, status_code = _http_call(f"{base_url}/api/v1/sessions", method=method, json_data=payload, timeout=5)
+        return jsonify(res), status_code
     except Exception as e:
         return jsonify({"status": "error", "message": f"Could not connect to Hermes Core :8095 - {e}"}), 502
 
@@ -3311,13 +3348,14 @@ def api_hermes_session_detail_proxy(session_id):
     if request.method == "OPTIONS":
         return jsonify({"status": "ok"})
     try:
+        base_url = _get_hermes_core_url()
         if request.method == "DELETE":
-            resp = requests.delete(f"{HERMES_CORE_URL}/api/v1/sessions/{session_id}", timeout=5)
+            res, status_code = _http_call(f"{base_url}/api/v1/sessions/{session_id}", method="DELETE", timeout=5)
         elif request.method == "POST":
-            resp = requests.post(f"{HERMES_CORE_URL}/api/v1/sessions/{session_id}/chat", json=request.get_json() or {}, timeout=12)
+            res, status_code = _http_call(f"{base_url}/api/v1/sessions/{session_id}/chat", method="POST", json_data=request.get_json() or {}, timeout=12)
         else:
-            resp = requests.get(f"{HERMES_CORE_URL}/api/v1/sessions/{session_id}", timeout=5)
-        return (resp.text, resp.status_code, resp.headers.items())
+            res, status_code = _http_call(f"{base_url}/api/v1/sessions/{session_id}", method="GET", timeout=5)
+        return jsonify(res), status_code
     except Exception as e:
         return jsonify({"status": "error", "message": f"Could not connect to Hermes Core :8095 - {e}"}), 502
 
