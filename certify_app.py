@@ -173,10 +173,27 @@ def main():
               [a for a in apps if a["id"] in args]
     # infra entries (hidden from the store) have no web UI — not certifiable
     targets = [a for a in targets if not (a.get("hidden") or a.get("disabled"))]
+    # --exclude app1,app2 — skip known problem images (giant pulls that OOM
+    # the runner on Docker Desktop)
+    if "--exclude" in args:
+        excl = set(args[args.index("--exclude") + 1].split(","))
+        targets = [a for a in targets if a["id"] not in excl]
+        print(f"excluded: {sorted(excl)}")
+    # --resume — skip apps already in cert-report.json (crash-safe restarts)
+    report = {}
+    if "--resume" in args:
+        rp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "cert-report.json")
+        if os.path.exists(rp):
+            try:
+                report = json.load(open(rp, encoding="utf-8"))
+                done = set(report.keys())
+                targets = [a for a in targets if a["id"] not in done]
+                print(f"resuming: {len(done)} already done, {len(targets)} remaining")
+            except Exception:
+                report = {}
     if not targets:
         print("no matching apps; try: python certify_app.py <app_id> [more ids] | --all | --list")
         sys.exit(1)
-    report = {}
     for app in targets:
         print(f"\n=== certifying {app['id']} ({app.get('image')}) ===", flush=True)
         try:
