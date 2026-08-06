@@ -266,6 +266,9 @@ Write-Host "  Starting App Store on port 8085..."
 & $docker stop appvault-heimdall 2>$null | Out-Null
 & $docker rm appvault-heimdall 2>$null | Out-Null
 
+# Clear stale UI files — the store image re-seeds /config/www on first boot
+Remove-Item "$env:USERPROFILE\.appvault\heimdall-config\www" -Recurse -Force -ErrorAction SilentlyContinue
+
 & $docker run -d `
   --name appvault-heimdall `
   --restart unless-stopped `
@@ -276,7 +279,7 @@ Write-Host "  Starting App Store on port 8085..."
   -e PUID=1000 `
   -e PGID=1000 `
   -e TZ=Etc/UTC `
-  lscr.io/linuxserver/heimdall:latest
+  ghcr.io/sectutor/appvault-releases:v10
 
 # ═══════════════════════════════════════════
 # DONE
