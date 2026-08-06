@@ -138,8 +138,7 @@ if ($needsReboot) {
 Step "Checking Docker Desktop"
 # Refresh PATH so a fresh Docker Desktop install is visible in THIS session
 $env:Path = [Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [Environment]::GetEnvironmentVariable("Path","User")
-$dockerExe = "$env:ProgramFiles\Docker\Docker
-esources\bin\docker.exe"
+$dockerExe = "$env:ProgramFiles\Docker\Docker\resources\bin\docker.exe"
 $dockerDesktopExe = "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
 $dockerExists = (Test-Path $dockerExe) -or (Get-Command docker -ErrorAction SilentlyContinue)
 
