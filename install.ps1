@@ -252,9 +252,11 @@ Write-Host "  Pulling AppVault images..."
 mkdir "$env:USERPROFILE\.appvault\data" -Force | Out-Null
 mkdir "$env:USERPROFILE\.appvault\apps" -Force | Out-Null
 
-# Stop any existing agent
-& $docker stop appvault-agent 2>$null | Out-Null
-& $docker rm appvault-agent 2>$null | Out-Null
+# Stop/remove only if the container already exists (avoids scary errors on first install)
+if (& $docker ps -a --filter "name=^/appvault-agent$" --format '{{.Names}}' 2>$null | Select-String -Quiet "appvault-agent") {
+    & $docker stop appvault-agent 2>$null | Out-Null
+    & $docker rm appvault-agent 2>$null | Out-Null
+}
 
 # Start agent
 Write-Host "  Starting AppVault Agent on port 8086..."
@@ -272,10 +274,11 @@ Write-Host "  Starting AppVault Agent on port 8086..."
   -e STORAGE_PATH=/data `
   ghcr.io/sectutor/appvault-agent:latest
 
-# Start Heimdall
 Write-Host "  Starting App Store on port 8085..."
-& $docker stop appvault-heimdall 2>$null | Out-Null
-& $docker rm appvault-heimdall 2>$null | Out-Null
+if (& $docker ps -a --filter "name=^/appvault-heimdall$" --format '{{.Names}}' 2>$null | Select-String -Quiet "appvault-heimdall") {
+    & $docker stop appvault-heimdall 2>$null | Out-Null
+    & $docker rm appvault-heimdall 2>$null | Out-Null
+}
 
 # Clear stale UI files — the store image re-seeds /config/www on first boot
 Remove-Item "$env:USERPROFILE\.appvault\heimdall-config\www" -Recurse -Force -ErrorAction SilentlyContinue
