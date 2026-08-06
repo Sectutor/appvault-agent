@@ -3219,17 +3219,19 @@ def api_agentic_conversation(agent_id):
         _AGENTIC_CONVERSATIONS[agent_id].append(agent_entry)
 
         # 3. Save Conversation File to Obsidian Vault
-        obsidian_dir = os.environ.get("OBSIDIAN_VAULT_PATH", "D:/ObsidianVault")
+        obsidian_dir = os.environ.get("OBSIDIAN_VAULT_PATH", "/vault" if os.path.exists("/vault") else "D:/ObsidianVault")
+        if not os.path.exists(obsidian_dir) and os.path.exists("D:/ObsidianVault"):
+            obsidian_dir = "D:/ObsidianVault"
         logs_dir = os.path.join(obsidian_dir, "02_Agent_Logs")
-        if os.path.exists(logs_dir):
+        try:
+            os.makedirs(logs_dir, exist_ok=True)
             conv_file = os.path.join(logs_dir, f"{agent_id.capitalize()}_Conversation.md")
-            try:
-                with open(conv_file, "w", encoding="utf-8") as f:
-                    f.write(f"# {agent_name} — Persistent Conversation Log\n\n")
-                    for msg in _AGENTIC_CONVERSATIONS[agent_id]:
-                        f.write(f"### [{msg['timestamp']}] {msg['sender']}\n{msg['text']}\n\n")
-            except Exception as e:
-                print(f"[agentic] Could not write conversation log: {e}")
+            with open(conv_file, "w", encoding="utf-8") as f:
+                f.write(f"# {agent_name} — Persistent Conversation Log\n\n")
+                for msg in _AGENTIC_CONVERSATIONS[agent_id]:
+                    f.write(f"### [{msg['timestamp']}] {msg['sender']}\n{msg['text']}\n\n")
+        except Exception as e:
+            print(f"[agentic] Could not write conversation log: {e}")
 
         # 4. Notify Shared Memory Stream
         _AGENTIC_MEMORY_FEED.insert(0, {
