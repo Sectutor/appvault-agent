@@ -138,20 +138,20 @@ def certify(app):
             break
         time.sleep(5)
     result["http_status"] = status
-    if status and status < 500:
+    if status and 200 <= status < 500 and status != 404:
         suffix = final_url.replace(f"http://127.0.0.1:{hport}", "")
         result["verified_url"] = f"http://localhost:{hport}{suffix}"
         result["checks"]["http_ok"] = True
     else:
         # probe bare "/" as a fallback — some specs have a wrong web_path
         final_url2, status2 = http_probe(f"http://127.0.0.1:{hport}/", timeout=10)
-        if status2 and status2 < 500:
+        if status2 and 200 <= status2 < 500 and status2 != 404:
             result["checks"]["http_ok"] = True
             result["verified_url"] = f"http://localhost:{hport}/"
             result["notes"].append(f"web_path '{web_path}' failed ({status}); '/' works ({status2})")
         else:
             result["checks"]["http_ok"] = False
-            result["notes"].append(f"no HTTP response on '{web_path}' (status {status}) or '/' ({status2})")
+            result["notes"].append(f"no good HTTP response on '{web_path}' (status {status}) or '/' ({status2}) — 404 means the path is wrong")
 
     # 6. restart persistence
     sh("docker", "restart", cname)
