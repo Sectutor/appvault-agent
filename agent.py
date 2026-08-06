@@ -3006,16 +3006,25 @@ _AGENTIC_MEMORY_FEED = [
 ]
 
 _AGENTIC_ROSTER = [
-    {"id": "claude", "name": "Claude 3.5 Sonnet", "type": "Core AI Agent", "status": "online", "model": "anthropic/claude-3-5-sonnet", "role": "Deep Reasoning & Code", "mcp_enabled": True},
-    {"id": "antigravity", "name": "Antigravity", "type": "Pair Developer", "status": "active", "model": "gemini-3.6-flash", "role": "Full-Stack System Builder", "mcp_enabled": True},
-    {"id": "hermes", "name": "Hermes Oracle", "type": "24/7 Watcher", "status": "online", "model": "xai/grok-beta", "role": "News & X Firehose Radar", "mcp_enabled": True},
-    {"id": "openclaw", "name": "OpenClaw", "type": "Autonomous Agent", "status": "idle", "model": "local/ollama-llama3", "role": "Web Scraping & Automation", "mcp_enabled": True},
-    {"id": "codex", "name": "Codex", "type": "Code Synthesizer", "status": "idle", "model": "openai/gpt-4o", "role": "Refactoring & Spec Generation", "mcp_enabled": True},
-    {"id": "kimi", "name": "Kimi Code", "type": "Context Agent", "status": "idle", "model": "moonshot/kimi", "role": "Long-Context Parsing", "mcp_enabled": True},
-    {"id": "glm", "name": "GLM 5.2", "type": "Multimodal Agent", "status": "idle", "model": "zhipu/glm-5", "role": "Data & Image Processing", "mcp_enabled": True},
-    {"id": "grok", "name": "Grok Build", "type": "Trend Analyst", "status": "idle", "model": "xai/grok-2", "role": "Live Technical Search", "mcp_enabled": True},
-    {"id": "free_claude", "name": "Free Claude Code", "type": "Assistant", "status": "idle", "model": "anthropic/claude-3-haiku", "role": "Quick Code Edits", "mcp_enabled": True},
-    {"id": "fusion", "name": "Fusion Engine", "type": "Orchestrator", "status": "online", "model": "litellm/router", "role": "Multi-Agent Workflow Fusion", "mcp_enabled": True}
+    # 🎼 AGENT ORCHESTRATORS
+    {"id": "crewai", "name": "CrewAI Runner", "type": "Multi-Agent Framework", "category": "orchestrators", "status": "online", "model": "fastapi/port-8000", "role": "Multi-Agent Execution Engine (:8000)", "mcp_enabled": True},
+    {"id": "fusion", "name": "Fusion Engine", "type": "Workflow Orchestrator", "category": "orchestrators", "status": "online", "model": "litellm/router", "role": "Multi-Agent Workflow Fusion", "mcp_enabled": True},
+    {"id": "n8n", "name": "n8n Automation", "type": "Node Orchestrator", "category": "orchestrators", "status": "online", "model": "n8n/port-37950", "role": "Visual Workflow Automation (:37950)", "mcp_enabled": True},
+    {"id": "openclaw", "name": "OpenClaw Gateway", "type": "Autonomous Swarm", "category": "orchestrators", "status": "active", "model": "local/ollama-llama3", "role": "Web Scraping & Swarm Gateway", "mcp_enabled": True},
+
+    # 🤖 AUTONOMOUS AGENTS
+    {"id": "hermes", "name": "Hermes Oracle Core", "type": "24/7 Watcher Daemon", "category": "agents", "status": "online", "model": "xai/grok-beta", "role": "Continuous Signal Sweeper (:8095)", "mcp_enabled": True},
+    {"id": "claude", "name": "Claude 3.5 Sonnet", "type": "Core AI Agent", "category": "agents", "status": "online", "model": "anthropic/claude-3-5-sonnet", "role": "Deep Reasoning & Architecture", "mcp_enabled": True},
+    {"id": "antigravity", "name": "Antigravity AI", "type": "Pair Developer", "category": "agents", "status": "active", "model": "gemini-3.6-flash", "role": "Full-Stack Codebase Builder", "mcp_enabled": True},
+    {"id": "codex", "name": "Codex Agent", "type": "Code Synthesizer", "category": "agents", "status": "idle", "model": "openai/gpt-4o", "role": "Refactoring & Spec Generation", "mcp_enabled": True},
+    {"id": "kimi", "name": "Kimi Code", "type": "Context Specialist", "category": "agents", "status": "idle", "model": "moonshot/kimi", "role": "Long-Context File Parsing", "mcp_enabled": True},
+
+    # 🧠 LLM & MEMORY ENGINES
+    {"id": "litellm", "name": "LiteLLM Router", "type": "Model Proxy Gateway", "category": "llms", "status": "online", "model": "litellm/port-4000", "role": "Unified LLM Provider Gateway (:4000)", "mcp_enabled": True},
+    {"id": "ollama", "name": "Ollama Engine", "type": "Local GPU/CPU Engine", "category": "llms", "status": "online", "model": "ollama/port-11434", "role": "Local Llama3 / Qwen Models (:11434)", "mcp_enabled": True},
+    {"id": "openwebui", "name": "Open WebUI", "type": "Local AI Interface", "category": "llms", "status": "online", "model": "webui/port-3000", "role": "Private Chat Interface (:3000)", "mcp_enabled": True},
+    {"id": "anythingllm", "name": "AnythingLLM", "type": "RAG Knowledge Base", "category": "llms", "status": "online", "model": "rag/port-59742", "role": "Obsidian Document RAG Engine", "mcp_enabled": True},
+    {"id": "onebrain", "name": "OneBrain MCP Sync", "type": "Memory Server", "category": "llms", "status": "online", "model": "mcp/port-3001", "role": "Obsidian Shared Vault Sync (:3001)", "mcp_enabled": True}
 ]
 
 @app.route("/api/agentic/roster", methods=["GET", "OPTIONS"])
@@ -3191,18 +3200,29 @@ def api_agentic_conversation(agent_id):
         }
         _AGENTIC_CONVERSATIONS[agent_id].append(user_entry)
         
-        # 2. Generate Agent Response (Hermes / Claude / Ollama / LiteLLM)
+        # 2. Generate Agent Response (Hermes Core :8095 / Ollama / LiteLLM)
         agent_name = "Hermes Oracle" if agent_id == "hermes" else f"{agent_id.capitalize()} Agent"
-        
-        # Try local Ollama if available
         reply_text = ""
-        ollama_url = os.environ.get("OLLAMA_API_BASE", "http://localhost:11434") + "/api/generate"
-        try:
-            ollama_resp = requests.post(ollama_url, json={"model": "llama3", "prompt": user_msg, "stream": False}, timeout=5)
-            if ollama_resp.status_code == 200:
-                reply_text = ollama_resp.json().get("response", "")
-        except Exception:
-            pass
+        
+        # If Hermes agent, call live Hermes daemon on port 8095
+        if agent_id == "hermes":
+            hermes_url = os.environ.get("HERMES_AGENT_URL", "http://localhost:8095") + "/api/v1/chat"
+            try:
+                h_resp = requests.post(hermes_url, json={"prompt": user_msg, "user": "User"}, timeout=8)
+                if h_resp.status_code == 200:
+                    reply_text = h_resp.json().get("reply", "")
+            except Exception as e:
+                print(f"[agentic] Warning: Hermes Core :8095 fallback: {e}")
+
+        # Try local Ollama fallback if reply_text empty
+        if not reply_text:
+            ollama_url = os.environ.get("OLLAMA_API_BASE", "http://localhost:11434") + "/api/generate"
+            try:
+                ollama_resp = requests.post(ollama_url, json={"model": "llama3", "prompt": user_msg, "stream": False}, timeout=5)
+                if ollama_resp.status_code == 200:
+                    reply_text = ollama_resp.json().get("response", "")
+            except Exception:
+                pass
             
         if not reply_text:
             if agent_id == "hermes":
