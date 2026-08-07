@@ -398,6 +398,8 @@ def api_status():
 
 @agentic_bp.route("/api/agentic/roster", methods=["GET", "OPTIONS"])
 def api_roster():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
     probes = _probe_all()
     agents = []
     for sid, name, typ, cat, role, url, model in SERVICES:
@@ -442,6 +444,8 @@ def api_memory():
 @agentic_bp.route("/api/agentic/oracle", methods=["POST", "OPTIONS"])
 def api_oracle():
     """REAL sweep: RSS feeds -> score -> top signals -> Signal file in vault."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
     data = request.get_json() or {}
     query = data.get("query", "Latest AI agent frameworks & research")
     stories = _sweep_feeds(limit=5)
@@ -499,6 +503,8 @@ def api_oracle():
 @agentic_bp.route("/api/agentic/crew", methods=["POST", "OPTIONS"])
 def api_crew():
     """Dispatch a crew: 3 REAL per-role LLM calls, results collected + logged."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
     data = request.get_json() or {}
     crew_name = data.get("crew", "Full-Stack Dev Crew")
     task = data.get("task", "Audit & refactor codebase for memory efficiency")
