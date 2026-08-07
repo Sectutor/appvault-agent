@@ -407,6 +407,18 @@ def get_container_host_port(container_name):
     """Get the first host port mapped to a container (cached 15s)."""
     return _cached_docker_port(("hp", container_name), _get_container_host_port_uncached, container_name)
 
+def _app_container_name(app_id):
+    """Resolve the actual container name for an app: prefer app-<id>, then a
+    container labeled appvault.app=<id> (compose-managed agentic stack etc.)."""
+    cname = f"app-{app_id}"
+    if container_running(cname) or container_exists(cname):
+        return cname
+    ok, out = _docker("ps", "-a", "--filter", f"label=appvault.app={app_id}",
+                      "--format", "{{.Names}}", capture=True)
+    if ok and out and out.strip():
+        return out.strip().splitlines()[0].strip()
+    return cname
+
 def _get_container_host_port_uncached(container_name):
     ok, out = _docker("port", container_name, capture=True)
     if ok and out:
@@ -2092,7 +2104,7 @@ def api_catalog():
         status = get_app_status_local(app["id"])
         host_port = ""
         if status in ("installed", "stopped"):
-            cname = f"app-{app['id']}"
+            cname = _app_container_name(app["id"])
             host_port = get_container_host_port(cname) or app.get("container_port", "")
         entry = {**app, "status": status, "host_port": host_port}
         # Update availability: installed image vs catalog image. The catalog is
@@ -2127,7 +2139,7 @@ def api_catalog():
             else:
                 entry["launch_url"] = ""
         if status in ("installed", "stopped") and app.get("extra_ports"):
-            cname = f"app-{app['id']}"
+            cname = _app_container_name(app["id"])
             path = app.get("web_path", "/")
             for cport in app["extra_ports"]:
                 hp = get_container_port_host(cname, cport)
