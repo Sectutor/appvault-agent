@@ -293,6 +293,7 @@ _LAST_PROBE = [0.0]
 
 def _probe_all(force=False):
     """Probe every service (threaded) — status is reality."""
+    global _probe_cache
     now = time.time()
     if not force and now - _LAST_PROBE[0] < 5 and _probe_cache:
         return _probe_cache
