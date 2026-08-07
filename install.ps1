@@ -108,7 +108,7 @@ foreach ($f in $features) {
 # ═══════════════════════════════════════════
 # STEP 5: Install WSL kernel update if needed
 # ═══════════════════════════════════════════
-Step "Setting WSL2 as default"
+Step "Setting WSL2 as default and RAM safety limits"
 wsl --set-default-version 2 2>$null
 if ($LASTEXITCODE -eq 0) {
     Success "WSL2 set as default"
@@ -116,6 +116,13 @@ if ($LASTEXITCODE -eq 0) {
     Warn "WSL kernel update may be needed."
     Warn "  Download: https://wslstorestorage.blob.core.windows.net/wslblob/wsl_update_x64.msi"
     Warn "  Install the .msi, then run: wsl --set-default-version 2"
+}
+
+# Create .wslconfig RAM cap if not present (prevents WSL2 VMMEM from consuming 100% host RAM)
+$wslConfigFile = "$env:USERPROFILE\.wslconfig"
+if (-not (Test-Path $wslConfigFile)) {
+    "[wsl2]`nmemory=6GB`nprocessors=4" | Out-File -Encoding ascii $wslConfigFile
+    Success "Created .wslconfig (capped WSL2 memory to 6GB to protect host RAM)"
 }
 
 # ═══════════════════════════════════════════
@@ -246,7 +253,7 @@ Step "Starting AppVault Agent"
 $apiKey = -join ((48..57)+(65..90)+(97..122) | Get-Random -Count 32 | ForEach-Object {[char]$_})
 Write-Host "  Pulling AppVault images..."
 & $docker pull ghcr.io/sectutor/appvault-agent:latest 2>&1 | Out-Null
-& $docker pull ghcr.io/sectutor/appvault-releases:v10 2>&1 | Out-Null
+& $docker pull ghcr.io/sectutor/appvault-releases:v13 2>&1 | Out-Null
 
 # Create data directory
 mkdir "$env:USERPROFILE\.appvault\data" -Force | Out-Null
@@ -258,13 +265,16 @@ if (& $docker ps -a --filter "name=^/appvault-agent$" --format '{{.Names}}' 2>$n
     & $docker rm appvault-agent 2>$null | Out-Null
 }
 
+# Windows named pipe or unix socket mount
+$sockMount = if ($IsWindows -or $env:OS -like "*Windows*") { "//./pipe/docker_engine://./pipe/docker_engine" } else { "/var/run/docker.sock:/var/run/docker.sock" }
+
 # Start agent
 Write-Host "  Starting AppVault Agent on port 8086..."
 & $docker run -d `
   --name appvault-agent `
   --restart unless-stopped `
   -p 8086:8086 `
-  -v /var/run/docker.sock:/var/run/docker.sock:ro `
+  -v "$sockMount" `
   -v "$env:USERPROFILE\.appvault\data:/data" `
   -v "$env:USERPROFILE\.appvault\apps:/data/apps" `
   -e AGENT_PORT=8086 `
@@ -293,7 +303,18 @@ Remove-Item "$env:USERPROFILE\.appvault\heimdall-config\www" -Recurse -Force -Er
   -e PUID=1000 `
   -e PGID=1000 `
   -e TZ=Etc/UTC `
-  ghcr.io/sectutor/appvault-releases:v10
+  ghcr.io/sectutor/appvault-releases:v13
+
+# Register auto-start scheduled task so containers launch on Windows boot
+Step "Configuring Windows Startup Task"
+try {
+    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-WindowStyle Hidden -Command ""docker start appvault-agent appvault-heimdall"""
+    $trigger = New-ScheduledTaskTrigger -AtLogOn
+    Register-ScheduledTask -TaskName "AppVaultAutoStart" -Action $action -Trigger $trigger -Description "Auto-start AppVault containers on login" -User $env:USERNAME -ErrorAction SilentlyContinue | Out-Null
+    Success "Windows startup task 'AppVaultAutoStart' registered"
+} catch {
+    Warn "Could not register startup task automatically (non-critical)"
+}
 
 # ═══════════════════════════════════════════
 # DONE
@@ -306,6 +327,8 @@ Write-Host "`n"
 Write-Host "  📦 App Store:  http://localhost:8085/" -ForegroundColor Cyan
 Write-Host "  ⚙️  Dashboard:  http://localhost:8085/index.php" -ForegroundColor Cyan
 Write-Host "`n"
-Write-Host "  Press any key to open the App Store..."
-$null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-Start-Process "http://localhost:8085/"
+if ($Host.UI.RawUI -and $Host.Name -notlike "*NonInteractive*") {
+    Write-Host "  Press any key to open the App Store..."
+    try { $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") } catch {}
+}
+try { Start-Process "http://localhost:8085/" } catch {}
