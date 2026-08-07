@@ -609,3 +609,84 @@ def api_central_config():
         return jsonify({"status": "ok", "config": {k: ("***" if k == "api_key" and v else v) for k, v in cfg.items()}})
     cfg = _get_llm_config()
     return jsonify({"status": "ok", "config": {k: ("***" if k == "api_key" and v else v) for k, v in cfg.items()}})
+
+# ── HERMES STREAMING & OBSIDIAN VAULT INSPECTOR ENDPOINTS ──
+
+@agentic_bp.route("/api/agentic/hermes/sessions/<session_id>/stream", methods=["POST", "OPTIONS"])
+def api_hermes_session_stream(session_id):
+    """Proxy SSE token streaming from Hermes Core :8095."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    
+    url = f"{_get_hermes_core_url()}/api/v1/sessions/{session_id}/stream"
+    payload = request.get_json() or {}
+    
+    def generate():
+        try:
+            req = urllib.request.Request(url, method="POST", data=json.dumps(payload).encode("utf-8"))
+            req.add_header("Content-Type", "application/json")
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                for line in resp:
+                    if line:
+                        yield line
+        except Exception as e:
+            err_json = json.dumps({"token": f"\n[Error streaming from Hermes: {e}]"})
+            yield f"data: {err_json}\n\ndata: [DONE]\n\n".encode("utf-8")
+
+    return Response(generate(), mimetype="text/event-stream")
+
+@agentic_bp.route("/api/agentic/vault/files", methods=["GET", "OPTIONS"])
+def api_vault_files():
+    """List markdown files in Obsidian Vault for the in-browser document inspector."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    
+    vault_base = os.environ.get("OBSIDIAN_VAULT_PATH", "/vault" if os.path.exists("/vault") else "D:/ObsidianVault")
+    if not os.path.exists(vault_base) and os.path.exists("D:/ObsidianVault"):
+        vault_base = "D:/ObsidianVault"
+        
+    result_files = []
+    if os.path.exists(vault_base):
+        for root, _, files in os.walk(vault_base):
+            for file in files:
+                if file.endswith(".md"):
+                    full_p = os.path.join(root, file)
+                    rel_p = os.path.relpath(full_p, vault_base).replace("\\", "/")
+                    stat = os.stat(full_p)
+                    result_files.append({
+                        "filename": file,
+                        "path": rel_p,
+                        "size": stat.st_size,
+                        "mtime": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
+                    })
+                    
+    return jsonify({"status": "ok", "vault_base": vault_base, "files": result_files[:50]})
+
+@agentic_bp.route("/api/agentic/vault/file", methods=["GET", "OPTIONS"])
+def api_vault_file_content():
+    """Read full content of a specific file from Obsidian Vault."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    
+    rel_path = request.args.get("path", "").strip()
+    if not rel_path:
+        return jsonify({"error": "Path required"}), 400
+        
+    vault_base = os.environ.get("OBSIDIAN_VAULT_PATH", "/vault" if os.path.exists("/vault") else "D:/ObsidianVault")
+    if not os.path.exists(vault_base) and os.path.exists("D:/ObsidianVault"):
+        vault_base = "D:/ObsidianVault"
+        
+    full_path = os.path.abspath(os.path.join(vault_base, rel_path))
+    if not full_path.startswith(os.path.abspath(vault_base)):
+        return jsonify({"error": "Access denied"}), 403
+        
+    if not os.path.exists(full_path):
+        return jsonify({"error": "File not found"}), 404
+        
+    try:
+        with open(full_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        return jsonify({"status": "ok", "path": rel_path, "content": content})
+    except Exception as e:
+        return jsonify({"error": f"Failed reading file: {e}"}), 500
+
