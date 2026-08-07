@@ -23,7 +23,7 @@ import urllib.error
 import xml.etree.ElementTree as ET
 from datetime import datetime
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, request, jsonify, Response
 
 agentic_bp = Blueprint("agentic_plane", __name__)
 
@@ -72,6 +72,12 @@ def _init_db():
     CREATE TABLE IF NOT EXISTS conversations (
         agent_id TEXT PRIMARY KEY,
         messages TEXT
+    );
+    CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY,
+        title TEXT,
+        messages TEXT,
+        updated TEXT
     );
     CREATE TABLE IF NOT EXISTS config (
         key TEXT PRIMARY KEY,
@@ -560,6 +566,34 @@ def _save_conversation(agent_id, messages):
     conn.commit()
     conn.close()
 
+def _list_sessions():
+    conn = _db()
+    rows = conn.execute("SELECT id, title, messages, updated FROM sessions ORDER BY updated DESC").fetchall()
+    conn.close()
+    sessions = []
+    for r in rows:
+        msgs = json.loads(r["messages"] or "[]")
+        sessions.append({"id": r["id"], "title": r["title"], "message_count": len(msgs),
+                         "updated": r["updated"] or ""})
+    return sessions
+
+def _get_session(session_id):
+    conn = _db()
+    row = conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {"id": row["id"], "title": row["title"], "messages": json.loads(row["messages"] or "[]")}
+
+def _save_session(session_id, title, messages):
+    conn = _db()
+    conn.execute("INSERT INTO sessions (id, title, messages, updated) VALUES (?,?,?,?) "
+                 "ON CONFLICT(id) DO UPDATE SET title=excluded.title, messages=excluded.messages, "
+                 "updated=excluded.updated",
+                 (session_id, title, json.dumps(messages), datetime.now().strftime("%Y-%m-%d %H:%M")))
+    conn.commit()
+    conn.close()
+
 @agentic_bp.route("/api/agentic/conversation/<agent_id>", methods=["GET", "POST", "OPTIONS"])
 def api_conversation(agent_id):
     agent_id = agent_id.lower()
@@ -610,28 +644,97 @@ def api_central_config():
     cfg = _get_llm_config()
     return jsonify({"status": "ok", "config": {k: ("***" if k == "api_key" and v else v) for k, v in cfg.items()}})
 
-# ── HERMES STREAMING & OBSIDIAN VAULT INSPECTOR ENDPOINTS ──
+# ── HERMES SESSIONS API (SQLite-backed) & STREAMING ──
+
+@agentic_bp.route("/api/agentic/hermes/sessions", methods=["GET", "POST", "OPTIONS"])
+def api_hermes_sessions():
+    """List or create Hermes chat sessions (persisted in SQLite)."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "POST":
+        data = request.get_json() or {}
+        title = (data.get("title") or "").strip() or f"Hermes Session {datetime.now().strftime('%H:%M')}"
+        sid = f"session-{int(time.time()*1000)}"
+        _save_session(sid, title, [])
+        return jsonify({"status": "ok", "session": {"id": sid, "title": title, "message_count": 0},
+                        "active_session": sid})
+    sessions = _list_sessions()
+    return jsonify({"status": "ok", "sessions": sessions,
+                    "active_session": sessions[0]["id"] if sessions else "session-default"})
+
+@agentic_bp.route("/api/agentic/hermes/sessions/<session_id>", methods=["GET", "POST", "DELETE", "OPTIONS"])
+def api_hermes_session(session_id):
+    """Get, send-to, or delete a Hermes session."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "DELETE":
+        conn = _db()
+        conn.execute("DELETE FROM sessions WHERE id=?", (session_id,))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok", "deleted": session_id})
+    sess = _get_session(session_id)
+    if not sess:
+        # Unknown session → seed it as a fresh one so the UI never 404s.
+        _save_session(session_id, "Hermes Session", [])
+        sess = _get_session(session_id)
+    if request.method == "POST":
+        data = request.get_json() or {}
+        user_msg = (data.get("prompt") or "").strip()
+        if user_msg:
+            sess["messages"].append({"sender": "User", "role": "user",
+                                     "timestamp": datetime.now().strftime("%H:%M LOCAL"), "text": user_msg})
+            try:
+                reply = _call_llm(user_msg, agent="hermes")
+            except Exception as e:
+                reply = f"⚠️ Hermes could not reach any LLM backend. Detail: {str(e)[:200]}"
+            sess["messages"].append({"sender": "Hermes Agent", "role": "agent",
+                                     "timestamp": datetime.now().strftime("%H:%M LOCAL"), "text": reply})
+            _save_session(session_id, sess["title"], sess["messages"])
+            conn = _db()
+            conn.execute("INSERT INTO memory (ts, agent, tag, content) VALUES (?,?,?,?)",
+                         (datetime.now().strftime("%H:%M LOCAL"), "Hermes Agent", "Conversation",
+                          f"User: {user_msg[:60]} | Reply: {reply[:60]}"))
+            conn.commit()
+            conn.close()
+        return jsonify({"status": "ok", "session": sess, "messages": sess["messages"]})
+    return jsonify({"status": "ok", "session": sess, "messages": sess["messages"]})
 
 @agentic_bp.route("/api/agentic/hermes/sessions/<session_id>/stream", methods=["POST", "OPTIONS"])
 def api_hermes_session_stream(session_id):
-    """Proxy SSE token streaming from Hermes Core :8095."""
+    """SSE streaming for a Hermes session — replies come from the central LLM hub."""
     if request.method == "OPTIONS":
         return jsonify({"status": "ok"})
-    
-    url = f"{_get_hermes_core_url()}/api/v1/sessions/{session_id}/stream"
     payload = request.get_json() or {}
-    
+    user_msg = (payload.get("prompt") or "").strip()
+
     def generate():
         try:
-            req = urllib.request.Request(url, method="POST", data=json.dumps(payload).encode("utf-8"))
-            req.add_header("Content-Type", "application/json")
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                for line in resp:
-                    if line:
-                        yield line
+            reply = _call_llm(user_msg, agent="hermes")
         except Exception as e:
-            err_json = json.dumps({"token": f"\n[Error streaming from Hermes: {e}]"})
-            yield f"data: {err_json}\n\ndata: [DONE]\n\n".encode("utf-8")
+            reply = f"⚠️ Hermes could not reach any LLM backend. Detail: {str(e)[:200]}"
+        # Persist the exchange to the session + shared memory
+        try:
+            sess = _get_session(session_id)
+            if not sess:
+                _save_session(session_id, "Hermes Session", [])
+                sess = _get_session(session_id)
+            sess["messages"].append({"sender": "User", "role": "user",
+                                     "timestamp": datetime.now().strftime("%H:%M LOCAL"), "text": user_msg})
+            sess["messages"].append({"sender": "Hermes Agent", "role": "agent",
+                                     "timestamp": datetime.now().strftime("%H:%M LOCAL"), "text": reply})
+            _save_session(session_id, sess["title"], sess["messages"])
+            conn = _db()
+            conn.execute("INSERT INTO memory (ts, agent, tag, content) VALUES (?,?,?,?)",
+                         (datetime.now().strftime("%H:%M LOCAL"), "Hermes Agent", "Conversation",
+                          f"User: {user_msg[:60]} | Reply: {reply[:60]}"))
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+        token = json.dumps({"token": reply})
+        yield f"data: {token}\n\n".encode("utf-8")
+        yield b"data: [DONE]\n\n"
 
     return Response(generate(), mimetype="text/event-stream")
 
