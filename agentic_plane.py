@@ -20,6 +20,7 @@ import threading
 import time
 import urllib.request
 import urllib.error
+import urllib.parse
 import xml.etree.ElementTree as ET
 from datetime import datetime
 
@@ -86,6 +87,17 @@ def _init_db():
     CREATE TABLE IF NOT EXISTS sweeps (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         ts TEXT, query TEXT, signal_file TEXT, top TEXT
+    );
+    CREATE TABLE IF NOT EXISTS oracle_feeds (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT, query TEXT,
+        rss_urls TEXT, subreddits TEXT, hn_query TEXT, github_query TEXT, youtube_channels TEXT,
+        created TEXT
+    );
+    CREATE TABLE IF NOT EXISTS oracle_posts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        feed_id INTEGER, platform TEXT, title TEXT, content TEXT,
+        status TEXT, scheduled_at TEXT, created TEXT
     );
     """)
     conn.commit()
@@ -522,6 +534,379 @@ def api_oracle():
                      "angle": s.get("summary", "")[:200]} for i, s in enumerate(stories, 1)],
     })
 
+# ═══════════════════════════════════════════════════════════════════════════
+# ORACLE v2 — configurable research feeds → multi-source sweep → article → n8n
+# Feed model: one row per topic. Each feed owns its sources (RSS / subreddits /
+# HN / GitHub / YouTube). Sweeps are per-feed so data stays separated. Signals
+# are engagement-scored (last30days-style) and dropped to the vault per feed.
+# Articles are generated from a feed's top signals, then scheduled to X /
+# LinkedIn via an n8n webhook (n8n owns the platform credentials + timer).
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _feed_defaults():
+    return {
+        "rss_urls": [u for _, u in FEEDS],
+        "subreddits": ["artificial", "LocalLLaMA", "MachineLearning"],
+        "hn_query": "AI agent",
+        "github_query": "ai agent framework",
+        "youtube_channels": [],
+    }
+
+def _feed_row_to_dict(r):
+    return {
+        "id": r["id"], "name": r["name"], "query": r["query"],
+        "rss_urls": json.loads(r["rss_urls"] or "[]"),
+        "subreddits": json.loads(r["subreddits"] or "[]"),
+        "hn_query": r["hn_query"] or "", "github_query": r["github_query"] or "",
+        "youtube_channels": json.loads(r["youtube_channels"] or "[]"),
+        "created": r["created"],
+    }
+
+def _list_feeds():
+    conn = _db()
+    rows = conn.execute("SELECT * FROM oracle_feeds ORDER BY id").fetchall()
+    conn.close()
+    return [_feed_row_to_dict(r) for r in rows]
+
+def _get_feed(feed_id):
+    conn = _db()
+    r = conn.execute("SELECT * FROM oracle_feeds WHERE id=?", (feed_id,)).fetchone()
+    conn.close()
+    return _feed_row_to_dict(r) if r else None
+
+def _sweep_feed_sources(feed):
+    """last30days-style multi-source sweep, engagement-scored. All sources keyless:
+    RSS feeds, Reddit subreddit RSS, HN Algolia API, GitHub search, YouTube channel RSS."""
+    stories = []
+    q = (feed.get("query") or "").strip() or (feed.get("hn_query") or "AI")
+
+    # 1) RSS feeds
+    for url in feed.get("rss_urls") or []:
+        try:
+            for it in _parse_rss(_fetch_feed(url)):
+                it["source"] = "RSS"
+                it["eng"] = {}
+                stories.append(it)
+        except Exception:
+            continue
+
+    # 2) Reddit subreddits (RSS — the JSON API is IP-blocked from cloud hosts)
+    for sub in feed.get("subreddits") or []:
+        sub = sub.strip().strip("/").replace("/r/", "")
+        if not sub:
+            continue
+        try:
+            items = _parse_rss(_fetch_feed(f"https://old.reddit.com/r/{sub}/.rss?limit=25"))
+            for it in items:
+                it["source"] = f"r/{sub}"
+                it["eng"] = {}
+                stories.append(it)
+        except Exception:
+            continue
+
+    # 3) Hacker News (Algolia API — has points + comments)
+    hn_q = (feed.get("hn_query") or "").strip()
+    if hn_q:
+        try:
+            url = ("https://hn.algolia.com/api/v1/search?query={}&tags=story"
+                   "&hitsPerPage=20&numericFilters=points%3E30").format(urllib.parse.quote(hn_q))
+            data, status = _http(url, timeout=10)
+            for h in (data.get("hits") or []) if isinstance(data, dict) else []:
+                title = h.get("title") or ""
+                if not title:
+                    continue
+                stories.append({
+                    "title": title,
+                    "link": f"https://news.ycombinator.com/item?id={h.get('objectID')}",
+                    "summary": (h.get("story_text") or "")[:300],
+                    "source": "Hacker News",
+                    "eng": {"points": h.get("points") or 0, "comments": h.get("num_comments") or 0},
+                })
+        except Exception:
+            pass
+
+    # 4) GitHub (search API — has stars)
+    gh_q = (feed.get("github_query") or "").strip()
+    if gh_q:
+        try:
+            url = "https://api.github.com/search/repositories?q={}&sort=stars&order=desc&per_page=10".format(
+                urllib.parse.quote(gh_q))
+            data, status = _http(url, timeout=10)
+            for it in (data.get("items") or []) if isinstance(data, dict) else []:
+                stories.append({
+                    "title": (it.get("description") or it.get("full_name") or ""),
+                    "link": it.get("html_url") or "",
+                    "summary": f"{it.get('full_name')} — {it.get('language') or 'unknown'}",
+                    "source": "GitHub",
+                    "eng": {"stars": it.get("stargazers_count") or 0},
+                })
+        except Exception:
+            pass
+
+    # 5) YouTube channels (RSS by channel_id — has view counts)
+    for cid in feed.get("youtube_channels") or []:
+        cid = cid.strip()
+        if not cid:
+            continue
+        try:
+            items = _parse_rss(_fetch_feed(f"https://www.youtube.com/feeds/videos.xml?channel_id={cid}"))
+            for it in items:
+                it["source"] = "YouTube"
+                it["eng"] = {}
+                stories.append(it)
+        except Exception:
+            continue
+
+    # Score: keyword relevance (existing KEYWORDS) + engagement bonus
+    for s in stories:
+        base = _score(s.get("title", ""), s.get("summary", ""))
+        eng = s.get("eng") or {}
+        bonus = min(25, (eng.get("points") or 0) // 10 + (eng.get("comments") or 0) // 5
+                    + (eng.get("stars") or 0) // 500)
+        s["score"] = min(100, base + bonus)
+
+    # Dedupe by title, keep top 8
+    seen, top = set(), []
+    for s in sorted(stories, key=lambda x: -(x.get("score") or 0)):
+        key = (s.get("title") or "")[:60].lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        top.append(s)
+        if len(top) >= 8:
+            break
+    return top
+
+def _save_feed_signals(feed, signals):
+    """Write per-feed signal file: <vault>/03_Signals/<FeedName>/Signal_<ts>.md"""
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    signal_id = f"sig-{int(time.time())}"
+    vault = _vault_path()
+    feed_dir = os.path.join(vault, "03_Signals", re.sub(r"[^\w\- ]+", "", feed["name"] or "Feed").strip())
+    signal_file = None
+    try:
+        os.makedirs(feed_dir, exist_ok=True)
+        signal_file = os.path.join(feed_dir, f"Signal_{signal_id}.md")
+        lines = [f"# Signal Report — {feed['name']}", f"\n- **Timestamp**: {ts}",
+                 f"- **Query**: `{feed['query']}`", f"- **Sources**: RSS / Reddit / HN / GitHub / YouTube\n",
+                 "\n## Top Signals\n"]
+        for i, s in enumerate(signals, 1):
+            eng = s.get("eng") or {}
+            eng_txt = " · ".join(f"{k}={v}" for k, v in eng.items() if v) or "no engagement data"
+            lines.append(f"{i}. **{s.get('title', '')}** (Score: {s.get('score', 0)}/100)")
+            lines.append(f"   - *Source*: {s.get('source', '')} | *Engagement*: {eng_txt}")
+            lines.append(f"   - *Link*: {s.get('link', '')}")
+            if s.get("summary"):
+                lines.append(f"   - *Summary*: {s['summary'][:180]}")
+            lines.append("")
+        with open(signal_file, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+    except Exception as e:
+        print(f"[oracle-v2] signal write failed: {e}")
+    return signal_file, ts
+
+@agentic_bp.route("/api/agentic/oracle/feeds", methods=["GET", "POST", "OPTIONS"])
+def api_oracle_feeds():
+    """CRUD for research feeds. Each feed = one topic with its own sources."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "GET":
+        return jsonify({"status": "ok", "feeds": _list_feeds()})
+    data = request.get_json() or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "name required"}), 400
+    def _arr(v):
+        if isinstance(v, list):
+            return [str(x).strip() for x in v if str(x).strip()]
+        if isinstance(v, str):
+            return [x.strip() for x in v.split(",") if x.strip()]
+        return []
+    conn = _db()
+    cur = conn.execute(
+        "INSERT INTO oracle_feeds (name, query, rss_urls, subreddits, hn_query, github_query, youtube_channels, created)"
+        " VALUES (?,?,?,?,?,?,?,?)",
+        (name, (data.get("query") or name).strip(),
+         json.dumps(_arr(data.get("rss_urls"))), json.dumps(_arr(data.get("subreddits"))),
+         (data.get("hn_query") or "").strip(), (data.get("github_query") or "").strip(),
+         json.dumps(_arr(data.get("youtube_channels"))),
+         datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    conn.commit()
+    feed = _get_feed(cur.lastrowid)
+    conn.close()
+    return jsonify({"status": "ok", "feed": feed})
+
+@agentic_bp.route("/api/agentic/oracle/feeds/<int:feed_id>", methods=["PUT", "DELETE", "OPTIONS"])
+def api_oracle_feed(feed_id):
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "DELETE":
+        conn = _db()
+        conn.execute("DELETE FROM oracle_feeds WHERE id=?", (feed_id,))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok", "deleted": feed_id})
+    data = request.get_json() or {}
+    def _arr(v):
+        if isinstance(v, list):
+            return [str(x).strip() for x in v if str(x).strip()]
+        if isinstance(v, str):
+            return [x.strip() for x in v.split(",") if x.strip()]
+        return []
+    conn = _db()
+    conn.execute(
+        "UPDATE oracle_feeds SET name=?, query=?, rss_urls=?, subreddits=?, hn_query=?, github_query=?, youtube_channels=?"
+        " WHERE id=?",
+        ((data.get("name") or "").strip(), (data.get("query") or "").strip(),
+         json.dumps(_arr(data.get("rss_urls"))), json.dumps(_arr(data.get("subreddits"))),
+         (data.get("hn_query") or "").strip(), (data.get("github_query") or "").strip(),
+         json.dumps(_arr(data.get("youtube_channels"))), feed_id))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok", "feed": _get_feed(feed_id)})
+
+@agentic_bp.route("/api/agentic/oracle/sweep", methods=["POST", "OPTIONS"])
+def api_oracle_sweep():
+    """Sweep ONE feed's sources, save signals per feed, return top signals."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    feed = None
+    if data.get("feed_id") is not None:
+        feed = _get_feed(int(data["feed_id"]))
+    if not feed:
+        feed = {
+            "id": 0, "name": data.get("name") or "Default Feed",
+            "query": data.get("query") or "AI agent orchestration & LLM frameworks",
+            "rss_urls": data.get("rss_urls") or [u for _, u in FEEDS],
+            "subreddits": data.get("subreddits") or _feed_defaults()["subreddits"],
+            "hn_query": data.get("hn_query") or "AI agent",
+            "github_query": data.get("github_query") or "ai agent framework",
+            "youtube_channels": data.get("youtube_channels") or [],
+        }
+    signals = _sweep_feed_sources(feed)
+    signal_file, ts = _save_feed_signals(feed, signals)
+
+    conn = _db()
+    conn.execute("INSERT INTO sweeps (ts, query, signal_file, top) VALUES (?,?,?,?)",
+                 (ts, feed["query"], os.path.basename(signal_file) if signal_file else "",
+                  json.dumps(signals[:3])))
+    conn.execute("INSERT INTO memory (ts, agent, tag, content) VALUES (?,?,?,?)",
+                 (datetime.now().strftime("%H:%M LOCAL"), "Oracle v2", "Feed Sweep",
+                  f"Feed '{feed['name']}': {len(signals)} signals from RSS/Reddit/HN/GitHub/YouTube. "
+                  f"File: {os.path.basename(signal_file) if signal_file else 'in-memory'}"))
+    conn.commit()
+    conn.close()
+
+    return jsonify({
+        "status": "ok", "feed": feed["name"], "feed_id": feed["id"],
+        "timestamp": ts, "signal_file": signal_file or "in-memory (no vault mounted)",
+        "signals": [{"id": f"sig-{i:02d}", "title": s.get("title", ""), "score": s.get("score", 0),
+                     "source": s.get("source", ""), "link": s.get("link", ""),
+                     "eng": s.get("eng") or {}, "angle": (s.get("summary") or "")[:200]}
+                    for i, s in enumerate(signals, 1)],
+    })
+
+@agentic_bp.route("/api/agentic/oracle/generate", methods=["POST", "OPTIONS"])
+def api_oracle_generate():
+    """Turn a feed's top signals into a publish-ready piece (linkedin | x | blog)."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    platform = (data.get("platform") or "linkedin").lower()
+    if platform not in ("linkedin", "x", "blog"):
+        return jsonify({"error": "platform must be linkedin|x|blog"}), 400
+    feed = _get_feed(int(data["feed_id"])) if data.get("feed_id") is not None else None
+    if not feed:
+        return jsonify({"error": "feed_id required"}), 400
+    signals = _sweep_feed_sources(feed)
+
+    sig_lines = "\n".join(
+        f"- {s.get('title','')} [{s.get('source','')} | score {s.get('score',0)}] {s.get('link','')}"
+        for s in signals[:6])
+
+    if platform == "x":
+        sys_prompt = ("You write X/Twitter posts about AI. Output ONLY the post text (max 280 chars), "
+                      "no preamble, no hashtag spam. Hook + one sharp insight from the signals.")
+    elif platform == "blog":
+        sys_prompt = ("You are a tech journalist. Write a 350-500 word blog article in markdown with a title "
+                      "(# Heading), an intro, 2-3 sections with real substance drawn from the signals, and a "
+                      "conclusion. Cite the source links inline.")
+    else:
+        sys_prompt = ("You are a LinkedIn content strategist for an AI tools company. Write a professional "
+                      "LinkedIn post (200-320 words) with: a bold hook line, 3 concrete takeaways from the "
+                      "signals, and a question to drive comments. Plain text, short paragraphs, no emoji "
+                      "overuse, no hashtag spam. Output ONLY the post body.")
+
+    try:
+        content = _call_llm(
+            f"Feed topic: {feed['query']}\n\nTop research signals (last 30 days):\n{sig_lines}\n\n"
+            f"Write the {platform} post now.", system_prompt=sys_prompt, agent="oracle", timeout=60)
+    except Exception as e:
+        return jsonify({"status": "error", "error": f"LLM generation failed: {str(e)[:200]}"}), 502
+
+    title = signals[0]["title"][:80] if signals else feed["name"]
+    conn = _db()
+    cur = conn.execute(
+        "INSERT INTO oracle_posts (feed_id, platform, title, content, status, created) VALUES (?,?,?,?,?,?)",
+        (feed["id"], platform, title, content, "draft", datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    conn.commit()
+    post_id = cur.lastrowid
+    conn.close()
+    return jsonify({"status": "ok", "post_id": post_id, "platform": platform,
+                    "title": title, "content": content, "feed": feed["name"]})
+
+@agentic_bp.route("/api/agentic/oracle/posts", methods=["GET", "OPTIONS"])
+def api_oracle_posts():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    conn = _db()
+    rows = conn.execute("SELECT * FROM oracle_posts ORDER BY id DESC LIMIT 25").fetchall()
+    conn.close()
+    return jsonify({"status": "ok", "posts": [dict(r) for r in rows]})
+
+@agentic_bp.route("/api/agentic/oracle/schedule", methods=["POST", "OPTIONS"])
+def api_oracle_schedule():
+    """Schedule a generated post to X/LinkedIn via the n8n webhook.
+    n8n owns the platform credentials + Wait-until-timestamp + posting nodes."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    post_id = data.get("post_id")
+    when = (data.get("scheduled_at") or "").strip()      # ISO datetime, e.g. 2026-08-08T09:00:00
+    platform = (data.get("platform") or "linkedin").lower()
+    webhook = (data.get("webhook_url") or _cfg_get("n8n_webhook") or
+               "http://host.docker.internal:37950/webhook/appvault-publish").strip()
+    if not post_id or not when:
+        return jsonify({"error": "post_id and scheduled_at required"}), 400
+
+    conn = _db()
+    row = conn.execute("SELECT * FROM oracle_posts WHERE id=?", (post_id,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "post not found"}), 404
+    post = dict(row)
+    conn.execute("UPDATE oracle_posts SET status=?, scheduled_at=? WHERE id=?",
+                 ("scheduled", when, post_id))
+    conn.commit()
+    conn.close()
+
+    payload = {
+        "platform": platform,
+        "content": post["content"],
+        "title": post["title"],
+        "scheduled_at": when,
+        "post_id": post_id,
+        "feed_id": post["feed_id"],
+    }
+    try:
+        resp, status = _http(webhook, method="POST", json_data=payload, timeout=15)
+        ok = status in (200, 201, 202)
+        return jsonify({"status": "ok" if ok else "error", "webhook": webhook,
+                        "http": status, "response": resp if isinstance(resp, dict) else {"raw": resp}})
+    except Exception as e:
+        return jsonify({"status": "error", "error": f"n8n webhook unreachable: {str(e)[:200]}"}), 502
+
 @agentic_bp.route("/api/agentic/crew", methods=["POST", "OPTIONS"])
 def api_crew():
     """Dispatch a crew: 3 REAL per-role LLM calls, results collected + logged."""
@@ -857,10 +1242,7 @@ def api_vault_files():
     if request.method == "OPTIONS":
         return jsonify({"status": "ok"})
     
-    vault_base = os.environ.get("OBSIDIAN_VAULT_PATH", "/vault" if os.path.exists("/vault") else "D:/ObsidianVault")
-    if not os.path.exists(vault_base) and os.path.exists("D:/ObsidianVault"):
-        vault_base = "D:/ObsidianVault"
-        
+    vault_base = _vault_path()
     result_files = []
     if os.path.exists(vault_base):
         for root, _, files in os.walk(vault_base):
@@ -888,10 +1270,7 @@ def api_vault_file_content():
     if not rel_path:
         return jsonify({"error": "Path required"}), 400
         
-    vault_base = os.environ.get("OBSIDIAN_VAULT_PATH", "/vault" if os.path.exists("/vault") else "D:/ObsidianVault")
-    if not os.path.exists(vault_base) and os.path.exists("D:/ObsidianVault"):
-        vault_base = "D:/ObsidianVault"
-        
+    vault_base = _vault_path()
     full_path = os.path.abspath(os.path.join(vault_base, rel_path))
     if not full_path.startswith(os.path.abspath(vault_base)):
         return jsonify({"error": "Access denied"}), 403
@@ -905,4 +1284,630 @@ def api_vault_file_content():
         return jsonify({"status": "ok", "path": rel_path, "content": content})
     except Exception as e:
         return jsonify({"error": f"Failed reading file: {e}"}), 500
+
+# ===========================================================================
+# NEXT-LEVEL UPGRADES — Crew presets, Semantic RAG, Knowledge Graph,
+# Workflow Pipeline Builder, Health Watchdog (auto-heal) + Telemetry
+# All stdlib (no requests module in the agent image). Every route has an
+# OPTIONS guard as its FIRST line (Flask 415s on preflight otherwise).
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# 1. Multi-Agent Crew presets (launcher GUI data)
+# ---------------------------------------------------------------------------
+CREW_PRESETS = [
+    {
+        "id": "cyber-auditor",
+        "icon": "🛡️",
+        "name": "Cybersecurity Code Auditor Crew",
+        "tagline": "Architect + Engineer + Reviewer audit code for security flaws",
+        "default_task": "Audit this codebase for OWASP Top 10 vulnerabilities (injection, XSS, insecure deserialization, hardcoded secrets) and produce a prioritized remediation plan.",
+        "roles": ["Security Architect", "Exploit Engineer", "Code Reviewer"],
+    },
+    {
+        "id": "market-intel",
+        "icon": "📊",
+        "name": "Market Signals Intelligence Crew",
+        "tagline": "Triple-agent research team turns raw signals into an investment brief",
+        "default_task": "Analyze the latest market signals and funding news in AI infrastructure. Produce an intelligence brief with trends, risks, and a recommendation.",
+        "roles": ["Market Analyst", "Data Researcher", "Risk Strategist"],
+    },
+    {
+        "id": "infra-health",
+        "icon": "⚙️",
+        "name": "Infrastructure Health Diagnostic Crew",
+        "tagline": "Detect, diagnose, and prescribe fixes for platform degradation",
+        "default_task": "Diagnose the current infrastructure stack: check service health, resource pressure, and failure modes. Produce a health report with exact remediation commands.",
+        "roles": ["Site Reliability Engineer", "Systems Auditor", "Remediation Planner"],
+    },
+    {
+        "id": "content-lab",
+        "icon": "✍️",
+        "name": "Content Publishing Crew",
+        "tagline": "Outline, draft, and editorial-review articles from vault signals",
+        "default_task": "Turn the latest Obsidian vault signals into a publish-ready article: outline, full draft, then editorial review with SEO improvements.",
+        "roles": ["Content Strategist", "Staff Writer", "Editorial Reviewer"],
+    },
+]
+
+
+@agentic_bp.route("/api/agentic/crews", methods=["GET", "OPTIONS"])
+def api_crews_presets():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "crews": CREW_PRESETS})
+
+
+def _dispatch_crew(crew_name, task, roles=None):
+    """Run a crew: N real per-role LLM calls. Shared by /crew and pipelines."""
+    if not roles:
+        roles = [("Architect", "crew-architect"), ("Lead Engineer", "crew-engineer"), ("Code Reviewer", "crew-reviewer")]
+    results = {}
+    errors = {}
+    for label, agent_id in roles:
+        try:
+            reply = _call_llm(
+                f"[Crew: {crew_name}] Task: {task}\n\nYour role: {label}. "
+                f"Produce your concrete contribution now (analysis, plan, or review findings).",
+                agent=agent_id, timeout=40)
+            results[label] = reply
+        except Exception as e:
+            errors[label] = str(e)
+    return results, errors
+
+
+# ---------------------------------------------------------------------------
+# 2. Semantic RAG search over the Obsidian Vault (hybrid: keyword + vectors)
+# ---------------------------------------------------------------------------
+def _vault_md_files(vault=None):
+    """All .md files under the vault (relative path, abs path, mtime)."""
+    vault = vault or _vault_path()
+    out = []
+    if not os.path.isdir(vault):
+        return out
+    for root, _, files in os.walk(vault):
+        for f in files:
+            if f.endswith(".md"):
+                full = os.path.join(root, f)
+                try:
+                    stat = os.stat(full)
+                except Exception:
+                    continue
+                out.append({
+                    "rel": os.path.relpath(full, vault).replace("\\", "/"),
+                    "abs": full,
+                    "mtime": stat.st_mtime,
+                })
+    return out
+
+
+def _ollama_embed(text, timeout=30):
+    """Embed text via the local Ollama. Returns a vector or None.
+    Uses an embedding model if present, else falls back to a tiny LLM trick:
+    we never block on a pull — absent model = None (keyword mode)."""
+    base = os.environ.get("OLLAMA_API_BASE", "http://host.docker.internal:11434").rstrip("/")
+    model = _pick_embed_model(base)
+    if not model:
+        return None
+    try:
+        data, status = _http(f"{base}/api/embeddings", method="POST",
+                             json_data={"model": model, "prompt": text[:8000]}, timeout=timeout)
+        if status == 200 and isinstance(data, dict):
+            emb = data.get("embedding")
+            if emb:
+                return emb
+    except Exception:
+        pass
+    return None
+
+
+_EMBED_MODEL = [None, 0.0]
+
+def _pick_embed_model(base):
+    """Discover an embedding-capable model from Ollama tags (cached 10 min)."""
+    if time.time() - _EMBED_MODEL[1] < 600 and _EMBED_MODEL[0]:
+        return _EMBED_MODEL[0]
+    try:
+        tags, status = _http(f"{base}/api/tags", timeout=3)
+        if status == 200 and isinstance(tags, dict):
+            names = [m.get("name") for m in (tags.get("models") or [])]
+            for pref in ("nomic-embed-text", "bge-m3", "mxbai-embed-large", "all-minilm"):
+                for n in names:
+                    if n.startswith(pref):
+                        _EMBED_MODEL[0] = n
+                        _EMBED_MODEL[1] = time.time()
+                        return n
+    except Exception:
+        pass
+    _EMBED_MODEL[1] = time.time()
+    return None
+
+
+def _cosine(a, b):
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(x * x for x in b) ** 0.5
+    return dot / (na * nb) if na and nb else 0.0
+
+
+def _tokenize(text):
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+def _keyword_score(query_tokens, content):
+    """Lightweight BM25-ish scoring over a document (no external deps)."""
+    toks = _tokenize(content)
+    if not toks:
+        return 0.0
+    score = 0.0
+    for qt in set(query_tokens):
+        n = toks.count(qt)
+        if n:
+            score += n / (n + 1.5) * len(qt)
+    return score / (len(toks) ** 0.35)
+
+
+def _search_vault(query, limit=8):
+    """Hybrid search: keyword always; semantic boost when an embed model exists.
+    Returns [{rel, snippet, kw_score, sem_score, combined}]."""
+    q_tokens = _tokenize(query)
+    files = _vault_md_files()
+    q_vec = _ollama_embed(query)
+    results = []
+    for f in files[:200]:
+        try:
+            with open(f["abs"], "r", encoding="utf-8", errors="replace") as fh:
+                content = fh.read()
+        except Exception:
+            continue
+        kw = _keyword_score(q_tokens, content)
+        sem = 0.0
+        if q_vec:
+            f_vec = _ollama_embed(content[:4000], timeout=15)
+            if f_vec:
+                sem = _cosine(q_vec, f_vec)
+        combined = kw + (sem * 3.0 if q_vec else 0.0)
+        if combined > 0:
+            results.append({"rel": f["rel"], "kw_score": round(kw, 4),
+                            "sem_score": round(sem, 4), "combined": round(combined, 4),
+                            "snippet": _snippet(content, q_tokens)})
+    results.sort(key=lambda r: -r["combined"])
+    return results[:limit], bool(q_vec)
+
+
+def _snippet(content, q_tokens, radius=240):
+    """First paragraph containing a query token (or the start)."""
+    text = re.sub(r"\s+", " ", content)
+    for tok in q_tokens:
+        idx = text.lower().find(tok)
+        if idx >= 0:
+            start = max(0, idx - radius // 3)
+            snip = text[start:start + radius]
+            return ("…" if start > 0 else "") + snip + ("…" if start + radius < len(text) else "")
+    return text[:radius]
+
+
+@agentic_bp.route("/api/agentic/search", methods=["GET", "OPTIONS"])
+def api_vault_search():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    q = (request.args.get("q") or "").strip()
+    if not q:
+        return jsonify({"error": "q required"}), 400
+    results, semantic = _search_vault(q, limit=int(request.args.get("limit", 8)))
+    return jsonify({"status": "ok", "query": q, "semantic": semantic,
+                    "embed_model": _pick_embed_model(
+                        os.environ.get("OLLAMA_API_BASE", "http://host.docker.internal:11434").rstrip("/")),
+                    "results": results})
+
+
+# ---------------------------------------------------------------------------
+# 3. Interactive Obsidian Knowledge Graph (nodes = files, edges = [[links]])
+# ---------------------------------------------------------------------------
+def _build_vault_graph():
+    nodes, edges = [], []
+    files = _vault_md_files()
+    by_stem = {}
+    for f in files:
+        stem = os.path.splitext(os.path.basename(f["rel"]))[0].lower()
+        by_stem.setdefault(stem, []).append(f["rel"])
+    for f in files:
+        try:
+            with open(f["abs"], "r", encoding="utf-8", errors="replace") as fh:
+                content = fh.read(40000)
+        except Exception:
+            content = ""
+        title = None
+        m = re.search(r"^#\s+(.+)$", content, re.M)
+        if m:
+            title = m.group(1).strip()
+        linked = set(re.findall(r"\[\[([^\]|#]+)(?:#[^\]]*)?(?:\|[^\]]*)?\]\]", content))
+        nodes.append({
+            "id": f["rel"],
+            "label": title or os.path.splitext(os.path.basename(f["rel"]))[0],
+            "size": os.path.getsize(f["abs"]) if os.path.exists(f["abs"]) else 0,
+            "mtime": f["mtime"],
+        })
+        for target in linked:
+            t = target.strip()
+            if not t:
+                continue
+            matches = by_stem.get(t.lower())
+            if matches:
+                for dest in matches:
+                    if dest != f["rel"]:
+                        edges.append({"source": f["rel"], "target": dest})
+    return nodes, edges
+
+
+@agentic_bp.route("/api/agentic/vault/graph", methods=["GET", "OPTIONS"])
+def api_vault_graph():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    nodes, edges = _build_vault_graph()
+    return jsonify({"status": "ok", "nodes": nodes, "edges": edges,
+                    "counts": {"nodes": len(nodes), "edges": len(edges)}})
+
+
+# ---------------------------------------------------------------------------
+# 4. Visual Workflow Pipeline Builder — CRUD + executor
+# ---------------------------------------------------------------------------
+def _init_pipelines_table():
+    conn = _db()
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS pipelines (
+        id TEXT PRIMARY KEY,
+        name TEXT,
+        nodes TEXT,
+        edges TEXT,
+        created TEXT,
+        updated TEXT
+    );
+    """)
+    conn.commit()
+    conn.close()
+
+
+_init_pipelines_table()
+
+PIPELINE_NODE_TYPES = {
+    "llm":        {"label": "🧠 LLM Query",       "desc": "Ask the central LLM (Hermes-style)", "fields": ["prompt"]},
+    "oracle":     {"label": "🔮 Signal Sweep",    "desc": "Sweep RSS feeds for the topic", "fields": ["query"]},
+    "crew":       {"label": "👥 Crew Dispatch",   "desc": "Run a multi-role crew on a task", "fields": ["task", "crew"]},
+    "memory":     {"label": "📝 Vault Logger",    "desc": "Write a memory/signal note to the vault", "fields": ["content"]},
+    "webhook":    {"label": "🔔 Webhook Notify",  "desc": "POST a payload to a URL", "fields": ["url", "payload"]},
+    "delay":      {"label": "⏳ Delay",           "desc": "Wait N seconds before next step", "fields": ["seconds"]},
+}
+
+
+def _run_pipeline_nodes(nodes, edges):
+    """Execute a pipeline in dependency order. node = {id,type,config}.
+    Outputs are stored per node id; later nodes can reference
+    {{nodeId}} / {{nodeId.field}} in their config strings."""
+    outputs = {}
+    logs = []
+    by_id = {n["id"]: n for n in nodes}
+    indeg = {n["id"]: 0 for n in nodes}
+    adj = {n["id"]: [] for n in nodes}
+    for e in edges:
+        if e.get("from") in indeg and e.get("to") in indeg:
+            adj[e["from"]].append(e["to"])
+            indeg[e["to"]] += 1
+    ready = [nid for nid, d in indeg.items() if d == 0]
+    done = 0
+    while ready:
+        ready.sort()
+        nid = ready.pop(0)
+        node = by_id.get(nid)
+        if not node:
+            continue
+        ntype = node.get("type", "llm")
+        cfg = node.get("config") or {}
+        try:
+            out = _exec_pipeline_node(ntype, cfg, outputs)
+            outputs[nid] = out
+            logs.append({"node": nid, "type": ntype, "status": "ok", "output_preview": str(out)[:300]})
+        except Exception as ex:
+            logs.append({"node": nid, "type": ntype, "status": "error", "error": str(ex)})
+            outputs[nid] = f"[ERROR] {ex}"
+        done += 1
+        for nxt in adj[nid]:
+            indeg[nxt] -= 1
+            if indeg[nxt] == 0:
+                ready.append(nxt)
+    return outputs, logs, done == len(nodes)
+
+
+def _resolve_tpl(text, outputs):
+    """Replace {{nodeId}} and {{nodeId.field}} references with previous outputs."""
+    if not text:
+        return text or ""
+
+    def repl(m):
+        ref = m.group(1).strip()
+        parts = ref.split(".", 1)
+        val = outputs.get(parts[0])
+        if val is None:
+            return m.group(0)
+        if len(parts) == 2 and isinstance(val, dict):
+            val = val.get(parts[1], m.group(0))
+        return str(val)
+
+    return re.sub(r"\{\{\s*([\w.\-]+)\s*\}\}", repl, text)
+
+
+def _exec_pipeline_node(ntype, cfg, outputs):
+    if ntype == "llm":
+        prompt = _resolve_tpl(cfg.get("prompt", "Continue."), outputs)
+        return _call_llm(prompt, timeout=45)
+    if ntype == "oracle":
+        query = _resolve_tpl(cfg.get("query", "AI agents"), outputs)
+        top = _sweep_feeds(limit=5)
+        return {"stories": [{"title": s["title"], "link": s["link"], "score": s.get("score", 0)} for s in top]}
+    if ntype == "crew":
+        task = _resolve_tpl(cfg.get("task", "Produce a report."), outputs)
+        crew = cfg.get("crew", "Pipeline Crew")
+        results, errors = _dispatch_crew(crew, task)
+        return {"results": results, "errors": errors}
+    if ntype == "memory":
+        content = _resolve_tpl(cfg.get("content", ""), outputs)
+        vault = _vault_path()
+        os.makedirs(os.path.join(vault, "03_Signals"), exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        fname = os.path.join(vault, "03_Signals", f"Pipeline_sig-{ts}.md")
+        with open(fname, "w", encoding="utf-8") as f:
+            f.write(f"# Pipeline Signal — {ts}\n\n{content}\n")
+        conn = _db()
+        conn.execute("INSERT INTO memory (ts, agent, tag, content) VALUES (?,?,?,?)",
+                     (datetime.now().strftime("%H:%M LOCAL"), "Pipeline", "Signal Logged",
+                      f"Wrote `{os.path.basename(fname)}` to vault."))
+        conn.commit()
+        conn.close()
+        return {"file": os.path.basename(fname)}
+    if ntype == "webhook":
+        url = _resolve_tpl(cfg.get("url", ""), outputs)
+        payload = _resolve_tpl(cfg.get("payload", "{}"), outputs)
+        try:
+            parsed = json.loads(payload) if payload.strip().startswith("{") else {"text": payload}
+        except Exception:
+            parsed = {"text": payload}
+        data, status = _http(url, method="POST", json_data=parsed, timeout=15)
+        return {"http": status, "response": str(data)[:200]}
+    if ntype == "delay":
+        time.sleep(min(300, int(cfg.get("seconds", 1) or 1)))
+        return {"waited": int(cfg.get("seconds", 1))}
+    raise ValueError(f"Unknown node type: {ntype}")
+
+
+@agentic_bp.route("/api/agentic/pipelines", methods=["GET", "POST", "OPTIONS"])
+def api_pipelines():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "POST":
+        data = request.get_json() or {}
+        pid = data.get("id") or f"pipe-{int(time.time())}"
+        name = data.get("name") or "Untitled Pipeline"
+        nodes = data.get("nodes") or []
+        edges = data.get("edges") or []
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conn = _db()
+        conn.execute("INSERT INTO pipelines (id, name, nodes, edges, created, updated) VALUES (?,?,?,?,?,?) "
+                     "ON CONFLICT(id) DO UPDATE SET name=excluded.name, nodes=excluded.nodes, "
+                     "edges=excluded.edges, updated=excluded.updated",
+                     (pid, name, json.dumps(nodes), json.dumps(edges), now, now))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok", "id": pid})
+    conn = _db()
+    rows = conn.execute("SELECT * FROM pipelines ORDER BY updated DESC").fetchall()
+    conn.close()
+    return jsonify({"status": "ok", "pipelines": [{
+        "id": r["id"], "name": r["name"], "nodes": json.loads(r["nodes"] or "[]"),
+        "edges": json.loads(r["edges"] or "[]"), "created": r["created"], "updated": r["updated"]
+    } for r in rows]})
+
+
+@agentic_bp.route("/api/agentic/pipelines/<pid>", methods=["GET", "DELETE", "OPTIONS"])
+def api_pipeline(pid):
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    conn = _db()
+    if request.method == "DELETE":
+        conn.execute("DELETE FROM pipelines WHERE id=?", (pid,))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok", "deleted": pid})
+    row = conn.execute("SELECT * FROM pipelines WHERE id=?", (pid,)).fetchone()
+    conn.close()
+    if not row:
+        return jsonify({"error": "Pipeline not found"}), 404
+    return jsonify({"status": "ok", "pipeline": {
+        "id": row["id"], "name": row["name"], "nodes": json.loads(row["nodes"] or "[]"),
+        "edges": json.loads(row["edges"] or "[]"), "created": row["created"], "updated": row["updated"]}})
+
+
+@agentic_bp.route("/api/agentic/pipeline/run", methods=["POST", "OPTIONS"])
+def api_pipeline_run():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    nodes = data.get("nodes") or []
+    edges = data.get("edges") or []
+    if not nodes:
+        return jsonify({"error": "Pipeline has no nodes"}), 400
+    outputs, logs, complete = _run_pipeline_nodes(nodes, edges)
+    return jsonify({"status": "ok" if complete else "partial",
+                    "outputs": {k: (str(v)[:2000]) for k, v in outputs.items()},
+                    "logs": logs, "complete": complete})
+
+
+# ---------------------------------------------------------------------------
+# 5. Health Watchdog — auto-healing + telemetry
+# ---------------------------------------------------------------------------
+def _init_health_tables():
+    conn = _db()
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS health_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts TEXT, service TEXT, action TEXT, detail TEXT
+    );
+    """)
+    conn.commit()
+    conn.close()
+
+
+_init_health_tables()
+
+# service id -> container name candidates (docker restart target)
+SERVICE_CONTAINERS = {
+    "crewai": ["appvault-crewai-runner"],
+    "litellm": ["appvault-litellm"],
+    "onebrain": ["appvault-memory-mcp"],
+    "hermes": ["appvault-hermes-agent"],
+    "n8n": ["app-n8n"],
+    "openwebui": ["open-webui"],
+    "anythingllm": ["app-anythingllm"],
+    "mcp": ["appvault-mcp-gateway"],
+}
+
+_FAIL_COUNTS = {}
+_LAST_RESTART = {}
+_HEALTH_LOCK = threading.Lock()
+WATCHDOG_CFG = {
+    "enabled": True,
+    "interval_s": 30,
+    "fail_threshold": 3,       # consecutive offline probes before acting
+    "min_uptime_s": 90,        # never restart a container younger than this
+    "cooldown_s": 300,         # min gap between restarts of the same service
+}
+
+
+def _docker_restart(container_name):
+    """Restart a container via the docker CLI (socket is mounted)."""
+    try:
+        import subprocess
+        r = subprocess.run(["docker", "restart", container_name],
+                           capture_output=True, text=True, timeout=60)
+        return r.returncode == 0, (r.stderr or r.stdout or "").strip()
+    except Exception as e:
+        return False, str(e)
+
+
+def _container_uptime(container_name):
+    """Seconds since the container started (None if missing)."""
+    try:
+        import subprocess
+        r = subprocess.run(["docker", "inspect", "-f", "{{.State.StartedAt}}", container_name],
+                           capture_output=True, text=True, timeout=15)
+        if r.returncode != 0:
+            return None
+        from datetime import datetime as _dt
+        started = _dt.strptime(r.stdout.strip()[:19], "%Y-%m-%dT%H:%M:%S")
+        return (datetime.now() - started).total_seconds()
+    except Exception:
+        return None
+
+
+def _log_health_event(service, action, detail):
+    conn = _db()
+    conn.execute("INSERT INTO health_events (ts, service, action, detail) VALUES (?,?,?,?)",
+                 (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), service, action, detail))
+    conn.commit()
+    conn.close()
+
+
+def _watchdog_tick():
+    """One pass: probe services, auto-restart the flaky ones (circuit breaker)."""
+    if not WATCHDOG_CFG["enabled"]:
+        return
+    probes = _probe_all(force=True)
+    for sid, st in probes.items():
+        if st.get("status") == "online":
+            _FAIL_COUNTS[sid] = 0
+            continue
+        _FAIL_COUNTS[sid] = _FAIL_COUNTS.get(sid, 0) + 1
+        if _FAIL_COUNTS[sid] < WATCHDOG_CFG["fail_threshold"]:
+            continue
+        containers = SERVICE_CONTAINERS.get(sid)
+        if not containers:
+            continue
+        now = time.time()
+        if now - _LAST_RESTART.get(sid, 0) < WATCHDOG_CFG["cooldown_s"]:
+            continue
+        for cname in containers:
+            uptime = _container_uptime(cname)
+            if uptime is None:
+                continue  # container not on this box
+            if uptime < WATCHDOG_CFG["min_uptime_s"]:
+                continue  # slow first boot is not unhealthy
+            ok, detail = _docker_restart(cname)
+            _LAST_RESTART[sid] = now
+            _FAIL_COUNTS[sid] = 0
+            _log_health_event(sid, "AUTO-RESTART" if ok else "RESTART-FAILED",
+                              f"{cname} was offline after {_FAIL_COUNTS.get(sid, 0) + 1} probes → {'restarted' if ok else 'failed: ' + detail}")
+            break
+
+
+def _watchdog_loop():
+    while True:
+        try:
+            _watchdog_tick()
+        except Exception:
+            pass
+        time.sleep(WATCHDOG_CFG["interval_s"])
+
+
+def _start_watchdog():
+    t = threading.Thread(target=_watchdog_loop, daemon=True)
+    t.start()
+
+
+if os.environ.get("APPVAULT_WATCHDOG", "1") != "0":
+    try:
+        _start_watchdog()
+    except Exception:
+        pass
+
+
+@agentic_bp.route("/api/agentic/health", methods=["GET", "OPTIONS"])
+def api_health():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    probes = _probe_all(force=True)
+    services = []
+    for sid, name, _, cat, role, path, _ in SERVICES:
+        st = probes.get(sid, {})
+        containers = SERVICE_CONTAINERS.get(sid, [])
+        uptime = None
+        for c in containers:
+            uptime = _container_uptime(c)
+            if uptime is not None:
+                break
+        services.append({
+            "id": sid, "name": name, "category": cat, "role": role,
+            "status": st.get("status", "offline"), "http": st.get("http", 0),
+            "fail_count": _FAIL_COUNTS.get(sid, 0),
+            "container": containers[0] if containers else None,
+            "uptime_s": round(uptime) if uptime is not None else None,
+        })
+    conn = _db()
+    events = [{"ts": r["ts"], "service": r["service"], "action": r["action"], "detail": r["detail"]}
+              for r in conn.execute("SELECT * FROM health_events ORDER BY id DESC LIMIT 25").fetchall()]
+    conn.close()
+    return jsonify({"status": "ok", "watchdog": WATCHDOG_CFG,
+                    "services": services, "events": events})
+
+
+@agentic_bp.route("/api/agentic/health/restart/<sid>", methods=["POST", "OPTIONS"])
+def api_health_restart(sid):
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    containers = SERVICE_CONTAINERS.get(sid)
+    if not containers:
+        return jsonify({"error": f"No container mapping for {sid}"}), 404
+    ok, detail = _docker_restart(containers[0])
+    _log_health_event(sid, "MANUAL-RESTART", f"{containers[0]} → {'ok' if ok else detail}")
+    return jsonify({"status": "ok" if ok else "error", "container": containers[0], "detail": detail})
 
