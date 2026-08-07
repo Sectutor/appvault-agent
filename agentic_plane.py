@@ -151,7 +151,10 @@ def _call_llm(user_msg, system_prompt=None, agent="hermes", timeout=25):
     cfg = _get_llm_config()
     provider = cfg.get("provider", "deepseek").lower()
     model = cfg.get("model") or "deepseek-chat"
-    api_key = (cfg.get("api_key") or "").strip()
+    # Per-provider key resolution: provider_keys[provider] wins, then the
+    # legacy single api_key, then empty (keyless Ollama fallback).
+    pkeys = cfg.get("provider_keys") or {}
+    api_key = ((pkeys.get(provider) or cfg.get("api_key")) or "").strip()
     api_base = (cfg.get("api_base") or "").strip()
     temp = cfg.get("temperature", 0.7)
     sys_prompt = system_prompt or cfg.get("system_prompt") or AGENT_PROMPTS.get(agent, DEFAULT_LLM_CONFIG["system_prompt"])
@@ -632,23 +635,37 @@ def api_conversation(agent_id):
 
 @agentic_bp.route("/api/agentic/config", methods=["GET", "POST", "OPTIONS"])
 def api_central_config():
-    """Central LLM config — the single source of truth for the entire fleet."""
+    """Central LLM config — the single source of truth for the entire fleet.
+    Stores per-provider API keys (SQLite) so users configure everything from
+    the UI — no .env / yaml editing. Keys are masked on GET."""
     if request.method == "POST":
         data = request.get_json() or {}
         cfg = _get_llm_config()
         for k in ("provider", "model", "temperature", "max_tokens", "api_key", "api_base", "system_prompt"):
             if data.get(k) is not None:
                 cfg[k] = data[k]
+        # Per-provider keys: deepseek/openai/anthropic/grok — saved to SQLite,
+        # used by _call_llm to resolve the right key for each provider.
+        if isinstance(data.get("provider_keys"), dict):
+            keys = dict(cfg.get("provider_keys") or {})
+            for pk, pv in data["provider_keys"].items():
+                if pv:  # only overwrite when a value is supplied (keep masked/blanks)
+                    keys[pk] = pv
+            cfg["provider_keys"] = keys
         _cfg_set("llm", cfg)
-        # Keep legacy hermes config proxy in sync if hermes core is up
-        try:
-            _http("http://localhost:8095/api/v1/config", method="POST",
-                  json_data={k: v for k, v in cfg.items() if k != "api_key" or v}, timeout=3)
-        except Exception:
-            pass
-        return jsonify({"status": "ok", "config": {k: ("***" if k == "api_key" and v else v) for k, v in cfg.items()}})
+        return jsonify({"status": "ok", "config": _mask_cfg(cfg)})
     cfg = _get_llm_config()
-    return jsonify({"status": "ok", "config": {k: ("***" if k == "api_key" and v else v) for k, v in cfg.items()}})
+    return jsonify({"status": "ok", "config": _mask_cfg(cfg)})
+
+def _mask_cfg(cfg):
+    """Return config with all secrets masked (only last 4 chars visible)."""
+    out = {k: v for k, v in cfg.items() if k not in ("api_key", "provider_keys")}
+    if cfg.get("api_key"):
+        out["api_key"] = f"****{cfg['api_key'][-4:]}"
+    out["provider_keys"] = {}
+    for pk, pv in (cfg.get("provider_keys") or {}).items():
+        out["provider_keys"][pk] = f"****{pv[-4:]}" if pv else ""
+    return out
 
 # ── HERMES SESSIONS API (SQLite-backed) & STREAMING ──
 
