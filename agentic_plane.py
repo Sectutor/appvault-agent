@@ -148,7 +148,21 @@ def _get_llm_config():
 
 def _call_llm(user_msg, system_prompt=None, agent="hermes", timeout=25):
     """Single dispatch for every agent conversation + crew role. Real LLM call."""
+    return _call_llm_with({}, user_msg, system_prompt=system_prompt, agent=agent, timeout=timeout)
+
+# Which backend answered the last _call_llm_with — lets the Test button tell
+# the user whether THEIR provider worked or the keyless fallback kicked in.
+_LAST_BACKEND = [None]
+
+def _call_llm_with(overrides, user_msg, system_prompt=None, agent="hermes", timeout=25):
+    """Like _call_llm but with a one-shot config override (used by the UI
+    Test button — nothing is persisted)."""
+    global _LAST_BACKEND
     cfg = _get_llm_config()
+    if overrides:
+        for k, v in overrides.items():
+            if v is not None:
+                cfg[k] = v
     provider = cfg.get("provider", "deepseek").lower()
     model = cfg.get("model") or "deepseek-chat"
     # Per-provider key resolution: provider_keys[provider] wins, then the
@@ -177,6 +191,7 @@ def _call_llm(user_msg, system_prompt=None, agent="hermes", timeout=25):
             if status == 200 and isinstance(data, dict):
                 choices = data.get("choices", [])
                 if choices:
+                    _LAST_BACKEND[0] = provider
                     return choices[0].get("message", {}).get("content", "").strip()
             last_err = f"{provider} HTTP {status}: {str(data)[:200]}"
         except Exception as e:
@@ -195,6 +210,7 @@ def _call_llm(user_msg, system_prompt=None, agent="hermes", timeout=25):
             if status == 200 and isinstance(data, dict):
                 content = data.get("content", [])
                 if content:
+                    _LAST_BACKEND[0] = "anthropic"
                     return content[0].get("text", "").strip()
             last_err = f"anthropic HTTP {status}: {str(data)[:200]}"
         except Exception as e:
@@ -212,6 +228,7 @@ def _call_llm(user_msg, system_prompt=None, agent="hermes", timeout=25):
             if status == 200 and isinstance(data, dict):
                 reply = data.get("response", "").strip()
                 if reply:
+                    _LAST_BACKEND[0] = "ollama"
                     return reply
             last_err = f"ollama HTTP {status}"
         except Exception as e:
@@ -248,6 +265,7 @@ def _call_llm(user_msg, system_prompt=None, agent="hermes", timeout=25):
                 if status == 200 and isinstance(data, dict):
                     reply = data.get("response", "").strip()
                     if reply:
+                        _LAST_BACKEND[0] = "ollama-fallback"
                         return reply
                 last_err = f"ollama-fallback HTTP {status}: {str(data)[:150]}"
         except Exception as e:
@@ -667,6 +685,38 @@ def _mask_cfg(cfg):
     for pk, pv in (cfg.get("provider_keys") or {}).items():
         out["provider_keys"][pk] = f"****{pv[-4:]}" if pv else ""
     return out
+
+@agentic_bp.route("/api/agentic/test", methods=["POST", "OPTIONS"])
+def api_agentic_test():
+    """One-shot connectivity test for a candidate config — nothing is saved.
+    Body may carry provider/model/api_base/api_key/provider_keys overrides."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    overrides = {}
+    for k in ("provider", "model", "api_base", "api_key", "temperature", "max_tokens", "system_prompt"):
+        if data.get(k) is not None:
+            overrides[k] = data[k]
+    if isinstance(data.get("provider_keys"), dict) and data["provider_keys"]:
+        overrides["provider_keys"] = data["provider_keys"]
+    prompt = data.get("prompt") or "Reply with exactly: OK"
+    t0 = time.time()
+    try:
+        reply = _call_llm_with(overrides, prompt, agent="hermes", timeout=40)
+        backend = _LAST_BACKEND[0]
+        # Only the provider itself (or its explicit ollama mode) counts as a
+        # PASS — the keyless auto-fallback is a safety net, not the test target.
+        ok = bool(reply) and backend is not None and "fallback" not in backend and \
+             not reply.startswith("⚠️") and "could not reach" not in reply
+        return jsonify({"status": "ok", "ok": ok, "reply": reply[:400],
+                        "backend": backend,
+                        "latency_ms": int((time.time() - t0) * 1000),
+                        "provider": overrides.get("provider") or _get_llm_config().get("provider"),
+                        "model": overrides.get("model") or _get_llm_config().get("model")})
+    except Exception as e:
+        return jsonify({"status": "ok", "ok": False, "error": str(e)[:300],
+                        "latency_ms": int((time.time() - t0) * 1000)})
+
 
 @agentic_bp.route("/api/agentic/providers/<provider>/models", methods=["GET", "OPTIONS"])
 def api_provider_models(provider):
