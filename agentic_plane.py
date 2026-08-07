@@ -668,6 +668,45 @@ def _mask_cfg(cfg):
         out["provider_keys"][pk] = f"****{pv[-4:]}" if pv else ""
     return out
 
+@agentic_bp.route("/api/agentic/providers/<provider>/models", methods=["GET", "OPTIONS"])
+def api_provider_models(provider):
+    """Live model list for a provider, fetched server-side (no browser CORS).
+    Uses the saved API key from central config."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    cfg = _get_llm_config()
+    pkeys = cfg.get("provider_keys") or {}
+    key = (pkeys.get(provider) or cfg.get("api_key") or "").strip()
+    preset_bases = {
+        "deepseek": "https://api.deepseek.com",
+        "openai": "https://api.openai.com/v1",
+        "anthropic": "https://api.anthropic.com/v1",
+        "grok": "https://api.x.ai/v1",
+        "ollama": "http://host.docker.internal:11434",
+        "litellm": "http://host.docker.internal:4000/v1",
+    }
+    # The per-provider preset base always wins here — the global api_base
+    # belongs to the default engine and must not leak across providers.
+    base = preset_bases.get(provider, "")
+    if not base:
+        return jsonify({"status": "ok", "models": []})
+    if provider == "ollama":
+        url = base.rstrip("/") + "/api/tags"
+        data, status = _http(url, timeout=6)
+        models = [m.get("name") for m in (data.get("models") if isinstance(data, dict) else []) or []]
+        return jsonify({"status": "ok", "models": models or []})
+    if provider == "anthropic":
+        # Anthropic exposes /v1/models (OpenAI-compatible listing) with x-api-key
+        url = base.rstrip("/") + "/v1/models"
+        data, status = _http(url, headers={"x-api-key": key, "anthropic-version": "2023-06-01"}, timeout=8)
+        ids = [m.get("id") for m in (data.get("data") if isinstance(data, dict) else []) or []]
+        return jsonify({"status": "ok", "models": ids or []})
+    # OpenAI-compatible: deepseek / openai / grok / litellm
+    url = base.rstrip("/") + ("/models" if "/v1" in base else "/v1/models")
+    data, status = _http(url, headers={"Authorization": f"Bearer {key}"} if key else {}, timeout=8)
+    ids = [m.get("id") for m in (data.get("data") if isinstance(data, dict) else []) or []]
+    return jsonify({"status": "ok", "models": ids or [], "http": status})
+
 # ── HERMES SESSIONS API (SQLite-backed) & STREAMING ──
 
 @agentic_bp.route("/api/agentic/hermes/sessions", methods=["GET", "POST", "OPTIONS"])
