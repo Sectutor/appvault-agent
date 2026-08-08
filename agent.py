@@ -1588,17 +1588,21 @@ def _do_install_stack(app_id):
                 with open(compose_path, 'r') as f:
                     content = f.read()
                 import re
-                # Find all port mappings and replace host port with a random one
-                def remap_port(m):
-                    mapping = m.group(0)
+                # Find all port mappings and replace host port with a random one.
+                # ANCHORED to port-mapping list items only ("- 4000:4000" /
+                # '- "4000:4000"') — the old global `"?\d+:\d+"?` regex also hit
+                # digit:digit sequences INSIDE healthchecks/env values
+                # (e.g. 127.0.0.1:4000, r.ok?0:1), corrupting the file and
+                # leaving the app permanently unhealthy (OpenShip incident).
+                def remap_mapping(m):
+                    mapping = m.group(1)
                     # Extract the host port part
-                    if ':' in mapping:
-                        host_part = mapping.split(':')[0].strip().strip('"').strip("'")
-                        if host_part.isdigit():
-                            new_host = str(_find_free_port())
-                            return mapping.replace(host_part, new_host, 1)
-                    return mapping
-                content = re.sub(r'"?\d+:\d+"?', remap_port, content)
+                    host_part = mapping.split(':')[0].strip().strip('"').strip("'")
+                    if host_part.isdigit():
+                        new_host = str(_find_free_port())
+                        return '- ' + mapping.replace(host_part, new_host, 1)
+                    return m.group(0)
+                content = re.sub(r'^\s*-\s*("?\d+:\d+"?)\s*$', remap_mapping, content, flags=re.M)
                 with open(compose_path, 'w') as f:
                     f.write(content)
                 ok, err = _docker("compose", "-p", _proj, "-f", compose_path, "up", "-d", svc, capture=True, timeout=300)
