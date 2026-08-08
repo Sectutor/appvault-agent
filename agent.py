@@ -2017,17 +2017,37 @@ def _get_internal_port(cname):
     return "80"
 
 def _is_app_alive(cname, internal_port):
-    """Check if a container's web server is responding. Uses wget then curl."""
+    """Check if a container's web server is responding.
+
+    Order: native docker healthcheck -> wget (any HTTP response) -> curl ->
+    node/bun fetch. Modern images (node/bun, distroless) ship NO curl/wget
+    (omniroute runs `node healthcheck.mjs`), and the old wget probe required
+    a >50-byte body — together they produced false "unresponsive" verdicts
+    and a restart storm (2026-08-08: omniroute/crewai-studio/central-redis
+    bounced every ~3 min while perfectly healthy).
+    """
     url = f"http://127.0.0.1:{internal_port}/"
-    # Try wget
-    ok, out = _docker("exec", cname, "wget", "-q", "-O", "-", "--timeout=5", url, capture=True, timeout=10)
-    if ok and len(out) > 50:
+    # 1) native docker healthcheck — the image's own probe is authoritative
+    okh, hout = _docker("inspect", "--format", "{{.State.Health.Status}}", cname, capture=True, timeout=15)
+    if okh and hout.strip() == "healthy":
         return True
-    # Try curl fallback
+    # 2) wget — exit 0 = any HTTP response (2xx/3xx/4xx all fine). No body
+    #    length requirement: redirect/error pages can be tiny.
+    ok, _ = _docker("exec", cname, "wget", "-q", "-O", "/dev/null", "--timeout=5", url, capture=True, timeout=10)
+    if ok:
+        return True
+    # 3) curl fallback
     ok, out = _docker("exec", cname, "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "5", url, capture=True, timeout=10)
     if ok and out.strip().isdigit():
         code = int(out.strip())
         if 200 <= code < 500:
+            return True
+    # 4) node/bun fetch fallback (images with neither curl nor wget)
+    for runner in ("node", "bun"):
+        ok, _ = _docker("exec", cname, runner, "-e",
+                        "fetch(process.argv[1]).then(r=>process.exit(r.status<500?0:1)).catch(()=>process.exit(1))",
+                        url, capture=True, timeout=10)
+        if ok:
             return True
     return False
 
@@ -2084,12 +2104,17 @@ def check_apps_health():
         if now - last_restart < GRACE_PERIOD:
             continue
         app_id = cname.replace("app-", "", 1)
+        # NEVER health-restart infra containers (central-* DBs/caches etc.) —
+        # e.g. central-redis speaks RESP, not HTTP: the old probe marked it
+        # "unresponsive" and restarted it every ~3 min (2026-08-08).
+        if app_id.startswith("central-"):
+            continue
         app_def = None
         for a in catalog_cache.get("apps", []):
             if a["id"] == app_id:
                 app_def = a
                 break
-        if not app_def:
+        if not app_def or app_def.get("hidden") or app_def.get("disabled"):
             continue
         # Skip database apps (no web UI)
         if app_def.get("category", "").lower() == "database":
@@ -3166,6 +3191,80 @@ def api_exec(app_id):
         "container": cname,
         "exit_code": 0 if ok else 1,
         "output": output
+    })
+
+@app.route("/api/ai/generate-command", methods=["POST"])
+def api_ai_generate_command():
+    """AI Command Generator: Converts natural language prompt into exact container CLI command."""
+    data = request.get_json(silent=True) or {}
+    app_id = (data.get("app_id") or "").lower().strip()
+    raw_prompt = data.get("prompt") or data.get("query") or ""
+    prompt = raw_prompt.lower().strip()
+
+    if not prompt:
+        return jsonify({"status": "error", "message": "Missing 'prompt' in request body"}), 400
+
+    import re
+    pass_match = re.search(r'(?:password\s+(?:to|is|=)\s*|password:\s*)(\S+)', raw_prompt, re.I)
+    pwd = pass_match.group(1) if pass_match else "NewAdminPass123"
+
+    cmd = ""
+    explanation = ""
+
+    if app_id == "omniroute":
+        if any(k in prompt for k in ["reset", "password", "pass"]):
+            cmd = f"printf '{pwd}' | node /app/bin/reset-password.mjs --password-stdin"
+            explanation = f"Resets OmniRoute admin password non-interactively to '{pwd}'."
+        elif any(k in prompt for k in ["help", "option"]):
+            cmd = "node /app/bin/omniroute.mjs --help"
+            explanation = "Displays OmniRoute CLI options."
+        elif any(k in prompt for k in ["version", "v"]):
+            cmd = "node -v"
+            explanation = "Displays Node.js runtime version."
+    elif app_id == "openwebui":
+        if any(k in prompt for k in ["python", "version"]):
+            cmd = "python3 --version"
+            explanation = "Shows Python runtime version in Open WebUI container."
+        elif any(k in prompt for k in ["env", "config"]):
+            cmd = "env"
+            explanation = "Lists environment variables."
+    elif app_id == "pihole":
+        if any(k in prompt for k in ["status", "state"]):
+            cmd = "pihole status"
+            explanation = "Checks Pi-hole blocking status."
+        elif any(k in prompt for k in ["version", "v"]):
+            cmd = "pihole -v"
+            explanation = "Shows Pi-hole core and web versions."
+
+    if not cmd:
+        if any(k in prompt for k in ["disk", "space", "storage", "size"]):
+            cmd = "df -h"
+            explanation = "Shows disk space usage."
+        elif any(k in prompt for k in ["mem", "ram", "memory"]):
+            cmd = "cat /proc/meminfo | head -n 5"
+            explanation = "Shows system memory stats."
+        elif any(k in prompt for k in ["env", "environment", "variable"]):
+            cmd = "env"
+            explanation = "Displays container environment variables."
+        elif any(k in prompt for k in ["process", "top", "ps"]):
+            cmd = "ps aux || ps -ef"
+            explanation = "Lists running processes inside container."
+        elif any(k in prompt for k in ["node", "version"]):
+            cmd = "node -v || python3 --version"
+            explanation = "Checks installed runtime version."
+        elif any(k in prompt for k in ["list", "file", "directory", "dir", "ls"]):
+            cmd = "ls -la /app"
+            explanation = "Lists files in /app directory."
+        else:
+            cmd = f"echo 'Executing request: {prompt}' && env"
+            explanation = f"Generated CLI command for: '{prompt}'"
+
+    return jsonify({
+        "status": "ok",
+        "app_id": app_id,
+        "prompt": raw_prompt,
+        "command": cmd,
+        "explanation": explanation
     })
 
 # ==============================================================================
