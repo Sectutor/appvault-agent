@@ -1493,12 +1493,19 @@ def _do_install_stack(app_id):
             _new = _re.sub(r'SERVER_URL:\s*"[^"]*"', f'SERVER_URL: "{base}"', _new)
             _new = _re.sub(r"SERVER_URL:\s*'[^']*'", f"SERVER_URL: '{base}'", _new)
             _new = _re.sub(r'SERVER_URL\s*=\s*\S+', f'SERVER_URL={base}', _new)
+            # OpenShip: the API only trusts the browser origin when
+            # OPENSHIP_PUBLIC_URL matches the launch URL — without it remote
+            # login is rejected with 403 ORIGIN_REJECTED. Inject the same
+            # per-client base (public_base():https-port) as SERVER_URL above.
+            _new = _re.sub(r'OPENSHIP_PUBLIC_URL:\s*"[^"]*"', f'OPENSHIP_PUBLIC_URL: "{base}"', _new)
+            _new = _re.sub(r"OPENSHIP_PUBLIC_URL:\s*'[^']*'", f"OPENSHIP_PUBLIC_URL: '{base}'", _new)
+            _new = _re.sub(r'OPENSHIP_PUBLIC_URL\s*=\s*\S+', f'OPENSHIP_PUBLIC_URL={base}', _new)
             if _new != _content:
                 with open(compose_path, "w", encoding="utf-8") as _f:
                     _f.write(_new)
-                print(f"[agent] Injected SERVER_URL={base} into {app_id} compose")
+                print(f"[agent] Injected SERVER_URL/OPENSHIP_PUBLIC_URL={base} into {app_id} compose")
         except Exception as _e:
-            print(f"[agent] SERVER_URL injection skipped for {app_id}: {_e}")
+            print(f"[agent] URL injection skipped for {app_id}: {_e}")
 
     # ADDITIVE: stabilize the web service's host port. Stack composes often use a
     # bare `- "9000"` (random host port) — that drifts on every reinstall and makes
