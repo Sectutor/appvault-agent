@@ -101,11 +101,44 @@ function Get-Discovered {
 
 function Get-IconBytes([string]$p) {
     if (-not $p -or -not (Test-Path $p)) { return $null }
+    # SHGetFileInfo resolves .lnk icons CORRECTLY (ExtractAssociatedIcon returns
+    # a generic 251-byte icon for shortcuts) and gives the shell-size icon.
+    # NOTE: the Win32 API REJECTS forward slashes — pass a native backslash path.
     $icon = $null; $bmp = $null; $ms = $null
     try {
-        $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($p)
-        if (-not $icon) { return $null }
-        $bmp = $icon.ToBitmap()
+        if (-not $script:ShellType) {
+            $script:ShellType = Add-Type -MemberDefinition @'
+[DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+public static extern IntPtr SHGetFileInfo(string pszPath, uint dwFileAttributes, out SHFILEINFO psfi, uint cbSizeFileInfo, uint uFlags);
+[DllImport("user32.dll")]
+public static extern bool DestroyIcon(IntPtr hIcon);
+[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+public struct SHFILEINFO {
+    public IntPtr hIcon;
+    public int iIcon;
+    public uint dwAttributes;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+    public string szDisplayName;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 80)]
+    public string szTypeName;
+}
+'@ -Name Shell -Namespace Win32 -PassThru
+        }
+        $native = $p -replace "/", "\"
+        # SHGFI_ICON (0x100) | SHGFI_SHELLICONSIZE (0x4) = shell-size real icon
+        $info = New-Object Win32.Shell+SHFILEINFO
+        $res = [Win32.Shell]::SHGetFileInfo($native, 0, [ref]$info,
+               [System.Runtime.InteropServices.Marshal]::SizeOf($info), 0x104)
+        if ($res -eq [IntPtr]::Zero -or $info.hIcon -eq [IntPtr]::Zero) {
+            # fallback: plain associated-icon extraction
+            $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($p)
+            if (-not $icon) { return $null }
+            $bmp = $icon.ToBitmap()
+        } else {
+            $icon = [System.Drawing.Icon]::FromHandle($info.hIcon)
+            $bmp = $icon.ToBitmap()
+            [Win32.Shell]::DestroyIcon($info.hIcon) | Out-Null
+        }
         $ms = New-Object System.IO.MemoryStream
         $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
         # plain return (byte[] unrolls to bytes on the pipeline) — caller
@@ -116,7 +149,6 @@ function Get-IconBytes([string]$p) {
     } finally {
         if ($ms) { $ms.Dispose() }
         if ($bmp) { $bmp.Dispose() }
-        if ($icon) { $icon.Dispose() }
     }
 }
 
@@ -211,13 +243,16 @@ function Handle-Request($ctx) {
             $app = @(Get-Registry) | Where-Object { $_.id -eq $id } | Select-Object -First 1
             if (-not $app) { Send-Json $ctx 404 @{ ok = $false; error = "app not found" }; return }
             $target = $app.path
-            if ($target -match "\.lnk$" -and (Test-Path $target)) {
-                Start-Process -FilePath $target
-            } else {
-                if (-not (Test-Path $target)) { Send-Json $ctx 404 @{ ok = $false; error = "app not found on disk: $target" }; return }
-                Start-Process -FilePath $target
-            }
-            Send-Json $ctx 200 @{ ok = $true; launched = $app.name }
+            if (-not (Test-Path $target)) { Send-Json $ctx 404 @{ ok = $false; error = "app not found on disk: $target" }; return }
+            $p = Start-Process -FilePath $target -PassThru
+            # launched from a background helper: the window opens but is NOT
+            # activated (sits minimized/behind) — AppActivate brings it up
+            try {
+                Start-Sleep -Milliseconds 700
+                $ws = New-Object -ComObject WScript.Shell
+                $null = $ws.AppActivate($p.Id)
+            } catch { }
+            Send-Json $ctx 200 @{ ok = $true; launched = $app.name; pid = $p.Id }
             return
         }
     }
