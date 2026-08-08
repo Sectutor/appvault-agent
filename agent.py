@@ -2819,6 +2819,7 @@ def api_education(app_id):
     # container port (9000/3001/19999), so the store shows the WORKING link.
     port = result["host_port"]
     path = result["web_path"]
+    proxy_mode = bool(PUBLIC_URL and "://" in PUBLIC_URL)
     if app_id in MONITORING_IDS:
         _mon_port = {
             "portainer": os.getenv("PORTAINER_PORT", "29001"),
@@ -2831,7 +2832,12 @@ def api_education(app_id):
             port = _mon_port
         else:
             result["launch_url"] = ""
-    elif app_id in _app_https_ports():
+    # The per-app Caddy HTTPS port exists ONLY in proxy mode (PUBLIC_URL set,
+    # e.g. VPS with Caddy). In DIRECT mode there is no Caddy — overriding
+    # host_port with the hash port produced dead guide links
+    # (e.g. http://localhost:21571/ while the app really listens on the
+    # remapped host port 36024). Use the LIVE host port in direct mode.
+    elif proxy_mode and app_id in _app_https_ports():
         result["launch_url"] = f"{public_base()}:{_app_https_ports()[app_id]}{path}"
         result["host_port"] = _app_https_ports()[app_id]
     elif port:
