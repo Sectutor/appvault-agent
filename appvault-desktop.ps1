@@ -261,7 +261,10 @@ function Handle-Request($ctx) {
 
 function Start-Server {
     $listener = New-Object System.Net.HttpListener
-    $listener.Prefixes.Add($Base)
+    # localhost prefix (no URL ACL needed). Containers reach it via
+    # host.docker.internal WITH a Host: localhost:8791 header (the gateway's
+    # desktop tools send that override) — HTTP.sys matches loopback Hosts here.
+    $listener.Prefixes.Add("http://localhost:8791/")
     try { $listener.Start() } catch {
         # port already in use -> another helper is running
         Write-Host "helper already running"
