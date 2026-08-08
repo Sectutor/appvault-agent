@@ -487,7 +487,15 @@ def _cached_docker_port(key, fn, *args):
     val = fn(*args)
     _PORT_CACHE[key] = (time.time(), val)
     if len(_PORT_CACHE) > 300:
-        _PORT_CACHE.clear()
+        # Evict ONLY expired entries — a full clear mid-request wipes fresh
+        # statuses and the bulk-cache-fresh guard in _get_app_status_local_uncached
+        # then reports every app as "available" (the "installed apps missing
+        # from My Apps" bug: 57 apps x several keys each exceeds 300, so the
+        # clear fired inside /api/catalog and only the first few apps kept
+        # their cached "installed" status). In-place deletes (no rebinding:
+        # `_PORT_CACHE = ...` here would shadow the global -> UnboundLocalError).
+        for k in [k for k, v in _PORT_CACHE.items() if time.time() - v[0] >= _PORT_CACHE_TTL]:
+            del _PORT_CACHE[k]
     return val
 
 def get_container_host_port(container_name):
