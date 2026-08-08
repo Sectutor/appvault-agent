@@ -253,7 +253,7 @@ Step "Starting AppVault Agent"
 $apiKey = -join ((48..57)+(65..90)+(97..122) | Get-Random -Count 32 | ForEach-Object {[char]$_})
 Write-Host "  Pulling AppVault images..."
 & $docker pull ghcr.io/sectutor/appvault-agent:latest 2>&1 | Out-Null
-& $docker pull ghcr.io/sectutor/appvault-releases:v34 2>&1 | Out-Null
+& $docker pull ghcr.io/sectutor/appvault-releases:v35 2>&1 | Out-Null
 
 # Create data directory
 mkdir "$env:USERPROFILE\.appvault\data" -Force | Out-Null
@@ -303,7 +303,7 @@ Remove-Item "$env:USERPROFILE\.appvault\heimdall-config\www" -Recurse -Force -Er
   -e PUID=1000 `
   -e PGID=1000 `
   -e TZ=Etc/UTC `
-  ghcr.io/sectutor/appvault-releases:v34
+  ghcr.io/sectutor/appvault-releases:v35
 
 # Register auto-start scheduled task so containers launch on Windows boot
 Step "Configuring Windows Startup Task"
@@ -315,6 +315,7 @@ try {
 } catch {
     Warn "Could not register startup task automatically (non-critical)"
 }
+
 
 
 # ---- APPVAULT DESKTOP HELPER (embedded) ----
@@ -466,6 +467,8 @@ function Send-Empty($ctx, [int]$code) {
     $resp = $ctx.Response
     $resp.StatusCode = $code
     $resp.Headers.Add("Access-Control-Allow-Origin", "*")
+    $resp.Headers.Add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+    $resp.Headers.Add("Access-Control-Allow-Headers", "Content-Type")
     $resp.ContentLength64 = 0
     $resp.OutputStream.Close()
 }

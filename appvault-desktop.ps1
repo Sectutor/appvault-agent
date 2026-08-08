@@ -138,6 +138,8 @@ function Send-Empty($ctx, [int]$code) {
     $resp = $ctx.Response
     $resp.StatusCode = $code
     $resp.Headers.Add("Access-Control-Allow-Origin", "*")
+    $resp.Headers.Add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+    $resp.Headers.Add("Access-Control-Allow-Headers", "Content-Type")
     $resp.ContentLength64 = 0
     $resp.OutputStream.Close()
 }
