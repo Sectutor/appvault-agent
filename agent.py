@@ -2810,7 +2810,14 @@ def api_education(app_id):
                 if okp and outp and outp.strip():
                     first = outp.strip().splitlines()[0].strip()
                     if "->" in first:
-                        result["host_port"] = first.split("->")[1].split("/")[0].strip()
+                        # docker port prints "<container-port>/tcp -> <host-bind>",
+                        # e.g. "4000/tcp -> 0.0.0.0:4000". Take the PORT out of the
+                        # host bind — the raw post-arrow text is the full binding
+                        # (0.0.0.0:4000), which produced invalid guide URLs
+                        # (http://localhost:0.0.0.0:4000/) for labeled containers
+                        # like appvault-litellm / openship_dashboard.
+                        _host = first.split("->")[1].split("/")[0].strip()
+                        result["host_port"] = _host.split(":")[-1].strip()
     # END ADDITIVE
     
     # Build launch URL.
@@ -3127,6 +3134,39 @@ def api_stop(app_id):
         return jsonify({"error": str(e)}), 500
     finally:
         op_lock.release()
+
+@app.route("/api/exec/<app_id>", methods=["POST", "GET"])
+def api_exec(app_id):
+    """Run a command inside the container targeting a specific app (e.g. npx omniroute reset-password)."""
+    cname = _app_container_name(app_id)
+    if not (container_running(cname) or container_exists(cname)):
+        return jsonify({"status": "error", "app_id": app_id, "message": f"App container '{cname}' for '{app_id}' is not running"}), 400
+
+    cmd = None
+    if request.method == "POST":
+        data = request.get_json(silent=True) or request.form or {}
+        cmd = data.get("command") or data.get("cmd")
+    else:
+        cmd = request.args.get("command") or request.args.get("cmd")
+
+    if not cmd:
+        return jsonify({"status": "error", "message": "Missing 'command' parameter (provide JSON body: {\"command\": \"...\"} or query param ?cmd=...)"}), 400
+
+    if isinstance(cmd, str):
+        cmd_args = ["sh", "-c", cmd]
+    elif isinstance(cmd, list):
+        cmd_args = [str(x) for x in cmd]
+    else:
+        return jsonify({"status": "error", "message": "Invalid command format"}), 400
+
+    ok, output = _docker("exec", cname, *cmd_args, capture=True, timeout=60)
+    return jsonify({
+        "status": "ok" if ok else "error",
+        "app_id": app_id,
+        "container": cname,
+        "exit_code": 0 if ok else 1,
+        "output": output
+    })
 
 # ==============================================================================
 # ==============================================================================
