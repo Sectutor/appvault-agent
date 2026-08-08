@@ -1631,6 +1631,46 @@ def _do_install_stack(app_id):
     except Exception as _e:
         print(f"[agent] port stabilization skipped for {app_id}: {_e}")
 
+    # ADDITIVE: tag the stack's web service with appvault labels so Caddy's HTTPS
+    # proxy (and health/restart machinery) recognize it - same as single-image apps.
+    # Without this, store Launch URLs 502 for stacks whose compose lacks the labels
+    # (e.g. affine before the affine-stack compose gained them).
+    try:
+        import re as _re2
+        _cport = str(app_def.get("container_port", ""))
+        with open(compose_path, "r", encoding="utf-8") as _f:
+            _content = _f.read()
+        _svc_matches = list(_re2.finditer(r'^  ([\w-]+):\s*$', _content, _re2.M))
+        _svc_match = None
+        for _idx, _m in enumerate(_svc_matches):
+            _end = _svc_matches[_idx + 1].start() if _idx + 1 < len(_svc_matches) else len(_content)
+            _block = _content[_m.end():_end]
+            if _cport and any(p in _block for p in
+                              (f"{_cport}:{_cport}", f"'{_cport}:{_cport}'", f'"{_cport}:{_cport}"')):
+                _svc_match = _m
+                break
+        if _svc_match is None:  # fallback: first service with any ports mapping
+            for _idx, _m in enumerate(_svc_matches):
+                _end = _svc_matches[_idx + 1].start() if _idx + 1 < len(_svc_matches) else len(_content)
+                if _re2.search(r'^\s*ports:', _content[_m.end():_end], _re2.M):
+                    _svc_match = _m
+                    break
+        if _svc_match and "appvault.managed" not in _content:
+            _svc_ix = _svc_matches.index(_svc_match)
+            _svc_end = _svc_matches[_svc_ix + 1].start() if _svc_ix + 1 < len(_svc_matches) else len(_content)
+            _block = _content[_svc_match.end():_svc_end]
+            _img = _re2.search(r'^(\s*image:.*)$', _block, _re2.M)
+            _labels = "    labels:\n      - appvault.managed=true\n      - appvault.app=" + app_id
+            if _img:
+                _ins_at = _svc_match.end() + _img.start(1) + len(_img.group(1))
+                _content = _content[:_ins_at] + "\n" + _labels + _content[_ins_at:]
+            else:
+                _content = _content[:_svc_match.end()] + "\n" + _labels + _content[_svc_match.end():]
+            with open(compose_path, "w", encoding="utf-8") as _f:
+                _f.write(_content)
+            print(f"[agent] Injected appvault labels into {app_id} stack web service")
+    except Exception as _e:
+        print(f"[agent] label injection skipped for {app_id}: {_e}")
     _proj = _stack_project(app_id)
     ok, pull_out = _docker("compose", "-p", _proj, "-f", compose_path, "pull", capture=True, timeout=600)
     if not ok:
@@ -1764,47 +1804,6 @@ def _do_install_stack(app_id):
         add_heimdall_tile(app_name, tile_url, app_id, app_def.get("description", ""))
     except Exception as e:
         print(f"[agent] Tile not added: {e}")
-
-    # ADDITIVE: tag the stack's web service with appvault labels so Caddy's HTTPS
-    # proxy (and health/restart machinery) recognize it - same as single-image apps.
-    # Without this, store Launch URLs 502 for stacks whose compose lacks the labels
-    # (e.g. affine before the affine-stack compose gained them).
-    try:
-        import re as _re2
-        _cport = str(app_def.get("container_port", ""))
-        with open(compose_path, "r", encoding="utf-8") as _f:
-            _content = _f.read()
-        _svc_matches = list(_re2.finditer(r'^  ([\w-]+):\s*$', _content, _re2.M))
-        _svc_match = None
-        for _idx, _m in enumerate(_svc_matches):
-            _end = _svc_matches[_idx + 1].start() if _idx + 1 < len(_svc_matches) else len(_content)
-            _block = _content[_m.end():_end]
-            if _cport and any(p in _block for p in
-                              (f"{_cport}:{_cport}", f"'{_cport}:{_cport}'", f'"{_cport}:{_cport}"')):
-                _svc_match = _m
-                break
-        if _svc_match is None:  # fallback: first service with any ports mapping
-            for _idx, _m in enumerate(_svc_matches):
-                _end = _svc_matches[_idx + 1].start() if _idx + 1 < len(_svc_matches) else len(_content)
-                if _re2.search(r'^\s*ports:', _content[_m.end():_end], _re2.M):
-                    _svc_match = _m
-                    break
-        if _svc_match and "appvault.managed" not in _content:
-            _svc_ix = _svc_matches.index(_svc_match)
-            _svc_end = _svc_matches[_svc_ix + 1].start() if _svc_ix + 1 < len(_svc_matches) else len(_content)
-            _block = _content[_svc_match.end():_svc_end]
-            _img = _re2.search(r'^(\s*image:.*)$', _block, _re2.M)
-            _labels = "    labels:\n      - appvault.managed=true\n      - appvault.app=" + app_id
-            if _img:
-                _ins_at = _svc_match.end() + _img.start(1) + len(_img.group(1))
-                _content = _content[:_ins_at] + "\n" + _labels + _content[_ins_at:]
-            else:
-                _content = _content[:_svc_match.end()] + "\n" + _labels + _content[_svc_match.end():]
-            with open(compose_path, "w", encoding="utf-8") as _f:
-                _f.write(_content)
-            print(f"[agent] Injected appvault labels into {app_id} stack web service")
-    except Exception as _e:
-        print(f"[agent] label injection skipped for {app_id}: {_e}")
 
     # ADDITIVE: register any labeled stack services with Caddy's HTTPS proxy so the
     # store's Launch URL works for stack apps (same as single-image apps).
