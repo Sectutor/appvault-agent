@@ -13,6 +13,7 @@ What changed vs the old block:
 - /api/agentic/status exposes live probe results for the store UI badges.
 """
 import json
+import math
 import os
 import re
 import sqlite3
@@ -68,7 +69,16 @@ def _init_db():
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS memory (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ts TEXT, agent TEXT, tag TEXT, content TEXT
+        ts TEXT, agent TEXT, tag TEXT, content TEXT,
+        tier TEXT DEFAULT 'working',
+        source TEXT DEFAULT 'manual',
+        superseded_by INTEGER,
+        vault_path TEXT,
+        updated TEXT
+    );
+    CREATE TABLE IF NOT EXISTS memory_embeddings (
+        mid INTEGER PRIMARY KEY,
+        vector TEXT
     );
     CREATE TABLE IF NOT EXISTS conversations (
         agent_id TEXT PRIMARY KEY,
@@ -92,18 +102,66 @@ def _init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT, query TEXT,
         rss_urls TEXT, subreddits TEXT, hn_query TEXT, github_query TEXT, youtube_channels TEXT,
+        sources TEXT, skip_repeats INTEGER DEFAULT 1,
         created TEXT
+    );
+    CREATE TABLE IF NOT EXISTS oracle_seen (
+        url TEXT PRIMARY KEY,
+        title TEXT,
+        first_seen TEXT,
+        last_seen TEXT,
+        max_points INTEGER DEFAULT 0,
+        last_points INTEGER DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS oracle_posts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         feed_id INTEGER, platform TEXT, title TEXT, content TEXT,
         status TEXT, scheduled_at TEXT, created TEXT
     );
+    CREATE TABLE IF NOT EXISTS vault_embeddings (
+        path TEXT PRIMARY KEY,
+        mtime REAL,
+        vector TEXT
+    );
     """)
     conn.commit()
     conn.close()
 
 _init_db()
+
+
+def _migrate_memory_schema():
+    """Add new memory columns to pre-existing DBs (no-op on fresh installs)."""
+    conn = _db()
+    for col, ddl in [("tier", "TEXT DEFAULT 'working'"), ("source", "TEXT DEFAULT 'manual'"),
+                     ("superseded_by", "INTEGER"), ("vault_path", "TEXT"), ("updated", "TEXT")]:
+        try:
+            conn.execute(f"ALTER TABLE memory ADD COLUMN {col} {ddl}")
+        except Exception:
+            pass
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS memory_embeddings (mid INTEGER PRIMARY KEY, vector TEXT)")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE oracle_feeds ADD COLUMN sources TEXT")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE oracle_feeds ADD COLUMN skip_repeats INTEGER DEFAULT 1")
+    except Exception:
+        pass
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS oracle_seen (url TEXT PRIMARY KEY, title TEXT, "
+                     "first_seen TEXT, last_seen TEXT, max_points INTEGER DEFAULT 0, last_points INTEGER DEFAULT 0)")
+    except Exception:
+        pass
+    conn.commit()
+    conn.close()
+
+
+_migrate_memory_schema()
+
 
 def _cfg_get(key, default=None):
     conn = _db()
@@ -157,6 +215,297 @@ def _get_llm_config():
     if isinstance(stored, dict):
         cfg.update({k: v for k, v in stored.items() if v is not None})
     return cfg
+
+def _text_similarity(a, b):
+    """Token Jaccard similarity — used for fact dedup/versioning."""
+    ta, tb = set(_tokenize(a)), set(_tokenize(b))
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
+def _save_fact(fact_text, tag="Fact"):
+    """Save a core fact with dedup/versioning: identical -> skip;
+    similar-but-different -> supersede the old fact."""
+    conn = _db()
+    try:
+        rows = conn.execute(
+            "SELECT id, content FROM memory WHERE tier='core' AND superseded_by IS NULL"
+        ).fetchall()
+        # Pass 1: exact/near-exact duplicate -> skip (no new version)
+        for r in rows:
+            if _text_similarity(fact_text, r["content"]) >= 0.98:
+                conn.close()
+                return False
+        # Pass 2: similar-but-different -> supersede the old fact
+        for r in rows:
+            if _text_similarity(fact_text, r["content"]) >= 0.5:
+                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                cur = conn.execute(
+                    "INSERT INTO memory (ts, agent, tag, content, tier, source, updated) VALUES (?,?,?,?,?,?,?)",
+                    (datetime.now().strftime("%H:%M LOCAL"), "Fact Distiller", tag, fact_text,
+                     "core", "distilled", now))
+                new_id = cur.lastrowid
+                conn.execute("UPDATE memory SET superseded_by=?, updated=? WHERE id=?",
+                             (new_id, now, r["id"]))
+                conn.commit()
+                old_row = _get_memory_row(r["id"])
+                conn.close()
+                _sync_memory_to_vault(new_id, _get_memory_row(new_id))
+                _sync_memory_to_vault(r["id"], old_row)  # refresh old vault mirror w/ superseded_by
+                return True
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cur = conn.execute(
+            "INSERT INTO memory (ts, agent, tag, content, tier, source, updated) VALUES (?,?,?,?,?,?,?)",
+            (datetime.now().strftime("%H:%M LOCAL"), "Fact Distiller", tag, fact_text,
+             "core", "distilled", now))
+        new_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+        _sync_memory_to_vault(new_id, _get_memory_row(new_id))
+        return True
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return False
+
+
+def _get_memory_row(mid):
+    conn = _db()
+    row = conn.execute("SELECT * FROM memory WHERE id=?", (mid,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def _distill_facts(user_msg, reply, agent="Hermes Agent"):
+    """Background: extract durable facts from a chat exchange -> core facts."""
+    if not reply or str(reply).strip().startswith("⚠️") or "could not reach any LLM backend" in str(reply):
+        return 0  # never distill error messages into facts
+    try:
+        exchange = f"User: {user_msg[:800]}\nAgent: {reply[:800]}"
+        raw = _call_llm(
+            "Extract durable, timeless facts from this conversation exchange. "
+            "Return ONLY a JSON array of strings, each a single standalone fact "
+            "(subject + predicate + value). Skip greetings, opinions, questions, "
+            "and ephemeral chatter. If nothing durable, return [].\n\n"
+            f"Exchange:\n{exchange}",
+            agent=agent, timeout=40)
+        facts = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip()))
+        if not isinstance(facts, list):
+            # try extracting a JSON array from anywhere in the reply
+            m = re.search(r"\[.*\]", raw, re.S)
+            facts = json.loads(m.group(0)) if m else []
+        if not isinstance(facts, list):
+            return 0
+        n = 0
+        for fact in facts[:5]:
+            if isinstance(fact, str) and len(fact.strip()) > 12:
+                if _save_fact(fact.strip()):
+                    n += 1
+        return n
+    except Exception:
+        return 0
+
+
+def _sync_memory_to_vault(mid, row):
+    """Write/refresh the vault copy of a memory entry (YAML frontmatter)."""
+    try:
+        if not row:
+            return None
+        vault = _vault_path()
+        mem_dir = os.path.join(vault, "00_Memory")
+        os.makedirs(mem_dir, exist_ok=True)
+        slug = re.sub(r"[^a-z0-9]+", "-", (row.get("content") or "note")[:40].lower()).strip("-") or "note"
+        fname = f"{mid}-{slug}.md"
+        fpath = os.path.join(mem_dir, fname)
+        frontmatter = (
+            f"---\nid: {mid}\ntier: {row.get('tier', 'working')}\n"
+            f"source: {row.get('source', 'manual')}\ntag: {row.get('tag', 'General')}\n"
+            f"agent: {row.get('agent', 'System')}\ndate: {row.get('ts', '')}\n"
+            f"superseded_by: {row.get('superseded_by') or ''}\n---\n\n")
+        with open(fpath, "w", encoding="utf-8") as f:
+            f.write(frontmatter + (row.get("content") or ""))
+        rel = f"00_Memory/{fname}"
+        conn = _db()
+        conn.execute("UPDATE memory SET vault_path=? WHERE id=?", (rel, mid))
+        conn.commit()
+        conn.close()
+        return rel
+    except Exception:
+        return None
+
+
+def _scan_vault_into_memory():
+    """Vault -> memory: index .md files not yet represented (skip 00_Memory mirror)."""
+    try:
+        vault = _vault_path()
+        conn = _db()
+        known = set(r["vault_path"] for r in conn.execute(
+            "SELECT vault_path FROM memory WHERE vault_path IS NOT NULL").fetchall() if r["vault_path"])
+        added = 0
+        for root, _, files in os.walk(vault):
+            for f in files:
+                if not f.endswith(".md"):
+                    continue
+                full = os.path.join(root, f)
+                rel = os.path.relpath(full, vault).replace("\\", "/")
+                if rel in known or rel.startswith("00_Memory/"):
+                    continue
+                try:
+                    with open(full, encoding="utf-8", errors="replace") as fh:
+                        content = fh.read(3000)
+                except Exception:
+                    continue
+                conn.execute(
+                    "INSERT INTO memory (ts, agent, tag, content, tier, source, vault_path) VALUES (?,?,?,?,?,?,?)",
+                    (datetime.now().strftime("%H:%M LOCAL"), "Vault", "Vault Note",
+                     f"📁 {rel}\n\n{content[:1500]}", _memory_settings().get("vault_scan_tier", "auto"),
+                     "vault", rel))
+                known.add(rel)
+                added += 1
+        conn.commit()
+        conn.close()
+        return added
+    except Exception:
+        return 0
+
+
+def _get_mem_embed(mid, content):
+    """Per-entry embedding, cached in memory_embeddings."""
+    try:
+        conn = _db()
+        row = conn.execute("SELECT vector FROM memory_embeddings WHERE mid=?", (mid,)).fetchone()
+        if row:
+            vec = json.loads(row["vector"])
+            conn.close()
+            return vec if isinstance(vec, list) else None
+        conn.close()
+    except Exception:
+        pass
+    vec = _ollama_embed((content or "")[:4000], timeout=30)
+    if vec:
+        try:
+            conn = _db()
+            conn.execute("INSERT INTO memory_embeddings (mid, vector) VALUES (?,?) "
+                         "ON CONFLICT(mid) DO UPDATE SET vector=excluded.vector",
+                         (mid, json.dumps(vec)))
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+    return vec
+
+
+def _search_memory_entries(query, limit=6, threshold=0.28):
+    """Semantic retrieval over memory ENTRIES (not just vault files)."""
+    q_vec = _ollama_embed(query or "")
+    if not q_vec:
+        return []
+    conn = _db()
+    rows = conn.execute(
+        "SELECT id, content, tier, source FROM memory WHERE superseded_by IS NULL "
+        "ORDER BY id DESC LIMIT 200").fetchall()
+    scored = []
+    for r in rows:
+        vec = _get_mem_embed(r["id"], r["content"])
+        if vec:
+            s = _cosine(q_vec, vec)
+            scored.append({"id": r["id"], "content": r["content"], "tier": r["tier"],
+                           "source": r["source"], "score": s})
+    conn.close()
+    scored.sort(key=lambda x: -x["score"])
+    return [s for s in scored if s["score"] > threshold][:limit]
+
+
+MEMORY_ENGINE_DEFAULTS = {
+    "core_limit": 8,          # max Core facts always injected
+    "semantic_limit": 6,      # max semantic-match entries (any tier)
+    "working_limit": 5,       # max recent Working notes
+    "semantic_threshold": 0.28,  # min cosine score to count as relevant
+    "auto_tags": ["Conversation", "Radar", "Signal", "Crew", "Sweep", "Oracle"],
+    "vault_scan_tier": "auto",
+}
+
+
+def _memory_settings():
+    """Engine settings with user overrides from the config table."""
+    cfg = dict(MEMORY_ENGINE_DEFAULTS)
+    stored = _cfg_get("memory_engine")
+    if isinstance(stored, dict):
+        cfg.update({k: v for k, v in stored.items() if v is not None})
+    return cfg
+
+
+def _set_memory_settings(patch):
+    """Merge + persist engine settings."""
+    cfg = _memory_settings()
+    for k, v in patch.items():
+        if k in MEMORY_ENGINE_DEFAULTS:
+            cfg[k] = v
+    _cfg_set("memory_engine", cfg)
+    return cfg
+
+
+def _reclassify_auto(entry):
+    """Auto-tier rule: tag/agent match -> auto. Returns 'auto' or None."""
+    tag = (entry.get("tag") or "").lower()
+    agent = (entry.get("agent") or "").lower()
+    for t in _memory_settings().get("auto_tags", []):
+        if t.lower() in tag or t.lower() in agent:
+            return "auto"
+    return None
+
+
+def _memory_context(query, limit=None):
+    """Tiered context packing: CORE facts always -> semantic entry hits ->
+    recent WORKING notes. Limits + threshold come from the engine settings.
+    Every line carries a (memory #id) citation so the agent can reference."""
+    ms = _memory_settings()
+    core_limit = ms.get("core_limit", 8)
+    sem_limit = ms.get("semantic_limit", 6) if limit is None else limit
+    work_limit = ms.get("working_limit", 5)
+    parts = []
+    seen = set()
+    conn = _db()
+    try:
+        core = conn.execute(
+            "SELECT * FROM memory WHERE tier='core' AND superseded_by IS NULL "
+            "ORDER BY id DESC LIMIT ?", (core_limit,)).fetchall()
+        for r in core:
+            seen.add(r["id"])
+            parts.append(f"[memory #{r['id']} | CORE] {r['content'][:500]}")
+    except Exception:
+        pass
+    try:
+        for hit in _search_memory_entries(query or "", limit=sem_limit,
+                                          threshold=ms.get("semantic_threshold", 0.28)):
+            if hit["id"] in seen:
+                continue
+            seen.add(hit["id"])
+            parts.append(f"[memory #{hit['id']} | {hit.get('tier', 'working').upper()}] "
+                         f"{hit['content'][:400]} (source: {hit.get('source', '?')})")
+    except Exception:
+        pass
+    try:
+        recent = conn.execute(
+            "SELECT * FROM memory WHERE tier='working' AND superseded_by IS NULL "
+            "ORDER BY id DESC LIMIT ?", (work_limit,)).fetchall()
+        for r in recent:
+            if r["id"] in seen:
+                continue
+            seen.add(r["id"])
+            parts.append(f"[memory #{r['id']} | WORKING] {r['content'][:500]}")
+    except Exception:
+        pass
+    conn.close()
+    if not parts:
+        return ""
+    return ("\n\n===== CONTEXT FROM SHARED MEMORY (cite sources as \"memory #id\") =====\n"
+            + "\n".join(parts)
+            + "\n===== END CONTEXT =====\n\n")
+
 
 def _call_llm(user_msg, system_prompt=None, agent="hermes", timeout=25):
     """Single dispatch for every agent conversation + crew role. Real LLM call."""
@@ -453,27 +802,60 @@ def api_memory():
         if not content:
             return jsonify({"error": "content required"}), 400
         conn = _db()
+        tier = (data.get("tier") or "").strip()
+        if not tier:
+            # Auto-tier rules: tag/agent match -> auto, else default working
+            tier = _reclassify_auto({"tag": data.get("tag", ""), "agent": data.get("agent", "")}) or "working"
         cur = conn.execute(
-            "INSERT INTO memory (ts, agent, tag, content) VALUES (?,?,?,?)",
+            "INSERT INTO memory (ts, agent, tag, content, tier, source, updated) VALUES (?,?,?,?,?,?,?)",
             (data.get("timestamp") or datetime.now().strftime("%H:%M LOCAL"),
-             data.get("agent", "System"), data.get("tag", "General"), content))
+             data.get("agent", "System"), data.get("tag", "General"), content,
+             tier, (data.get("source") or "manual"),
+             datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
         conn.commit()
         row = conn.execute("SELECT * FROM memory WHERE id=?", (cur.lastrowid,)).fetchone()
         conn.close()
-        # Sync to vault inbox when present
-        vault = _vault_path()
-        inbox = os.path.join(vault, "01_Inbox")
-        if os.path.isdir(inbox):
-            try:
-                with open(os.path.join(inbox, "Agentic_Memory_Feed.md"), "a", encoding="utf-8") as f:
-                    f.write(f"\n### [{row['ts']}] {row['agent']} ({row['tag']})\n{row['content']}\n")
-            except Exception:
-                pass
+        _sync_memory_to_vault(row["id"], dict(row))
         return jsonify({"status": "ok", "entry": dict(row)})
+    _scan_vault_into_memory()
+    tier = (request.args.get("tier") or "").strip().lower()
+    q = (request.args.get("q") or "").strip()
+    if q:
+        hits = _search_memory_entries(q, limit=int(request.args.get("limit", 15)))
+        ids = [h["id"] for h in hits]
+        if not ids:
+            return jsonify({"status": "ok", "memory": [], "semantic": True, "query": q})
+        placeholders = ",".join("?" * len(ids))
+        conn = _db()
+        rows = conn.execute(f"SELECT * FROM memory WHERE id IN ({placeholders}) ORDER BY id DESC", ids).fetchall()
+        conn.close()
+        return jsonify({"status": "ok", "memory": [dict(r) for r in rows], "semantic": True, "query": q})
     conn = _db()
-    rows = conn.execute("SELECT * FROM memory ORDER BY id DESC LIMIT 50").fetchall()
+    if tier:
+        rows = conn.execute("SELECT * FROM memory WHERE tier=? ORDER BY id DESC LIMIT 60", (tier,)).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM memory ORDER BY id DESC LIMIT 60").fetchall()
     conn.close()
     return jsonify({"status": "ok", "memory": [dict(r) for r in rows]})
+
+@agentic_bp.route("/api/agentic/memory/<int:mid>", methods=["DELETE", "OPTIONS"])
+def api_memory_delete(mid):
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    conn = _db()
+    cur = conn.execute("DELETE FROM memory WHERE id=?", (mid,))
+    conn.commit()
+    deleted = cur.rowcount > 0
+    try:
+        conn.execute("DELETE FROM memory_embeddings WHERE mid=?", (mid,))
+        conn.commit()
+    except Exception:
+        pass
+    conn.close()
+    return jsonify({"status": "ok" if deleted else "error",
+                    "deleted": mid if deleted else None,
+                    "message": "Memory entry deleted" if deleted else "Entry not found"}), 200 if deleted else 404
+
 
 @agentic_bp.route("/api/agentic/oracle", methods=["POST", "OPTIONS"])
 def api_oracle():
@@ -519,9 +901,10 @@ def api_oracle():
                   json.dumps(stories[:3])))
     cur = conn.execute("SELECT last_insert_rowid()")
     mem_id = cur.fetchone()[0]
+    top_titles = "\n".join(f"  - {s['title'][:110]}" for s in stories[:4])
     conn.execute("INSERT INTO memory (ts, agent, tag, content) VALUES (?,?,?,?)",
                  (datetime.now().strftime("%H:%M LOCAL"), "Hermes Oracle Core", "Radar Signal",
-                  f"Live sweep completed for '{query}'. Generated `{os.path.basename(signal_file) if signal_file else 'in-memory'}` with {len(stories)} signals."))
+                  f"Live sweep for '{query}' found {len(stories)} signals -> `{os.path.basename(signal_file) if signal_file else 'in-memory'}`:\n{top_titles}"))
     conn.commit()
     conn.close()
 
@@ -550,15 +933,25 @@ def _feed_defaults():
         "hn_query": "AI agent",
         "github_query": "ai agent framework",
         "youtube_channels": [],
+        "sources": ["rss", "reddit", "hn", "github", "youtube"],
+        "skip_repeats": 1,
     }
 
 def _feed_row_to_dict(r):
+    try:
+        sources = json.loads(r["sources"] or "[]") if r["sources"] else []
+    except Exception:
+        sources = []
+    if not sources:
+        sources = _feed_defaults()["sources"]
     return {
         "id": r["id"], "name": r["name"], "query": r["query"],
         "rss_urls": json.loads(r["rss_urls"] or "[]"),
         "subreddits": json.loads(r["subreddits"] or "[]"),
         "hn_query": r["hn_query"] or "", "github_query": r["github_query"] or "",
         "youtube_channels": json.loads(r["youtube_channels"] or "[]"),
+        "sources": sources,
+        "skip_repeats": bool(r["skip_repeats"]) if r["skip_repeats"] is not None else True,
         "created": r["created"],
     }
 
@@ -574,39 +967,83 @@ def _get_feed(feed_id):
     conn.close()
     return _feed_row_to_dict(r) if r else None
 
+def _eng_score(eng):
+    """Log-scaled engagement -> 0..40. Stars/points/comments on a log curve so
+    a 69k-star repo (40) clearly outranks a 500-star one (~15)."""
+    if not eng:
+        return 0
+    stars = eng.get("stars") or 0
+    points = eng.get("points") or 0
+    comments = eng.get("comments") or 0
+    score = 0.0
+    if stars:
+        score = max(score, 40.0 * (math.log10(stars + 1) / math.log10(200000)))
+    if points:
+        score = max(score, 40.0 * (math.log10(points + 1) / math.log10(3000)))
+    if comments:
+        score = max(score, 25.0 * (math.log10(comments + 1) / math.log10(1500)))
+    return round(min(40.0, score))
+
+
+def _check_seen(url, title, points):
+    """Record/update the seen-table entry; returns (is_repeat, delta_points)."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = _db()
+    row = conn.execute("SELECT * FROM oracle_seen WHERE url=?", (url,)).fetchone()
+    if row:
+        delta = (points or 0) - (row["last_points"] or 0)
+        conn.execute("UPDATE oracle_seen SET last_seen=?, last_points=?, "
+                     "max_points=MAX(max_points, ?) WHERE url=?", (now, points or 0, points or 0, url))
+        conn.commit()
+        conn.close()
+        return True, delta
+    conn.execute("INSERT INTO oracle_seen (url, title, first_seen, last_seen, max_points, last_points) "
+                 "VALUES (?,?,?,?,?,?)", (url, title[:200], now, now, points or 0, points or 0))
+    conn.commit()
+    conn.close()
+    return False, 0
+
+
 def _sweep_feed_sources(feed):
-    """last30days-style multi-source sweep, engagement-scored. All sources keyless:
-    RSS feeds, Reddit subreddit RSS, HN Algolia API, GitHub search, YouTube channel RSS."""
+    """Parallel multi-source sweep, engagement-weighted scores, dedup/momentum.
+    Returns (stories, source_stats). Each source runs in its own thread."""
+    enabled = set(feed.get("sources") or _feed_defaults()["sources"])
+    skip_repeats = bool(feed.get("skip_repeats", 1))
     stories = []
-    q = (feed.get("query") or "").strip() or (feed.get("hn_query") or "AI")
+    stats = {}
+    lock = threading.Lock()
 
-    # 1) RSS feeds
-    for url in feed.get("rss_urls") or []:
-        try:
-            for it in _parse_rss(_fetch_feed(url)):
-                it["source"] = "RSS"
-                it["eng"] = {}
-                stories.append(it)
-        except Exception:
-            continue
+    def _add(s, src):
+        with lock:
+            stories.append(s)
+            stats[src] = stats.get(src, 0) + 1
 
-    # 2) Reddit subreddits (RSS — the JSON API is IP-blocked from cloud hosts)
-    for sub in feed.get("subreddits") or []:
-        sub = sub.strip().strip("/").replace("/r/", "")
-        if not sub:
-            continue
-        try:
-            items = _parse_rss(_fetch_feed(f"https://old.reddit.com/r/{sub}/.rss?limit=25"))
-            for it in items:
-                it["source"] = f"r/{sub}"
-                it["eng"] = {}
-                stories.append(it)
-        except Exception:
-            continue
+    def _rss():
+        for url in feed.get("rss_urls") or []:
+            try:
+                for it in _parse_rss(_fetch_feed(url)):
+                    it["source"] = "RSS"; it["eng"] = {}
+                    _add(it, "rss")
+            except Exception:
+                continue
 
-    # 3) Hacker News (Algolia API — has points + comments)
-    hn_q = (feed.get("hn_query") or "").strip()
-    if hn_q:
+    def _reddit():
+        for sub in feed.get("subreddits") or []:
+            sub = sub.strip().strip("/").replace("/r/", "")
+            if not sub:
+                continue
+            try:
+                items = _parse_rss(_fetch_feed(f"https://old.reddit.com/r/{sub}/.rss?limit=25"))
+                for it in items:
+                    it["source"] = f"r/{sub}"; it["eng"] = {}
+                    _add(it, "reddit")
+            except Exception:
+                continue
+
+    def _hn():
+        hn_q = (feed.get("hn_query") or "").strip()
+        if not hn_q:
+            return
         try:
             url = ("https://hn.algolia.com/api/v1/search?query={}&tags=story"
                    "&hitsPerPage=20&numericFilters=points%3E30").format(urllib.parse.quote(hn_q))
@@ -615,67 +1052,84 @@ def _sweep_feed_sources(feed):
                 title = h.get("title") or ""
                 if not title:
                     continue
-                stories.append({
+                _add({
                     "title": title,
                     "link": f"https://news.ycombinator.com/item?id={h.get('objectID')}",
                     "summary": (h.get("story_text") or "")[:300],
                     "source": "Hacker News",
                     "eng": {"points": h.get("points") or 0, "comments": h.get("num_comments") or 0},
-                })
+                }, "hn")
         except Exception:
             pass
 
-    # 4) GitHub (search API — has stars)
-    gh_q = (feed.get("github_query") or "").strip()
-    if gh_q:
+    def _github():
+        gh_q = (feed.get("github_query") or "").strip()
+        if not gh_q:
+            return
         try:
             url = "https://api.github.com/search/repositories?q={}&sort=stars&order=desc&per_page=10".format(
                 urllib.parse.quote(gh_q))
             data, status = _http(url, timeout=10)
             for it in (data.get("items") or []) if isinstance(data, dict) else []:
-                stories.append({
+                _add({
                     "title": (it.get("description") or it.get("full_name") or ""),
                     "link": it.get("html_url") or "",
                     "summary": f"{it.get('full_name')} — {it.get('language') or 'unknown'}",
                     "source": "GitHub",
                     "eng": {"stars": it.get("stargazers_count") or 0},
-                })
+                }, "github")
         except Exception:
             pass
 
-    # 5) YouTube channels (RSS by channel_id — has view counts)
-    for cid in feed.get("youtube_channels") or []:
-        cid = cid.strip()
-        if not cid:
-            continue
-        try:
-            items = _parse_rss(_fetch_feed(f"https://www.youtube.com/feeds/videos.xml?channel_id={cid}"))
-            for it in items:
-                it["source"] = "YouTube"
-                it["eng"] = {}
-                stories.append(it)
-        except Exception:
-            continue
+    def _youtube():
+        for cid in feed.get("youtube_channels") or []:
+            cid = cid.strip()
+            if not cid:
+                continue
+            try:
+                items = _parse_rss(_fetch_feed(f"https://www.youtube.com/feeds/videos.xml?channel_id={cid}"))
+                for it in items:
+                    it["source"] = "YouTube"; it["eng"] = {}
+                    _add(it, "youtube")
+            except Exception:
+                continue
 
-    # Score: keyword relevance (existing KEYWORDS) + engagement bonus
+    jobs = []
+    if "rss" in enabled: jobs.append(threading.Thread(target=_rss))
+    if "reddit" in enabled: jobs.append(threading.Thread(target=_reddit))
+    if "hn" in enabled: jobs.append(threading.Thread(target=_hn))
+    if "github" in enabled: jobs.append(threading.Thread(target=_github))
+    if "youtube" in enabled: jobs.append(threading.Thread(target=_youtube))
+    for t in jobs: t.start()
+    for t in jobs: t.join()
+
     for s in stories:
-        base = _score(s.get("title", ""), s.get("summary", ""))
-        eng = s.get("eng") or {}
-        bonus = min(25, (eng.get("points") or 0) // 10 + (eng.get("comments") or 0) // 5
-                    + (eng.get("stars") or 0) // 500)
-        s["score"] = min(100, base + bonus)
+        kw = min(60, _score(s.get("title", ""), s.get("summary", "")))
+        eng = _eng_score(s.get("eng") or {})
+        s["score"] = min(100, kw + eng)
+        s["breakdown"] = {"keyword": kw, "engagement": eng}
 
-    # Dedupe by title, keep top 8
-    seen, top = set(), []
+    seen_titles, top = set(), []
     for s in sorted(stories, key=lambda x: -(x.get("score") or 0)):
         key = (s.get("title") or "")[:60].lower()
-        if not key or key in seen:
+        if not key or key in seen_titles:
             continue
-        seen.add(key)
+        seen_titles.add(key)
+        link = s.get("link") or ""
+        points = (s.get("eng") or {}).get("points") or (s.get("eng") or {}).get("stars") or 0
+        if link:
+            is_repeat, delta = _check_seen(link, s.get("title", ""), points)
+            s["is_repeat"] = is_repeat
+            s["delta_points"] = delta
+            if is_repeat and skip_repeats and delta < 100:
+                continue
+        else:
+            s["is_repeat"] = False
+            s["delta_points"] = 0
         top.append(s)
         if len(top) >= 8:
             break
-    return top
+    return top, stats
 
 def _save_feed_signals(feed, signals):
     """Write per-feed signal file: <vault>/03_Signals/<FeedName>/Signal_<ts>.md"""
@@ -724,12 +1178,14 @@ def api_oracle_feeds():
         return []
     conn = _db()
     cur = conn.execute(
-        "INSERT INTO oracle_feeds (name, query, rss_urls, subreddits, hn_query, github_query, youtube_channels, created)"
-        " VALUES (?,?,?,?,?,?,?,?)",
+        "INSERT INTO oracle_feeds (name, query, rss_urls, subreddits, hn_query, github_query, youtube_channels, sources, skip_repeats, created)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?)",
         (name, (data.get("query") or name).strip(),
          json.dumps(_arr(data.get("rss_urls"))), json.dumps(_arr(data.get("subreddits"))),
          (data.get("hn_query") or "").strip(), (data.get("github_query") or "").strip(),
          json.dumps(_arr(data.get("youtube_channels"))),
+         json.dumps(_arr(data.get("sources")) or _feed_defaults()["sources"]),
+         1 if data.get("skip_repeats", True) else 0,
          datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     conn.commit()
     feed = _get_feed(cur.lastrowid)
@@ -754,13 +1210,26 @@ def api_oracle_feed(feed_id):
             return [x.strip() for x in v.split(",") if x.strip()]
         return []
     conn = _db()
+    row = conn.execute("SELECT * FROM oracle_feeds WHERE id=?", (feed_id,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "feed not found"}), 404
+    # PARTIAL update: only fields present in the payload are changed.
+    name = (data.get("name") if data.get("name") is not None else row["name"]).strip() or row["name"]
+    query = (data.get("query") if data.get("query") is not None else row["query"]).strip() or row["query"]
+    rss = _arr(data.get("rss_urls")) if data.get("rss_urls") is not None else json.loads(row["rss_urls"] or "[]")
+    subs = _arr(data.get("subreddits")) if data.get("subreddits") is not None else json.loads(row["subreddits"] or "[]")
+    hn = (data.get("hn_query") if data.get("hn_query") is not None else (row["hn_query"] or "")).strip()
+    gh = (data.get("github_query") if data.get("github_query") is not None else (row["github_query"] or "")).strip()
+    yt = _arr(data.get("youtube_channels")) if data.get("youtube_channels") is not None else json.loads(row["youtube_channels"] or "[]")
+    srcs = _arr(data.get("sources")) if data.get("sources") is not None else (json.loads(row["sources"] or "[]") if row["sources"] else _feed_defaults()["sources"])
+    if not srcs:
+        srcs = _feed_defaults()["sources"]
+    skip = int(data.get("skip_repeats", row["skip_repeats"] if row["skip_repeats"] is not None else 1) is True or data.get("skip_repeats") == 1 or (row["skip_repeats"] and data.get("skip_repeats") is None))
     conn.execute(
-        "UPDATE oracle_feeds SET name=?, query=?, rss_urls=?, subreddits=?, hn_query=?, github_query=?, youtube_channels=?"
+        "UPDATE oracle_feeds SET name=?, query=?, rss_urls=?, subreddits=?, hn_query=?, github_query=?, youtube_channels=?, sources=?, skip_repeats=?"
         " WHERE id=?",
-        ((data.get("name") or "").strip(), (data.get("query") or "").strip(),
-         json.dumps(_arr(data.get("rss_urls"))), json.dumps(_arr(data.get("subreddits"))),
-         (data.get("hn_query") or "").strip(), (data.get("github_query") or "").strip(),
-         json.dumps(_arr(data.get("youtube_channels"))), feed_id))
+        (name, query, json.dumps(rss), json.dumps(subs), hn, gh, json.dumps(yt), json.dumps(srcs), skip, feed_id))
     conn.commit()
     conn.close()
     return jsonify({"status": "ok", "feed": _get_feed(feed_id)})
@@ -784,26 +1253,30 @@ def api_oracle_sweep():
             "github_query": data.get("github_query") or "ai agent framework",
             "youtube_channels": data.get("youtube_channels") or [],
         }
-    signals = _sweep_feed_sources(feed)
+    signals, stats = _sweep_feed_sources(feed)
     signal_file, ts = _save_feed_signals(feed, signals)
 
     conn = _db()
     conn.execute("INSERT INTO sweeps (ts, query, signal_file, top) VALUES (?,?,?,?)",
                  (ts, feed["query"], os.path.basename(signal_file) if signal_file else "",
                   json.dumps(signals[:3])))
-    conn.execute("INSERT INTO memory (ts, agent, tag, content) VALUES (?,?,?,?)",
-                 (datetime.now().strftime("%H:%M LOCAL"), "Oracle v2", "Feed Sweep",
-                  f"Feed '{feed['name']}': {len(signals)} signals from RSS/Reddit/HN/GitHub/YouTube. "
-                  f"File: {os.path.basename(signal_file) if signal_file else 'in-memory'}"))
+    conn.execute("INSERT INTO memory (ts, agent, tag, content, tier, source) VALUES (?,?,?,?,?,?)",
+                 (datetime.now().strftime("%H:%M LOCAL"), "Oracle v3", "Feed Sweep",
+                  f"Feed '{feed['name']}': {len(signals)} signals from {', '.join(stats.keys()) or 'no sources'}. "
+                  f"File: {os.path.basename(signal_file) if signal_file else 'in-memory'}",
+                  "auto", "oracle"))
     conn.commit()
     conn.close()
 
     return jsonify({
         "status": "ok", "feed": feed["name"], "feed_id": feed["id"],
         "timestamp": ts, "signal_file": signal_file or "in-memory (no vault mounted)",
+        "source_stats": stats,
         "signals": [{"id": f"sig-{i:02d}", "title": s.get("title", ""), "score": s.get("score", 0),
-                     "source": s.get("source", ""), "link": s.get("link", ""),
-                     "eng": s.get("eng") or {}, "angle": (s.get("summary") or "")[:200]}
+                     "breakdown": s.get("breakdown") or {}, "source": s.get("source", ""),
+                     "link": s.get("link", ""), "eng": s.get("eng") or {},
+                     "is_repeat": s.get("is_repeat", False), "delta_points": s.get("delta_points", 0),
+                     "angle": (s.get("summary") or "")[:200]}
                     for i, s in enumerate(signals, 1)],
     })
 
@@ -946,6 +1419,14 @@ def api_crew():
     except Exception as e:
         log_artifact = f"(vault write failed: {e})"
 
+    # compounding loop: auto-save a reusable skill doc from a successful crew run
+    if not errors:
+        _distill_run_skill(
+            f"Crew run: {crew_name}",
+            f"Reusable crew execution pattern for '{crew_name}' — task template and role outputs.",
+            f"Task: {task}\n\n" + "\n".join(f"### {l}\n{r[:600]}" for l, r in results.items()),
+            source=f"crew:{crew_name}")
+
     conn = _db()
     conn.execute("INSERT INTO memory (ts, agent, tag, content) VALUES (?,?,?,?)",
                  (datetime.now().strftime("%H:%M LOCAL"), f"Crew: {crew_name}", "Crew Dispatched",
@@ -1020,13 +1501,16 @@ def api_conversation(agent_id):
                          "timestamp": datetime.now().strftime("%H:%M LOCAL"), "text": user_msg})
         agent_name = "Hermes Agent" if agent_id == "hermes" else f"{agent_id.capitalize()} Agent"
         try:
-            reply = _call_llm(user_msg, agent=agent_id)
+            ctx = _memory_context(user_msg)
+            reply = _call_llm(user_msg + (("\n\n" + ctx) if ctx else ""), agent=agent_id)
+
         except Exception as e:
             reply = (f"⚠️ {agent_name} could not reach any LLM backend. Configure one at "
                      f"`/api/agentic/config` (or the ⚙️ LLM Settings drawer). Detail: {str(e)[:200]}")
         messages.append({"sender": agent_name, "role": "agent",
                          "timestamp": datetime.now().strftime("%H:%M LOCAL"), "text": reply})
         _save_conversation(agent_id, messages)
+        threading.Thread(target=_distill_facts, args=(user_msg, reply, agent_name), daemon=True).start()
 
         conn = _db()
         conn.execute("INSERT INTO memory (ts, agent, tag, content) VALUES (?,?,?,?)",
@@ -1183,18 +1667,20 @@ def api_hermes_session(session_id):
             sess["messages"].append({"sender": "User", "role": "user",
                                      "timestamp": datetime.now().strftime("%H:%M LOCAL"), "text": user_msg})
             try:
-                reply = _call_llm(user_msg, agent="hermes")
+                ctx = _memory_context(user_msg)
+                reply = _call_llm(user_msg + (("\n\n" + ctx) if ctx else ""), agent="hermes")
             except Exception as e:
                 reply = f"⚠️ Hermes could not reach any LLM backend. Detail: {str(e)[:200]}"
             sess["messages"].append({"sender": "Hermes Agent", "role": "agent",
                                      "timestamp": datetime.now().strftime("%H:%M LOCAL"), "text": reply})
             _save_session(session_id, sess["title"], sess["messages"])
             conn = _db()
-            conn.execute("INSERT INTO memory (ts, agent, tag, content) VALUES (?,?,?,?)",
+            conn.execute("INSERT INTO memory (ts, agent, tag, content, tier, source) VALUES (?,?,?,?,?,?)",
                          (datetime.now().strftime("%H:%M LOCAL"), "Hermes Agent", "Conversation",
-                          f"User: {user_msg[:60]} | Reply: {reply[:60]}"))
+                          f"User: {user_msg[:60]} | Reply: {reply[:60]}", "auto", "chat"))
             conn.commit()
             conn.close()
+            threading.Thread(target=_distill_facts, args=(user_msg, reply, "Hermes Agent"), daemon=True).start()
         return jsonify({"status": "ok", "session": sess, "messages": sess["messages"]})
     return jsonify({"status": "ok", "session": sess, "messages": sess["messages"]})
 
@@ -1208,7 +1694,9 @@ def api_hermes_session_stream(session_id):
 
     def generate():
         try:
-            reply = _call_llm(user_msg, agent="hermes")
+            ctx = _memory_context(user_msg)
+            reply = _call_llm(user_msg + (("\n\n" + ctx) if ctx else ""), agent="hermes")
+
         except Exception as e:
             reply = f"⚠️ Hermes could not reach any LLM backend. Detail: {str(e)[:200]}"
         # Persist the exchange to the session + shared memory
@@ -1223,11 +1711,12 @@ def api_hermes_session_stream(session_id):
                                      "timestamp": datetime.now().strftime("%H:%M LOCAL"), "text": reply})
             _save_session(session_id, sess["title"], sess["messages"])
             conn = _db()
-            conn.execute("INSERT INTO memory (ts, agent, tag, content) VALUES (?,?,?,?)",
+            conn.execute("INSERT INTO memory (ts, agent, tag, content, tier, source) VALUES (?,?,?,?,?,?)",
                          (datetime.now().strftime("%H:%M LOCAL"), "Hermes Agent", "Conversation",
-                          f"User: {user_msg[:60]} | Reply: {reply[:60]}"))
+                          f"User: {user_msg[:60]} | Reply: {reply[:60]}", "auto", "chat"))
             conn.commit()
             conn.close()
+            threading.Thread(target=_distill_facts, args=(user_msg, reply, "Hermes Agent"), daemon=True).start()
         except Exception:
             pass
         token = json.dumps({"token": reply})
@@ -1449,8 +1938,37 @@ def _keyword_score(query_tokens, content):
     return score / (len(toks) ** 0.35)
 
 
+def _get_cached_embed(path, mtime, text, timeout=30):
+    """Embed a vault file, caching the vector in SQLite keyed by path+mtime.
+    First pass over a vault is slow (cold embeds); every later search is fast."""
+    try:
+        conn = _db()
+        row = conn.execute("SELECT vector FROM vault_embeddings WHERE path=? AND mtime=?",
+                           (path, mtime)).fetchone()
+        if row:
+            vec = json.loads(row["vector"])
+            conn.close()
+            return vec if isinstance(vec, list) else None
+        conn.close()
+    except Exception:
+        pass
+    vec = _ollama_embed(text, timeout=timeout)
+    if vec:
+        try:
+            conn = _db()
+            conn.execute("INSERT INTO vault_embeddings (path, mtime, vector) VALUES (?,?,?) "
+                         "ON CONFLICT(path) DO UPDATE SET mtime=excluded.mtime, vector=excluded.vector",
+                         (path, mtime, json.dumps(vec)))
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+    return vec
+
+
 def _search_vault(query, limit=8):
     """Hybrid search: keyword always; semantic boost when an embed model exists.
+    File vectors are CACHED (vault_embeddings table) so repeat searches are fast.
     Returns [{rel, snippet, kw_score, sem_score, combined}]."""
     q_tokens = _tokenize(query)
     files = _vault_md_files()
@@ -1465,7 +1983,7 @@ def _search_vault(query, limit=8):
         kw = _keyword_score(q_tokens, content)
         sem = 0.0
         if q_vec:
-            f_vec = _ollama_embed(content[:4000], timeout=15)
+            f_vec = _get_cached_embed(f["rel"], f["mtime"], content[:4000], timeout=30)
             if f_vec:
                 sem = _cosine(q_vec, f_vec)
         combined = kw + (sem * 3.0 if q_vec else 0.0)
@@ -1738,9 +2256,226 @@ def api_pipeline_run():
     if not nodes:
         return jsonify({"error": "Pipeline has no nodes"}), 400
     outputs, logs, complete = _run_pipeline_nodes(nodes, edges)
+    # compounding loop: structured note to the vault + memory row + skill doc
+    try:
+        _finalize_pipeline_run(data.get("name") or "Untitled", nodes, outputs, logs, complete)
+    except Exception:
+        pass
     return jsonify({"status": "ok" if complete else "partial",
                     "outputs": {k: (str(v)[:2000]) for k, v in outputs.items()},
                     "logs": logs, "complete": complete})
+
+
+# ---------------------------------------------------------------------------
+# Memory Engine settings + manual re-tier
+# ---------------------------------------------------------------------------
+@agentic_bp.route("/api/agentic/memory/settings", methods=["GET", "POST", "OPTIONS"])
+def api_memory_settings():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "POST":
+        data = request.get_json() or {}
+        cfg = _set_memory_settings(data)
+        return jsonify({"status": "ok", "settings": cfg})
+    return jsonify({"status": "ok", "settings": _memory_settings()})
+
+
+@agentic_bp.route("/api/agentic/memory/<int:mid>/tier", methods=["POST", "OPTIONS"])
+def api_memory_retier(mid):
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    new_tier = (data.get("tier") or "").strip().lower()
+    if new_tier not in ("core", "working", "auto"):
+        return jsonify({"error": "tier must be core|working|auto"}), 400
+    conn = _db()
+    cur = conn.execute("UPDATE memory SET tier=?, updated=? WHERE id=?",
+                       (new_tier, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), mid))
+    conn.commit()
+    row = conn.execute("SELECT * FROM memory WHERE id=?", (mid,)).fetchone()
+    conn.close()
+    if not row or cur.rowcount == 0:
+        return jsonify({"error": "Entry not found"}), 404
+    _sync_memory_to_vault(mid, dict(row))
+    return jsonify({"status": "ok", "entry": dict(row)})
+
+
+# ---------------------------------------------------------------------------
+# Oracle v3: sweep-all + digest + post editing + scheduled digest
+# ---------------------------------------------------------------------------
+@agentic_bp.route("/api/agentic/oracle/sweep-all", methods=["POST", "OPTIONS"])
+def api_oracle_sweep_all():
+    """Sweep every feed in parallel, merge, write a ranked digest to the vault."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    feeds = _list_feeds()
+    if not feeds:
+        return jsonify({"error": "No feeds configured"}), 400
+    results = {}
+    stats_all = {}
+
+    def _one(feed):
+        try:
+            sigs, stats = _sweep_feed_sources(feed)
+            results[feed["id"]] = sigs
+            for k, v in stats.items():
+                stats_all[k] = stats_all.get(k, 0) + v
+        except Exception as e:
+            results[feed["id"]] = []
+
+    threads = [threading.Thread(target=_one, args=(f,)) for f in feeds]
+    for t in threads: t.start()
+    for t in threads: t.join()
+
+    merged = []
+    for fid, sigs in results.items():
+        for s in sigs:
+            s["feed"] = next((f["name"] for f in feeds if f["id"] == fid), "?")
+            merged.append(s)
+    merged.sort(key=lambda x: -(x.get("score") or 0))
+    top = merged[:10]
+
+    vault = _vault_path()
+    intel_dir = os.path.join(vault, "00_Intelligence")
+    digest_file = None
+    try:
+        os.makedirs(intel_dir, exist_ok=True)
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        digest_file = os.path.join(intel_dir, f"Digest_{datetime.now().strftime('%Y%m%d')}.md")
+        lines = [f"# 📬 Oracle Intelligence Digest — {ts}",
+                 f"\n- **Feeds swept**: {len(feeds)} · **Signals merged**: {len(merged)}",
+                 f"- **Sources**: {', '.join(f'{k}={v}' for k, v in stats_all.items())}\n",
+                 "\n## Top Signals Across All Feeds\n"]
+        for i, s in enumerate(top, 1):
+            rep = " 🔁repeat" if s.get("is_repeat") else ""
+            lines.append(f"{i}. **{s.get('title', '')}** (Score: {s.get('score', 0)}/100{rep})")
+            lines.append(f"   - *Feed*: {s.get('feed', '?')} | *Source*: {s.get('source', '')}")
+            lines.append(f"   - *Link*: {s.get('link', '')}")
+            lines.append("")
+        with open(digest_file, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+    except Exception as e:
+        digest_file = None
+        print(f"[oracle-v3] digest write failed: {e}")
+
+    conn = _db()
+    conn.execute("INSERT INTO memory (ts, agent, tag, content, tier, source) VALUES (?,?,?,?,?,?)",
+                 (datetime.now().strftime("%H:%M LOCAL"), "Oracle v3", "Intelligence Digest",
+                  f"Digest built from {len(feeds)} feeds, {len(merged)} signals merged, top {len(top)}. "
+                  f"File: {os.path.basename(digest_file) if digest_file else 'in-memory'}",
+                  "auto", "oracle"))
+    conn.commit()
+    conn.close()
+
+    return jsonify({
+        "status": "ok", "feeds_swept": len(feeds), "signals_merged": len(merged),
+        "source_stats": stats_all, "digest_file": digest_file,
+        "top": [{"title": s.get("title", ""), "score": s.get("score", 0),
+                 "source": s.get("source", ""), "feed": s.get("feed", "?"),
+                 "link": s.get("link", ""), "is_repeat": s.get("is_repeat", False)}
+                for s in top],
+    })
+
+
+@agentic_bp.route("/api/agentic/oracle/posts/<int:post_id>", methods=["PUT", "OPTIONS"])
+def api_oracle_post_edit(post_id):
+    """Edit a post draft (content/title/platform/status)."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    conn = _db()
+    row = conn.execute("SELECT * FROM oracle_posts WHERE id=?", (post_id,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "post not found"}), 404
+    new_content = data.get("content")
+    new_title = data.get("title")
+    new_status = data.get("status")
+    new_platform = data.get("platform")
+    if new_content is not None:
+        conn.execute("UPDATE oracle_posts SET content=? WHERE id=?", (new_content, post_id))
+    if new_title is not None:
+        conn.execute("UPDATE oracle_posts SET title=? WHERE id=?", (new_title, post_id))
+    if new_status in ("draft", "reviewed", "scheduled", "published"):
+        conn.execute("UPDATE oracle_posts SET status=? WHERE id=?", (new_status, post_id))
+    if new_platform in ("linkedin", "x", "blog"):
+        conn.execute("UPDATE oracle_posts SET platform=? WHERE id=?", (new_platform, post_id))
+    conn.commit()
+    row2 = conn.execute("SELECT * FROM oracle_posts WHERE id=?", (post_id,)).fetchone()
+    conn.close()
+    return jsonify({"status": "ok", "post": dict(row2)})
+
+
+def _run_scheduled_digest():
+    """Check the digest schedule; run sweep-all when due. Called from watchdog."""
+    try:
+        sched = _cfg_get("oracle_digest") or {}
+        if not sched.get("enabled"):
+            return
+        cadence = sched.get("cadence", "daily")
+        last = sched.get("last_run") or ""
+        today = datetime.now().strftime("%Y-%m-%d")
+        if last == today:
+            return
+        hour = int(sched.get("hour", 9))
+        if datetime.now().hour < hour:
+            return
+        _run_digest_now()
+        sched["last_run"] = today
+        _cfg_set("oracle_digest", sched)
+    except Exception:
+        pass
+
+
+def _run_digest_now():
+    """Execute the digest sweep without the schedule check (used by API + scheduler)."""
+    try:
+        feeds = _list_feeds()
+        if not feeds:
+            return
+        merged = []
+        for feed in feeds:
+            try:
+                sigs, _ = _sweep_feed_sources(feed)
+                for s in sigs:
+                    s["feed"] = feed["name"]
+                    merged.append(s)
+            except Exception:
+                continue
+        merged.sort(key=lambda x: -(x.get("score") or 0))
+        vault = _vault_path()
+        intel_dir = os.path.join(vault, "00_Intelligence")
+        os.makedirs(intel_dir, exist_ok=True)
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        digest_file = os.path.join(intel_dir, f"Digest_{datetime.now().strftime('%Y%m%d')}.md")
+        lines = [f"# 📬 Oracle Intelligence Digest — {ts}", f"\n- **Signals merged**: {len(merged)}\n",
+                 "\n## Top Signals\n"]
+        for i, s in enumerate(merged[:10], 1):
+            lines.append(f"{i}. **{s.get('title', '')}** (Score: {s.get('score', 0)}/100)")
+            lines.append(f"   - *Feed*: {s.get('feed', '?')} | *Source*: {s.get('source', '')}")
+            lines.append(f"   - *Link*: {s.get('link', '')}")
+            lines.append("")
+        with open(digest_file, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+    except Exception:
+        pass
+
+
+@agentic_bp.route("/api/agentic/oracle/digest/schedule", methods=["GET", "POST", "OPTIONS"])
+def api_oracle_digest_schedule():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "POST":
+        data = request.get_json() or {}
+        sched = dict(_cfg_get("oracle_digest") or {})
+        for k in ("enabled", "cadence", "hour"):
+            if data.get(k) is not None:
+                sched[k] = data[k]
+        if data.get("run_now"):
+            threading.Thread(target=_run_digest_now, daemon=True).start()
+        _cfg_set("oracle_digest", sched)
+        return jsonify({"status": "ok", "schedule": sched})
+    return jsonify({"status": "ok", "schedule": _cfg_get("oracle_digest") or {}})
 
 
 # ---------------------------------------------------------------------------
@@ -1856,6 +2591,10 @@ def _watchdog_loop():
             _watchdog_tick()
         except Exception:
             pass
+        try:
+            _run_scheduled_digest()
+        except Exception:
+            pass
         time.sleep(WATCHDOG_CFG["interval_s"])
 
 
@@ -1910,4 +2649,892 @@ def api_health_restart(sid):
     ok, detail = _docker_restart(containers[0])
     _log_health_event(sid, "MANUAL-RESTART", f"{containers[0]} → {'ok' if ok else detail}")
     return jsonify({"status": "ok" if ok else "error", "container": containers[0], "detail": detail})
+
+
+# =============================================================================
+# COMPOUNDING LAYER (2026-08-08) — the 7th layer of the Agent OS blueprint:
+# identity profile · goals · SEO workflow · media agent · artifacts gallery ·
+# skills library · conversation capture (daily log) · output loop enforcement.
+# Spliced into agentic_plane.py as one appended block (stdlib-only: the agent
+# image has NO requests module; every route has an OPTIONS guard first line).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# New tables (created on import — _init_db() already ran at module load)
+# ---------------------------------------------------------------------------
+def _init_compounding_tables():
+    conn = _db()
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS goals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT, description TEXT,
+        status TEXT DEFAULT 'active',
+        priority INTEGER DEFAULT 3,
+        progress INTEGER DEFAULT 0,
+        kpis TEXT DEFAULT '',
+        linked_feeds TEXT DEFAULT '',
+        linked_crews TEXT DEFAULT '',
+        created TEXT, updated TEXT
+    );
+    CREATE TABLE IF NOT EXISTS seo_keywords (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cluster TEXT, keyword TEXT, intent TEXT,
+        difficulty INTEGER DEFAULT 50, volume INTEGER DEFAULT 0,
+        created TEXT
+    );
+    CREATE TABLE IF NOT EXISTS skills (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT, description TEXT, content TEXT,
+        source TEXT DEFAULT 'manual', uses INTEGER DEFAULT 0,
+        created TEXT, updated TEXT
+    );
+    CREATE TABLE IF NOT EXISTS media_assets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        prompt TEXT, style TEXT, file TEXT, provider TEXT,
+        created TEXT
+    );
+    CREATE TABLE IF NOT EXISTS capture_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts TEXT, note TEXT
+    );
+    """)
+    conn.commit()
+    conn.close()
+
+_init_compounding_tables()
+
+
+# ---------------------------------------------------------------------------
+# 1. IDENTITY / PROFILE  — who the user is; injected into EVERY LLM call.
+#    (the video's Layer 2 pain: "none of them actually know who you are")
+# ---------------------------------------------------------------------------
+IDENTITY_DEFAULTS = {
+    "name": "",
+    "brand": "",
+    "voice": "",
+    "audience": "",
+    "tone": "",
+    "goals_summary": "",
+    "keywords": "",
+}
+
+def _get_profile():
+    raw = _cfg_get("identity") or ""
+    try:
+        prof = json.loads(raw) if raw else {}
+    except Exception:
+        prof = {}
+    return {**IDENTITY_DEFAULTS, **{k: v for k, v in (prof or {}).items() if v is not None}}
+
+
+def _set_profile(patch):
+    prof = _get_profile()
+    for k, v in (patch or {}).items():
+        if k in prof and v is not None:
+            prof[k] = str(v).strip()
+    _cfg_set("identity", json.dumps(prof))
+    _mirror_profile_to_vault(prof)
+    return prof
+
+
+def _identity_block():
+    """Compact 'WHO YOU ARE' block appended to every system prompt."""
+    p = _get_profile()
+    lines = []
+    if p.get("name"):
+        lines.append(f"- Name: {p['name']}")
+    if p.get("brand"):
+        lines.append(f"- Brand/Product: {p['brand']}")
+    if p.get("audience"):
+        lines.append(f"- Audience: {p['audience']}")
+    if p.get("voice"):
+        lines.append(f"- Voice: {p['voice']}")
+    if p.get("tone"):
+        lines.append(f"- Tone: {p['tone']}")
+    if p.get("keywords"):
+        lines.append(f"- Focus keywords/topics: {p['keywords']}")
+    if p.get("goals_summary"):
+        lines.append(f"- Goals: {p['goals_summary']}")
+    goals = _goals_context(compact=True)
+    if goals:
+        lines.append("- Active goals:\n" + goals)
+    if not lines:
+        return ""
+    return ("\n\n===== WHO YOU ARE (user identity profile — use it to personalize "
+            "every answer; never guess) =====\n" + "\n".join(lines) +
+            "\n===== END IDENTITY =====\n")
+
+
+def _mirror_profile_to_vault(prof):
+    """Compounding loop: the identity profile is an artifact — write it to the vault."""
+    try:
+        vault = _vault_path()
+        d = os.path.join(vault, "04_Projects")
+        os.makedirs(d, exist_ok=True)
+        body = f"# Identity Profile\n\n> Auto-synced from Agentic OS — every agent reads this.\n\n"
+        for k, v in prof.items():
+            if v:
+                body += f"**{k.replace('_', ' ').title()}:** {v}\n\n"
+        with open(os.path.join(d, "Identity_Profile.md"), "w", encoding="utf-8") as f:
+            f.write(body)
+    except Exception:
+        pass
+
+
+@agentic_bp.route("/api/agentic/profile", methods=["GET", "POST", "OPTIONS"])
+def api_profile():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "POST":
+        prof = _set_profile(request.get_json() or {})
+        return jsonify({"status": "ok", "profile": prof})
+    return jsonify({"status": "ok", "profile": _get_profile()})
+
+
+# ---------------------------------------------------------------------------
+# 2. GOALS — production layer. Active goals are injected into every LLM call
+#    (via the identity block) and shown to oracle/crew dispatches.
+# ---------------------------------------------------------------------------
+def _goals_context(compact=False):
+    try:
+        conn = _db()
+        rows = conn.execute(
+            "SELECT * FROM goals WHERE status='active' ORDER BY priority ASC, id DESC LIMIT 6"
+        ).fetchall()
+        conn.close()
+    except Exception:
+        return ""
+    if not rows:
+        return ""
+    lines = []
+    for r in rows:
+        kpi = f" — KPIs: {r['kpis']}" if r["kpis"] else ""
+        if compact:
+            lines.append(f"  * [{r['priority']}] {r['title']} ({r['progress']}%){kpi}")
+        else:
+            lines.append(f"  * {r['title']} — {r['description'] or ''} [{r['progress']}%]{kpi}")
+    return "\n".join(lines)
+
+
+def _goal_row_to_dict(r):
+    return {
+        "id": r["id"], "title": r["title"], "description": r["description"],
+        "status": r["status"], "priority": r["priority"], "progress": r["progress"],
+        "kpis": (r["kpis"] or "").split(",") if r["kpis"] else [],
+        "linked_feeds": (r["linked_feeds"] or "").split(",") if r["linked_feeds"] else [],
+        "linked_crews": (r["linked_crews"] or "").split(",") if r["linked_crews"] else [],
+        "created": r["created"], "updated": r["updated"],
+    }
+
+
+@agentic_bp.route("/api/agentic/goals", methods=["GET", "POST", "OPTIONS"])
+def api_goals():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "POST":
+        data = request.get_json() or {}
+        title = (data.get("title") or "").strip()
+        if not title:
+            return jsonify({"error": "title required"}), 400
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conn = _db()
+        cur = conn.execute(
+            "INSERT INTO goals (title, description, status, priority, progress, kpis, "
+            "linked_feeds, linked_crews, created, updated) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (title, (data.get("description") or ""), (data.get("status") or "active"),
+             int(data.get("priority", 3) or 3), int(data.get("progress", 0) or 0),
+             ",".join(data.get("kpis") or []),
+             ",".join(str(x) for x in (data.get("linked_feeds") or [])),
+             ",".join(str(x) for x in (data.get("linked_crews") or [])),
+             now, now))
+        conn.commit()
+        row = conn.execute("SELECT * FROM goals WHERE id=?", (cur.lastrowid,)).fetchone()
+        conn.close()
+        return jsonify({"status": "ok", "goal": _goal_row_to_dict(row)})
+    conn = _db()
+    rows = conn.execute("SELECT * FROM goals ORDER BY status='active' DESC, priority ASC, id DESC").fetchall()
+    conn.close()
+    return jsonify({"status": "ok", "goals": [_goal_row_to_dict(r) for r in rows]})
+
+
+@agentic_bp.route("/api/agentic/goals/<int:gid>", methods=["PUT", "DELETE", "OPTIONS"])
+def api_goal(gid):
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    conn = _db()
+    if request.method == "DELETE":
+        conn.execute("DELETE FROM goals WHERE id=?", (gid,))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok", "deleted": gid})
+    row = conn.execute("SELECT * FROM goals WHERE id=?", (gid,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "goal not found"}), 404
+    data = request.get_json() or {}
+    # PARTIAL update — absent fields keep existing values (PUT pitfall rule)
+    merged = {}
+    for k in ("title", "description", "status", "kpis", "linked_feeds", "linked_crews"):
+        if data.get(k) is not None:
+            v = data[k]
+            merged[k] = ",".join(v) if isinstance(v, list) else str(v)
+    if data.get("priority") is not None:
+        merged["priority"] = int(data["priority"])
+    if data.get("progress") is not None:
+        merged["progress"] = max(0, min(100, int(data["progress"])))
+    merged["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    sets = ", ".join(f"{k}=?" for k in merged)
+    conn.execute(f"UPDATE goals SET {sets} WHERE id=?", (*merged.values(), gid))
+    conn.commit()
+    row = conn.execute("SELECT * FROM goals WHERE id=?", (gid,)).fetchone()
+    conn.close()
+    return jsonify({"status": "ok", "goal": _goal_row_to_dict(row)})
+
+
+# ---------------------------------------------------------------------------
+# 3. SEO WORKFLOW — keyword research (LLM cluster) + SEO article generation
+# ---------------------------------------------------------------------------
+@agentic_bp.route("/api/agentic/seo/keywords", methods=["GET", "POST", "DELETE", "OPTIONS"])
+def api_seo_keywords():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "POST":
+        data = request.get_json() or {}
+        cluster = (data.get("cluster") or "General").strip()
+        items = data.get("keywords") or []
+        if not items:
+            return jsonify({"error": "keywords list required"}), 400
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conn = _db()
+        added = 0
+        for it in items:
+            kw = (it.get("keyword") or "").strip()
+            if not kw:
+                continue
+            conn.execute(
+                "INSERT INTO seo_keywords (cluster, keyword, intent, difficulty, volume, created) "
+                "VALUES (?,?,?,?,?,?)",
+                (cluster, kw, (it.get("intent") or "informational"),
+                 int(it.get("difficulty", 50) or 50), int(it.get("volume", 0) or 0), now))
+            added += 1
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok", "cluster": cluster, "added": added})
+    if request.method == "DELETE":
+        data = request.get_json() or {}
+        conn = _db()
+        conn.execute("DELETE FROM seo_keywords WHERE cluster=? OR id=?",
+                     ((data.get("cluster") or ""), int(data.get("id") or 0)))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok"})
+    cluster = (request.args.get("cluster") or "").strip()
+    conn = _db()
+    if cluster:
+        rows = conn.execute("SELECT * FROM seo_keywords WHERE cluster=? ORDER BY volume DESC, id DESC",
+                            (cluster,)).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM seo_keywords ORDER BY id DESC LIMIT 200").fetchall()
+    conn.close()
+    clusters = {}
+    for r in rows:
+        c = r["cluster"] or "General"
+        clusters.setdefault(c, []).append({
+            "id": r["id"], "keyword": r["keyword"], "intent": r["intent"],
+            "difficulty": r["difficulty"], "volume": r["volume"], "created": r["created"]})
+    return jsonify({"status": "ok", "clusters": clusters})
+
+
+@agentic_bp.route("/api/agentic/seo/research", methods=["POST", "OPTIONS"])
+def api_seo_research():
+    """LLM keyword research: seed topic -> cluster of {keyword, intent, difficulty, volume}."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    seed = (data.get("seed") or "").strip()
+    count = min(20, int(data.get("count", 10) or 10))
+    if not seed:
+        return jsonify({"error": "seed keyword required"}), 400
+    sys_prompt = ("You are an SEO keyword researcher. Output STRICT JSON only — an array of "
+                  "objects: [{\"keyword\": \"...\", \"intent\": \"informational|commercial|transactional|navigational\", "
+                  "\"difficulty\": 0-100, \"volume\": 0-100000}] — no markdown, no preamble.")
+    try:
+        raw = _call_llm(
+            f"Research a keyword cluster for the seed topic: \"{seed}\". Generate {count} keywords "
+            f"ordered by relevance: head terms, long-tail variants, and question-based queries. "
+            f"Estimate difficulty (0-100) and monthly search volume (0-100000) per keyword.",
+            system_prompt=sys_prompt, agent="hermes", timeout=60)
+    except Exception as e:
+        return jsonify({"status": "error", "error": f"LLM research failed: {str(e)[:200]}"}), 502
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw or "").strip()
+    m = re.search(r"\[.*\]", cleaned, re.S)
+    try:
+        items = json.loads(m.group(0)) if m else json.loads(cleaned)
+    except Exception:
+        return jsonify({"status": "error", "error": "LLM did not return valid keyword JSON"}), 502
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = _db()
+    added = 0
+    for it in items[:count]:
+        kw = (it.get("keyword") or "").strip()
+        if not kw:
+            continue
+        conn.execute(
+            "INSERT INTO seo_keywords (cluster, keyword, intent, difficulty, volume, created) "
+            "VALUES (?,?,?,?,?,?)",
+            (seed, kw, (it.get("intent") or "informational"),
+             max(0, min(100, int(it.get("difficulty", 50) or 50))),
+             max(0, int(it.get("volume", 0) or 0)), now))
+        added += 1
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok", "cluster": seed, "added": added, "keywords": items[:count]})
+
+
+@agentic_bp.route("/api/agentic/seo/generate", methods=["POST", "OPTIONS"])
+def api_seo_generate():
+    """SEO-optimized blog article from a keyword cluster (optionally + oracle signals)."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    cluster = (data.get("cluster") or "").strip()
+    title_seed = (data.get("title_seed") or cluster or "topic").strip()
+    if not cluster:
+        return jsonify({"error": "cluster (keyword topic) required"}), 400
+    conn = _db()
+    kws = conn.execute(
+        "SELECT * FROM seo_keywords WHERE cluster=? ORDER BY volume DESC LIMIT 12", (cluster,)).fetchall()
+    conn.close()
+    kw_lines = "\n".join(
+        f"- {r['keyword']} ({r['intent']}, diff {r['difficulty']}, vol ~{r['volume']})" for r in kws) \
+        or f"- {cluster} (informational)"
+    sig_block = ""
+    if data.get("feed_id") is not None:
+        feed = _get_feed(int(data["feed_id"]))
+        if feed:
+            sigs = _sweep_feed_sources(feed)[:6]
+            sig_block = "\nResearch signals:\n" + "\n".join(
+                f"- {s.get('title', '')} {s.get('link', '')}" for s in sigs)
+    sys_prompt = ("You are an SEO content strategist. Write a 600-900 word blog article in "
+                  "markdown with: an SEO title (H1) containing the primary keyword, a meta "
+                  "description (2-3 lines, in a blockquote labelled META), an intro targeting "
+                  "the primary keyword, H2/H3 sections covering the keyword cluster naturally, "
+                  "a comparison/insight section, and a conclusion with a call to action. "
+                  "Keywords must appear naturally — no keyword stuffing. Cite any research links inline.")
+    try:
+        content = _call_llm(
+            f"Primary topic: {title_seed}\n\nKeyword cluster to target:\n{kw_lines}\n{sig_block}\n\n"
+            f"Write the SEO article now.",
+            system_prompt=sys_prompt, agent="oracle", timeout=90)
+    except Exception as e:
+        return jsonify({"status": "error", "error": f"LLM generation failed: {str(e)[:200]}"}), 502
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = _db()
+    cur = conn.execute(
+        "INSERT INTO oracle_posts (feed_id, platform, title, content, status, created) VALUES (?,?,?,?,?,?)",
+        (data.get("feed_id"), "blog", f"SEO: {title_seed}", content, "draft", now))
+    post_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    _write_vault_output("04_Projects/Outputs", f"SEO_{int(time.time())}.md",
+                        f"# SEO Article — {title_seed}\n\n**Cluster:** {cluster}\n\n{content}\n",
+                        tag="SEO Article", agent="Oracle SEO")
+    return jsonify({"status": "ok", "post_id": post_id, "content": content, "cluster": cluster})
+
+
+# ---------------------------------------------------------------------------
+# 4. MEDIA AGENT — keyless image generation (pollinations.ai) into the vault.
+# ---------------------------------------------------------------------------
+def _http_bytes(url, timeout=120):
+    """Download raw bytes (images). stdlib only."""
+    req = urllib.request.Request(url, headers={"User-Agent": "AppVault-Agent/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read(), resp.status
+    except urllib.error.HTTPError as e:
+        return b"", e.code
+    except Exception as e:
+        return b"", 0
+
+
+MEDIA_STYLES = {
+    "photo": "photorealistic, natural lighting, high detail",
+    "art": "digital art, vibrant colors, painterly",
+    "3d": "3D render, octane, depth of field",
+    "logo": "minimal logo design, flat vector, transparent background feel",
+    "anime": "anime style, clean lines, cel shading",
+}
+
+
+@agentic_bp.route("/api/agentic/media", methods=["GET", "POST", "OPTIONS"])
+def api_media():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "POST":
+        data = request.get_json() or {}
+        prompt = (data.get("prompt") or "").strip()
+        if not prompt:
+            return jsonify({"error": "prompt required"}), 400
+        style = (data.get("style") or "photo").strip()
+        style_suffix = MEDIA_STYLES.get(style, style)
+        w = int(data.get("width", 1024) or 1024)
+        h = int(data.get("height", 1024) or 1024)
+        full_prompt = f"{prompt}, {style_suffix}"
+        url = ("https://image.pollinations.ai/prompt/" +
+               urllib.parse.quote(full_prompt) +
+               f"?width={w}&height={h}&nologo=true&seed={int(time.time()) % 1000000}")
+        body, status = _http_bytes(url, timeout=120)
+        if status != 200 or not body:
+            return jsonify({"status": "error", "error": f"image provider HTTP {status}"}), 502
+        vault = _vault_path()
+        d = os.path.join(vault, "05_Media")
+        os.makedirs(d, exist_ok=True)
+        fname = f"IMG_{datetime.now().strftime('%Y%m%d-%H%M%S')}.png"
+        fpath = os.path.join(d, fname)
+        with open(fpath, "wb") as f:
+            f.write(body)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conn = _db()
+        cur = conn.execute(
+            "INSERT INTO media_assets (prompt, style, file, provider, created) VALUES (?,?,?,?,?)",
+            (prompt, style, fname, "pollinations", now))
+        conn.commit()
+        conn.close()
+        # compounding loop: memory row points at the artifact
+        try:
+            conn = _db()
+            conn.execute("INSERT INTO memory (ts, agent, tag, content, tier, source, updated) "
+                         "VALUES (?,?,?,?,?,?,?)",
+                         (datetime.now().strftime("%H:%M LOCAL"), "Media Agent", "Media Generated",
+                          f"Generated `{fname}`: {prompt[:180]} (05_Media/)", "auto", "media", now))
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+        return jsonify({"status": "ok", "file": fname, "prompt": prompt, "style": style,
+                        "url": f"/api/agentic/media/file/{fname}", "id": cur.lastrowid})
+    conn = _db()
+    rows = conn.execute("SELECT * FROM media_assets ORDER BY id DESC LIMIT 60").fetchall()
+    conn.close()
+    return jsonify({"status": "ok", "assets": [dict(r) for r in rows]})
+
+
+@agentic_bp.route("/api/agentic/media/file/<fname>", methods=["GET", "OPTIONS"])
+def api_media_file(fname):
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    fname = os.path.basename(fname)  # no traversal
+    fpath = os.path.join(_vault_path(), "05_Media", fname)
+    if not os.path.isfile(fpath):
+        return jsonify({"error": "file not found"}), 404
+    try:
+        from flask import send_file
+        return send_file(fpath, mimetype="image/png")
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# 5. SKILLS LIBRARY — reusable skill documents (the Hermes compounding pattern)
+# ---------------------------------------------------------------------------
+def _save_skill(name, description, content, source="auto"):
+    """Insert or update a skill doc (dedup by name). Returns id or None."""
+    try:
+        name = (name or "").strip()
+        if not name:
+            return None
+        content = (content or "").strip()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conn = _db()
+        row = conn.execute("SELECT * FROM skills WHERE name=?", (name,)).fetchone()
+        if row:
+            conn.execute("UPDATE skills SET description=?, content=?, source=?, updated=?, uses=uses+1 WHERE id=?",
+                         (description or "", content or row["content"], source, now, row["id"]))
+            sid = row["id"]
+        else:
+            cur = conn.execute(
+                "INSERT INTO skills (name, description, content, source, uses, created, updated) "
+                "VALUES (?,?,?,?,0,?,?)", (name, description or "", content, source, now, now))
+            sid = cur.lastrowid
+        conn.commit()
+        conn.close()
+        _mirror_skill_to_vault(sid)
+        return sid
+    except Exception:
+        return None
+
+
+def _mirror_skill_to_vault(sid):
+    try:
+        conn = _db()
+        row = conn.execute("SELECT * FROM skills WHERE id=?", (sid,)).fetchone()
+        conn.close()
+        if not row:
+            return
+        vault = _vault_path()
+        d = os.path.join(vault, "04_Projects", "Skills")
+        os.makedirs(d, exist_ok=True)
+        slug = re.sub(r"[^a-z0-9]+", "-", (row["name"] or "skill").lower()).strip("-")[:60]
+        with open(os.path.join(d, f"{slug}.md"), "w", encoding="utf-8") as f:
+            f.write(f"# {row['name']}\n\n> Auto-saved skill · {row['source']} · {row['created']}\n\n"
+                    f"{row['description'] or ''}\n\n---\n\n{row['content']}\n")
+    except Exception:
+        pass
+
+
+def _skills_context(query, limit=3):
+    """Top skill docs matching the query — injected into the LLM call."""
+    try:
+        conn = _db()
+        rows = conn.execute("SELECT * FROM skills ORDER BY uses DESC, updated DESC LIMIT 30").fetchall()
+        conn.close()
+    except Exception:
+        return ""
+    qtoks = set(_tokenize(query or ""))
+    scored = []
+    for r in rows:
+        blob = f"{r['name']} {r['description']} {r['content']}"
+        toks = set(_tokenize(blob))
+        overlap = len(qtoks & toks) if qtoks else 0
+        if overlap or r["uses"] >= 3:
+            scored.append((overlap, r))
+    scored.sort(key=lambda x: (x[0], x[1]["uses"]), reverse=True)
+    top = [r for _, r in scored[:limit]]
+    if not top:
+        return ""
+    lines = [f"- **{r['name']}** (used {r['uses']}x): {r['description'] or r['content'][:120]}" for r in top]
+    return ("\n\n===== RELEVANT SKILL DOCUMENTS (apply them if they match the task) =====\n"
+            + "\n".join(lines) + "\n===== END SKILLS =====\n")
+
+
+@agentic_bp.route("/api/agentic/skills", methods=["GET", "POST", "OPTIONS"])
+def api_skills():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "POST":
+        data = request.get_json() or {}
+        sid = _save_skill(data.get("name"), data.get("description"), data.get("content"),
+                          source=(data.get("source") or "manual"))
+        if not sid:
+            return jsonify({"error": "name + content required"}), 400
+        return jsonify({"status": "ok", "id": sid})
+    conn = _db()
+    rows = conn.execute("SELECT * FROM skills ORDER BY uses DESC, updated DESC").fetchall()
+    conn.close()
+    return jsonify({"status": "ok", "skills": [dict(r) for r in rows]})
+
+
+@agentic_bp.route("/api/agentic/skills/<int:sid>", methods=["GET", "DELETE", "OPTIONS"])
+def api_skill(sid):
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    conn = _db()
+    if request.method == "DELETE":
+        conn.execute("DELETE FROM skills WHERE id=?", (sid,))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok", "deleted": sid})
+    row = conn.execute("SELECT * FROM skills WHERE id=?", (sid,)).fetchone()
+    conn.close()
+    if not row:
+        return jsonify({"error": "skill not found"}), 404
+    return jsonify({"status": "ok", "skill": dict(row)})
+
+
+@agentic_bp.route("/api/agentic/skills/<int:sid>/use", methods=["POST", "OPTIONS"])
+def api_skill_use(sid):
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    conn = _db()
+    conn.execute("UPDATE skills SET uses=uses+1, updated=? WHERE id=?",
+                 (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), sid))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok"})
+
+
+# ---------------------------------------------------------------------------
+# 6. OUTPUT LOOP ENFORCEMENT — every crew/pipeline run writes a structured note
+#    to the vault + a memory row + auto-saves a reusable skill doc.
+# ---------------------------------------------------------------------------
+def _write_vault_output(subdir, fname, body, tag="Output", agent="System"):
+    """Write an artifact into the vault + log a memory row. Returns rel path or None."""
+    try:
+        vault = _vault_path()
+        d = os.path.join(vault, *subdir.split("/"))
+        os.makedirs(d, exist_ok=True)
+        fpath = os.path.join(d, fname)
+        with open(fpath, "w", encoding="utf-8") as f:
+            f.write(body)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conn = _db()
+        conn.execute("INSERT INTO memory (ts, agent, tag, content, tier, source, updated) "
+                     "VALUES (?,?,?,?,?,?,?)",
+                     (datetime.now().strftime("%H:%M LOCAL"), agent, tag,
+                      f"Wrote `{subdir}/{fname}` to the vault.", "auto", tag, now))
+        conn.commit()
+        conn.close()
+        return os.path.join(subdir, fname)
+    except Exception:
+        return None
+
+
+def _distill_run_skill(name, description, body, source):
+    """Auto-save a compact skill doc from a completed run (the compounding loop)."""
+    if not body or len(body) < 80:
+        return
+    _save_skill(name, description, body[:3000], source=source)
+
+
+# hook: crew dispatch (replaces the bare _dispatch_crew body)
+def _dispatch_crew_compounding(crew_name, task, roles=None):
+    """_dispatch_crew + output loop: vault note + memory + auto skill doc."""
+    results, errors = _dispatch_crew(crew_name, task, roles=roles)
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    body = f"# Crew Run: {crew_name}\n\n**Task:** {task}\n\n**Ran:** {ts}\n\n"
+    for label, reply in results.items():
+        body += f"\n## {label}\n\n{reply}\n"
+    for label, err in errors.items():
+        body += f"\n## {label} — ERROR\n\n{err}\n"
+    fname = f"Crew_{ts}.md"
+    _write_vault_output("04_Projects/Outputs", fname, body, tag="Crew Output", agent="CrewAI")
+    if results:
+        _distill_run_skill(
+            f"Crew run: {crew_name}",
+            f"Reusable crew execution pattern for '{crew_name}' — task template and role outputs.",
+            f"Task: {task}\n\n" + "\n".join(f"### {l}\n{r[:600]}" for l, r in results.items()),
+            source=f"crew:{crew_name}")
+    return results, errors, fname
+
+
+# hook: pipeline run (called by api_pipeline_run)
+def _finalize_pipeline_run(name, nodes, outputs, logs, complete):
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    body = (f"# Pipeline Run: {name or 'Untitled'}\n\n**Ran:** {ts} · **Status:** "
+            f"{'complete' if complete else 'partial'}\n\n## Node Log\n")
+    for lg in logs:
+        body += f"- `{lg['node']}` [{lg['type']}] {lg['status']}: {lg.get('output_preview', lg.get('error', ''))[:200]}\n"
+    body += "\n## Outputs\n"
+    for nid, out in outputs.items():
+        body += f"\n### {nid}\n\n{str(out)[:1200]}\n"
+    fname = f"Pipeline_{ts}.md"
+    _write_vault_output("04_Projects/Outputs", fname, body, tag="Pipeline Output", agent="Workflow")
+    if complete and logs:
+        _distill_run_skill(
+            f"Pipeline: {name or 'Untitled'}",
+            "Reusable workflow pattern — node sequence that ran successfully.",
+            "\n".join(f"- {lg['node']} ({lg['type']}) → {lg['status']}" for lg in logs),
+            source="pipeline")
+    return fname
+
+
+# ---------------------------------------------------------------------------
+# 7. ARTIFACTS GALLERY — everything the OS has produced, in one place.
+# ---------------------------------------------------------------------------
+@agentic_bp.route("/api/agentic/artifacts", methods=["GET", "OPTIONS"])
+def api_artifacts():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    conn = _db()
+    posts = [dict(r) for r in conn.execute(
+        "SELECT * FROM oracle_posts ORDER BY id DESC LIMIT 40").fetchall()]
+    media = [dict(r) for r in conn.execute(
+        "SELECT * FROM media_assets ORDER BY id DESC LIMIT 40").fetchall()]
+    sessions = [{"id": r["id"], "title": r["title"], "updated": r["updated"]}
+                for r in conn.execute("SELECT * FROM sessions ORDER BY updated DESC LIMIT 25").fetchall()]
+    pipelines = [{"id": r["id"], "name": r["name"], "updated": r["updated"]}
+                 for r in conn.execute("SELECT * FROM pipelines ORDER BY updated DESC LIMIT 25").fetchall()]
+    skills = [dict(r) for r in conn.execute(
+        "SELECT id, name, description, uses, updated FROM skills ORDER BY updated DESC LIMIT 25").fetchall()]
+    goals = [dict(r) for r in conn.execute(
+        "SELECT id, title, status, progress FROM goals ORDER BY id DESC LIMIT 25").fetchall()]
+    conn.close()
+    notes = []
+    vault = _vault_path()
+    for root, _, files in os.walk(vault):
+        if "/.git" in root or ".obsidian" in root:
+            continue
+        for f in files:
+            if not f.endswith(".md"):
+                continue
+            full = os.path.join(root, f)
+            try:
+                st = os.stat(full)
+                size = st.st_size
+                if size > 400_000:
+                    continue
+                rel = os.path.relpath(full, vault).replace("\\", "/")
+                with open(full, encoding="utf-8", errors="replace") as fh:
+                    head = fh.read(400)
+                title = head.splitlines()[0].lstrip("# ").strip() if head.splitlines() else f
+                notes.append({"rel": rel, "title": title[:120], "size": size,
+                              "mtime": st.st_mtime, "preview": head[:600]})
+            except Exception:
+                continue
+    notes.sort(key=lambda n: n["mtime"], reverse=True)
+    return jsonify({"status": "ok", "notes": notes[:80], "posts": posts, "media": media,
+                    "sessions": sessions, "pipelines": pipelines, "skills": skills, "goals": goals})
+
+
+# ---------------------------------------------------------------------------
+# 8. CONVERSATION CAPTURE — OMI-style daily log: the day's activity written to
+#    the vault so the system compounds even when nobody is watching.
+# ---------------------------------------------------------------------------
+def _today_str():
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _append_capture(note):
+    """Append a line to today's capture log + persist capture_log row."""
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        conn = _db()
+        conn.execute("INSERT INTO capture_log (ts, note) VALUES (?,?)", (ts, note))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+    vault = _vault_path()
+    d = os.path.join(vault, "02_Agent_Logs")
+    try:
+        os.makedirs(d, exist_ok=True)
+        fpath = os.path.join(d, f"{_today_str()}.md")
+        with open(fpath, "a", encoding="utf-8") as f:
+            f.write(f"- **{ts}** — {note}\n")
+    except Exception:
+        pass
+
+
+def _run_daily_capture(force=False):
+    """Write today's full activity digest to 02_Agent_Logs/<date>.md."""
+    vault = _vault_path()
+    d = os.path.join(vault, "02_Agent_Logs")
+    os.makedirs(d, exist_ok=True)
+    fpath = os.path.join(d, f"{_today_str()}.md")
+    if os.path.isfile(fpath) and not force:
+        return {"status": "exists", "file": f"02_Agent_Logs/{_today_str()}.md"}
+    today = _today_str()
+    conn = _db()
+    try:
+        convs = conn.execute("SELECT agent_id, messages FROM conversations").fetchall()
+        chats = 0
+        for c in convs:
+            try:
+                msgs = json.loads(c["messages"] or "[]")
+                chats += sum(1 for m in msgs if str(m.get("ts", ""))[:10] == today)
+            except Exception:
+                pass
+    except Exception:
+        chats = 0
+    try:
+        sess = conn.execute("SELECT COUNT(*) AS n FROM sessions WHERE substr(updated,1,10)=?", (today,)).fetchone()["n"]
+    except Exception:
+        sess = 0
+    try:
+        mem = conn.execute("SELECT COUNT(*) AS n FROM memory WHERE substr(updated,1,10)=? OR substr(ts,1,10)=?",
+                           (today, today)).fetchone()["n"]
+    except Exception:
+        mem = 0
+    try:
+        posts = conn.execute("SELECT COUNT(*) AS n FROM oracle_posts WHERE substr(created,1,10)=?", (today,)).fetchone()["n"]
+    except Exception:
+        posts = 0
+    try:
+        sigs = conn.execute("SELECT COUNT(*) AS n FROM media_assets WHERE substr(created,1,10)=?", (today,)).fetchone()["n"]
+    except Exception:
+        sigs = 0
+    conn.close()
+    body = (f"# Agentic OS Daily Log — {today}\n\n"
+            f"## Today's Numbers\n- Chat messages: **{chats}** · Sessions: **{sess}**\n"
+            f"- Memory notes: **{mem}** · Oracle posts: **{posts}** · Media generated: **{sigs}**\n\n"
+            f"## Capture Feed\n")
+    cap = []
+    try:
+        conn = _db()
+        cap = [{"ts": r["ts"], "note": r["note"]}
+               for r in conn.execute("SELECT * FROM capture_log WHERE substr(ts,1,10)=? ORDER BY id", (today,)).fetchall()]
+        conn.close()
+    except Exception:
+        pass
+    if cap:
+        body += "\n".join(f"- **{c['ts'][11:16]}** — {c['note']}" for c in cap) + "\n"
+    else:
+        body += "- (no manual captures today)\n"
+    goals = _goals_context(compact=False)
+    if goals:
+        body += f"\n## Active Goals\n{goals}\n"
+    body += "\n---\n*Auto-generated by the Agentic OS daily capture (OMI-style).*\n"
+    try:
+        with open(fpath, "w", encoding="utf-8") as f:
+            f.write(body)
+    except Exception:
+        return {"status": "error", "error": "vault write failed"}
+    _append_capture("Daily digest regenerated")
+    return {"status": "ok", "file": f"02_Agent_Logs/{_today_str()}.md",
+            "stats": {"chats": chats, "sessions": sess, "memory": mem, "posts": posts, "media": sigs}}
+
+
+def _capture_loop():
+    while True:
+        try:
+            _run_daily_capture()
+        except Exception:
+            pass
+        time.sleep(6 * 3600)  # every 6 hours
+
+
+@agentic_bp.route("/api/agentic/capture", methods=["POST", "OPTIONS"])
+def api_capture():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    note = (data.get("note") or "").strip()
+    if note:
+        _append_capture(note)
+        if not data.get("regenerate"):
+            return jsonify({"status": "ok", "logged": note})
+    res = _run_daily_capture(force=True)
+    return jsonify(res)
+
+
+# ---------------------------------------------------------------------------
+# Injection wiring: identity + skills into EVERY LLM call (all three chat paths
+# and crew/oracle go through _call_llm_with, so one hook covers them all).
+# ---------------------------------------------------------------------------
+def _inject_compounding_context(user_msg, sys_prompt):
+    """Return (user_msg, sys_prompt) with identity block + skills context added."""
+    try:
+        identity = _identity_block()
+        if identity and "WHO YOU ARE" not in (sys_prompt or ""):
+            sys_prompt = (sys_prompt or "") + identity
+        skills = _skills_context(user_msg)
+        if skills:
+            user_msg = user_msg + skills
+    except Exception:
+        pass
+    return user_msg, sys_prompt
+
+
+# Capture the ORIGINAL before rebinding — inside the wrapper, `_call_llm_with`
+# would already resolve to the wrapper itself (infinite recursion).
+_ORIG_CALL_LLM_WITH = _call_llm_with
+
+def _call_llm_with_compounding(overrides, user_msg, system_prompt=None, agent="hermes", timeout=25):
+    """_call_llm_with + compounding injection. Wraps the original function."""
+    user_msg, system_prompt = _inject_compounding_context(user_msg, system_prompt)
+    return _ORIG_CALL_LLM_WITH(overrides, user_msg, system_prompt=system_prompt, agent=agent, timeout=timeout)
+
+
+_call_llm_with = _call_llm_with_compounding
+
+# capture thread — mirrors the watchdog start pattern
+def _start_capture():
+    t = threading.Thread(target=_capture_loop, daemon=True)
+    t.start()
+
+if os.environ.get("APPVAULT_CAPTURE", "1") != "0":
+    try:
+        _start_capture()
+    except Exception:
+        pass
 
