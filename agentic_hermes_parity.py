@@ -121,7 +121,7 @@ def api_profile_switch(pid):
 
 
 @agentic_bp.route("/api/agentic/profiles/<int:pid>", methods=["PUT", "DELETE", "OPTIONS"])
-def api_profile(pid):
+def api_profile_item(pid):
     if request.method == "OPTIONS":
         return jsonify({"status": "ok"})
     conn = _db()
@@ -573,3 +573,162 @@ if os.environ.get("APPVAULT_CRON", "1") != "0":
         _start_cron()
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# PER-AGENT SESSIONS (threads) — sessions under every roster agent. hermes
+# keeps its `sessions` table; every other agent gets threads in agent_threads
+# + conversation_messages (thread_id). Legacy conversations migrate to 'main'.
+# ---------------------------------------------------------------------------
+def _init_thread_tables():
+    conn = _db()
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS conversation_messages (
+        agent_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL DEFAULT 'main',
+        messages TEXT, updated TEXT,
+        PRIMARY KEY (agent_id, thread_id)
+    );
+    CREATE TABLE IF NOT EXISTS agent_threads (
+        id TEXT PRIMARY KEY,
+        agent TEXT, title TEXT, message_count INTEGER DEFAULT 0,
+        created TEXT, updated TEXT
+    );
+    """)
+    conn.commit()
+    try:
+        rows = conn.execute("SELECT agent_id, messages FROM conversations").fetchall()
+        for r in rows:
+            conn.execute("INSERT OR IGNORE INTO conversation_messages (agent_id, thread_id, messages, updated) "
+                         "VALUES (?,?,?,?)", (r["agent_id"], "main", r["messages"],
+                                              datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        conn.commit()
+    except Exception:
+        pass
+    conn.close()
+
+
+_init_thread_tables()
+
+
+# Thread-aware conversation storage (shadows the legacy _get/_save_conversation —
+# same signatures, callers with one arg keep working via thread_id='main').
+def _get_conversation(agent_id, thread_id="main"):
+    conn = _db()
+    row = conn.execute("SELECT messages FROM conversation_messages WHERE agent_id=? AND thread_id=?",
+                       (agent_id, thread_id)).fetchone()
+    conn.close()
+    if row:
+        try:
+            return json.loads(row["messages"])
+        except Exception:
+            pass
+    conn = _db()
+    row = conn.execute("SELECT messages FROM conversations WHERE agent_id=?", (agent_id,)).fetchone()
+    conn.close()
+    if row:
+        try:
+            return json.loads(row["messages"])
+        except Exception:
+            pass
+    return [{"sender": f"{agent_id.capitalize()} Agent", "role": "agent",
+             "timestamp": "NOW",
+             "text": f"Agent **{agent_id.capitalize()}** online. Connected to the Agentic OS control plane."}]
+
+
+def _save_conversation(agent_id, messages, thread_id="main"):
+    conn = _db()
+    conn.execute("INSERT INTO conversation_messages (agent_id, thread_id, messages, updated) VALUES (?,?,?,?) "
+                 "ON CONFLICT(agent_id, thread_id) DO UPDATE SET messages=excluded.messages, updated=excluded.updated",
+                 (agent_id, thread_id, json.dumps(messages),
+                  datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    conn.execute("UPDATE agent_threads SET message_count=?, updated=? WHERE agent=? AND id=?",
+                 (len(messages), datetime.now().strftime("%Y-%m-%d %H:%M:%S"), agent_id, thread_id))
+    conn.commit()
+    conn.close()
+
+
+def _create_agent_thread(agent, title):
+    tid = f"t-{int(time.time()*1000)}"
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = _db()
+    conn.execute("INSERT INTO agent_threads (id, agent, title, message_count, created, updated) VALUES (?,?,?,0,?,?)",
+                 (tid, agent, (title or f"Session {datetime.now().strftime('%H:%M:%S')}"), now, now))
+    conn.commit()
+    conn.close()
+    return tid
+
+
+def _roster_sessions_map():
+    """{agent_id: [{id, title, message_count, updated}]} — hermes from the
+    sessions table, every other agent from agent_threads."""
+    out = {}
+    try:
+        for s in _list_sessions():
+            out.setdefault("hermes", []).append({
+                "id": s["id"], "title": s["title"],
+                "message_count": s.get("message_count", 0),
+                "updated": s.get("updated", s.get("created_at", ""))})
+    except Exception:
+        pass
+    conn = _db()
+    rows = conn.execute("SELECT id, agent, title, message_count, updated FROM agent_threads ORDER BY updated DESC").fetchall()
+    conn.close()
+    for r in rows:
+        out.setdefault(r["agent"], []).append({
+            "id": r["id"], "title": r["title"], "message_count": r["message_count"],
+            "updated": r["updated"] or ""})
+    return out
+
+
+@agentic_bp.route("/api/agentic/roster/sessions", methods=["GET", "POST", "OPTIONS"])
+def api_roster_sessions():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "POST":
+        data = request.get_json() or {}
+        agent = (data.get("agent") or "hermes").lower()
+        title = (data.get("title") or "").strip()
+        if agent == "hermes":
+            sid = f"session-{int(time.time()*1000)}"
+            _save_session(sid, title or f"Hermes Session {datetime.now().strftime('%H:%M:%S')}", [])
+            _audit("store", "session.new", f"roster: '{title}' ({sid})")
+            return jsonify({"status": "ok", "session_id": sid})
+        tid = _create_agent_thread(agent, title)
+        _audit("store", "thread.new", f"roster: '{agent}' thread '{title}' ({tid})")
+        return jsonify({"status": "ok", "session_id": tid})
+    return jsonify({"status": "ok", "sessions": _roster_sessions_map()})
+
+
+@agentic_bp.route("/api/agentic/roster/sessions/<agent>/<thread_id>", methods=["GET", "DELETE", "OPTIONS"])
+def api_roster_thread(agent, thread_id):
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    agent = agent.lower()
+    if request.method == "DELETE":
+        if agent == "hermes":
+            conn = _db()
+            conn.execute("DELETE FROM sessions WHERE id=?", (thread_id,))
+            conn.commit()
+            conn.close()
+        else:
+            conn = _db()
+            conn.execute("DELETE FROM agent_threads WHERE id=?", (thread_id,))
+            conn.execute("DELETE FROM conversation_messages WHERE agent_id=? AND thread_id=?", (agent, thread_id))
+            conn.commit()
+            conn.close()
+        _audit("store", "session.delete", f"'{agent}' {thread_id}")
+        return jsonify({"status": "ok"})
+    if agent == "hermes":
+        sess = _get_session(thread_id)
+        if not sess:
+            return jsonify({"error": "session not found"}), 404
+        return jsonify({"status": "ok", "messages": sess["messages"]})
+    msgs = _get_conversation(agent, thread_id)
+    if isinstance(msgs, list) and msgs and msgs[0].get("text", "").startswith("Agent **"):
+        conn = _db()
+        t = conn.execute("SELECT id FROM agent_threads WHERE id=?", (thread_id,)).fetchone()
+        conn.close()
+        if not t:
+            return jsonify({"error": "thread not found"}), 404
+    return jsonify({"status": "ok", "messages": msgs})
