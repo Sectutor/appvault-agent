@@ -1504,17 +1504,24 @@ def api_conversation(agent_id):
             ctx = _memory_context(user_msg)
             clean_msg, skill_row = _maybe_extract_skill(user_msg)
             skill_sys = None
+            action_reply = None
             if skill_row:
-                skill_sys = (f"You are applying the skill '{skill_row['name']}'. Follow its "
-                             f"instructions EXACTLY. Output the result, no preamble.\n\n"
-                             f"===== SKILL =====\n{_load_skill_content(skill_row)}")
-                conn = _db()
-                conn.execute("UPDATE skills SET uses=uses+1 WHERE id=?", (skill_row["id"],))
-                conn.commit()
-                conn.close()
-                _audit("store", "skill.chat", f"@{skill_row['name']} applied in hermes chat")
-            reply = _call_llm(clean_msg + (("\n\n" + ctx) if ctx else ""), agent=agent_id,
-                              system_prompt=skill_sys)
+                # ACTION skills execute a backend handler (e.g. WordPress publish)
+                action_reply = _run_skill_action(skill_row, clean_msg)
+                if action_reply is not None:
+                    reply = action_reply
+                else:
+                    skill_sys = (f"You are applying the skill '{skill_row['name']}'. Follow its "
+                                 f"instructions EXACTLY. Output the result, no preamble.\n\n"
+                                 f"===== SKILL =====\n{_load_skill_content(skill_row)}")
+                    conn = _db()
+                    conn.execute("UPDATE skills SET uses=uses+1 WHERE id=?", (skill_row["id"],))
+                    conn.commit()
+                    conn.close()
+                    _audit("store", "skill.chat", f"@{skill_row['name']} applied in hermes chat")
+            if action_reply is None:
+                reply = _call_llm(clean_msg + (("\n\n" + ctx) if ctx else ""), agent=agent_id,
+                                  system_prompt=skill_sys)
 
         except Exception as e:
             reply = (f"⚠️ {agent_name} could not reach any LLM backend. Configure one at "
@@ -2111,6 +2118,7 @@ PIPELINE_NODE_TYPES = {
     "delay":      {"label": "⏳ Delay",           "desc": "Wait N seconds before next step", "fields": ["seconds"]},
     "consortium": {"label": "🌐 Consortium",     "desc": "Ask N providers, summarize consensus", "fields": ["question", "providers"]},
     "skill":      {"label": "📚 Skill Apply",    "desc": "Apply an imported skill to text", "fields": ["skill", "text"]},
+    "wordpress":  {"label": "🚀 WordPress",      "desc": "Publish to WordPress via the REST tool", "fields": ["title", "content", "status"]},
 }
 
 
@@ -2228,6 +2236,14 @@ def _exec_pipeline_node(ntype, cfg, outputs):
         if not row:
             return {"error": f"skill '{skill_name}' not found — import it first"}
         return {"applied": _apply_skill(dict(row), text)}
+    if ntype == "wordpress":
+        title = _resolve_tpl(cfg.get("title", "Post from pipeline"), outputs)
+        content = _resolve_tpl(cfg.get("content", ""), outputs)
+        status = _resolve_tpl(cfg.get("status", "publish"), outputs)
+        ok, res = _wp_publish(title, content, status)
+        if ok and isinstance(res, dict):
+            return {"ok": True, "link": res.get("link"), "post_id": res.get("id")}
+        return {"ok": False, "error": str(res)[:300]}
     raise ValueError(f"Unknown node type: {ntype}")
 
 
@@ -3081,6 +3097,20 @@ def api_seo_generate():
                 _audit("store", "skill.seo-pass", f"@{skill_name} applied to SEO draft")
         except Exception:
             pass
+    # optional publish-to-WordPress flag
+    wp_link = None
+    wp_error = None
+    if data.get("publish"):
+        try:
+            t = re.search(r"^#\s+(.+)$", content, re.M)
+            wp_title = t.group(1).strip() if t else title_seed
+            okp, resp = _wp_publish(wp_title, content, "publish")
+            if okp:
+                wp_link = resp.get("link")
+            else:
+                wp_error = str(resp)[:200]
+        except Exception as e:
+            wp_error = str(e)[:200]
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn = _db()
     cur = conn.execute(
@@ -3092,7 +3122,8 @@ def api_seo_generate():
     _write_vault_output("04_Projects/Outputs", f"SEO_{int(time.time())}.md",
                         f"# SEO Article — {title_seed}\n\n**Cluster:** {cluster}\n\n{content}\n",
                         tag="SEO Article", agent="Oracle SEO")
-    return jsonify({"status": "ok", "post_id": post_id, "content": content, "cluster": cluster})
+    return jsonify({"status": "ok", "post_id": post_id, "content": content, "cluster": cluster,
+                    "wp_link": wp_link, "wp_error": wp_error})
 
 
 # ---------------------------------------------------------------------------
@@ -3190,7 +3221,7 @@ def api_media_file(fname):
 # ---------------------------------------------------------------------------
 # 5. SKILLS LIBRARY — reusable skill documents (the Hermes compounding pattern)
 # ---------------------------------------------------------------------------
-def _save_skill(name, description, content, source="auto", tools=None):
+def _save_skill(name, description, content, source="auto", tools=None, kind="prompt"):
     """Insert or update a skill doc (dedup by name). Returns id or None."""
     try:
         name = (name or "").strip()
@@ -3202,13 +3233,13 @@ def _save_skill(name, description, content, source="auto", tools=None):
         conn = _db()
         row = conn.execute("SELECT * FROM skills WHERE name=?", (name,)).fetchone()
         if row:
-            conn.execute("UPDATE skills SET description=?, content=?, source=?, tools=?, updated=?, uses=uses+1 WHERE id=?",
-                         (description or "", content or row["content"], source, tools_csv, now, row["id"]))
+            conn.execute("UPDATE skills SET description=?, content=?, source=?, tools=?, kind=?, updated=?, uses=uses+1 WHERE id=?",
+                         (description or "", content or row["content"], source, tools_csv, kind, now, row["id"]))
             sid = row["id"]
         else:
             cur = conn.execute(
-                "INSERT INTO skills (name, description, content, source, tools, uses, created, updated) "
-                "VALUES (?,?,?,?,?,0,?,?)", (name, description or "", content, source, tools_csv, now, now))
+                "INSERT INTO skills (name, description, content, source, tools, kind, uses, created, updated) "
+                "VALUES (?,?,?,?,?,?,0,?,?)", (name, description or "", content, source, tools_csv, kind, now, now))
             sid = cur.lastrowid
         conn.commit()
         conn.close()
@@ -4066,6 +4097,23 @@ _ROUTER_AGENT_KEYWORDS = {
 def _router_reply(message, agent_id="v", source="store"):
     """Route a message to the right capability; persist the conversation."""
     msg = (message or "").strip()
+    # skills take priority over keyword routing (@skill anywhere at the start)
+    skill_msg, skill_row = _maybe_extract_skill(msg)
+    if skill_row:
+        action_reply = _run_skill_action(skill_row, skill_msg)
+        if action_reply is not None:
+            return action_reply
+        ctx = _memory_context(skill_msg)
+        conn = _db()
+        conn.execute("UPDATE skills SET uses=uses+1 WHERE id=?", (skill_row["id"],))
+        conn.commit()
+        conn.close()
+        _audit("store", "skill.chat", f"@{skill_row['name']} applied in V router")
+        sys_prompt = (f"You are applying the skill '{skill_row['name']}'. Follow its "
+                      f"instructions EXACTLY. Output the result, no preamble.\n\n"
+                      f"===== SKILL =====\n{_load_skill_content(skill_row)}")
+        return _call_llm_with({}, skill_msg + (f"\n\n{ctx}" if ctx else ""),
+                              system_prompt=sys_prompt, agent="hermes", timeout=60)
     low = msg.lower()
     route = "chat"
     for cap, kws in _ROUTER_AGENT_KEYWORDS.items():
@@ -4149,21 +4197,8 @@ def _router_reply(message, agent_id="v", source="store"):
             return f"📝 Drafted a LinkedIn post from live signals (saved to vault + posts pipeline):\n\n{content[:900]}"
         except Exception as e:
             return f"⚠️ Content generation failed: {str(e)[:200]}"
-    # knowledge + default: full-context chat (identity + memory + vault + skills);
-    # @skill invocation applies an imported skill to the message
+    # knowledge + default: full-context chat (identity + memory + vault + skills)
     ctx = _memory_context(msg)
-    clean_msg, skill_row = _maybe_extract_skill(msg)
-    if skill_row:
-        conn = _db()
-        conn.execute("UPDATE skills SET uses=uses+1 WHERE id=?", (skill_row["id"],))
-        conn.commit()
-        conn.close()
-        _audit("store", "skill.chat", f"@{skill_row['name']} applied in V router")
-        sys_prompt = (f"You are applying the skill '{skill_row['name']}'. Follow its "
-                      f"instructions EXACTLY. Output the result, no preamble.\n\n"
-                      f"===== SKILL =====\n{_load_skill_content(skill_row)}")
-        return _call_llm_with({}, clean_msg + (f"\n\n{ctx}" if ctx else ""),
-                              system_prompt=sys_prompt, agent="hermes", timeout=60)
     try:
         return _call_llm_with({}, f"Question: {msg}\n\n{ctx if ctx else ''}",
                               agent="hermes", timeout=60)
@@ -4687,19 +4722,277 @@ def api_skill_apply(sid):
 
 
 def _maybe_extract_skill(msg):
-    """If the message starts with @<skillname>, return (rest_of_message, skill_row)."""
+    """If the message starts with @<skillname>, return (rest_of_message, skill_row).
+    Skill names may contain spaces — match the LONGEST skill-name prefix (with a
+    word boundary), so '@WordPress publishing <text>' binds the full name, not
+    just 'WordPress'."""
     msg = (msg or "").strip()
-    m = re.match(r"^@([\w\- ]+?)\s+(.+)$", msg, re.S)
-    if not m:
+    if not msg.startswith("@"):
         return msg, None
-    name = m.group(1).strip()
+    rest = msg[1:]
     try:
         conn = _db()
-        row = conn.execute("SELECT * FROM skills WHERE lower(name)=lower(?) LIMIT 1", (name,)).fetchone()
+        names = [r["name"] for r in conn.execute("SELECT name FROM skills").fetchall()]
+        conn.close()
+    except Exception:
+        names = []
+    best = None
+    best_len = 0
+    norm_rest = rest.lower().replace("-", " ")
+    for n in names:
+        if not n:
+            continue
+        nn = n.lower().replace("-", " ")
+        if not norm_rest.startswith(nn):
+            continue
+        after = rest[len(n):]
+        if after and not after[0].isspace():
+            continue  # boundary: next char must be whitespace or end
+        if len(n) > best_len:
+            best, best_len = n, len(n)
+    if not best:
+        return msg, None
+    try:
+        conn = _db()
+        row = conn.execute("SELECT * FROM skills WHERE lower(replace(name,'-',' '))=lower(replace(?,'-',' ')) LIMIT 1",
+                           (best,)).fetchone()
         conn.close()
     except Exception:
         row = None
     if row:
-        return m.group(2).strip(), dict(row)
+        return rest[best_len:].strip(), dict(row)
     return msg, None
+
+
+# =============================================================================
+# WORDPRESS TOOL (2026-08-08) — the first REAL external tool: WordPress REST
+# API publishing via Application Passwords. Wired as: an action-skill (chat
+# @wordpress-publishing executes the publish instead of an LLM pass), a
+# pipeline node, an SEO final-publish flag, and a Gov-page config card.
+# stdlib-only; Basic auth; every route has an OPTIONS guard.
+# =============================================================================
+import base64
+
+def _wp_config():
+    raw = _cfg_get("wp_tool") or ""
+    try:
+        return json.loads(raw) if raw else {}
+    except Exception:
+        return {}
+
+
+def _wp_save_config(patch):
+    cfg = _wp_config()
+    for k in ("site_url", "username", "app_password"):
+        if patch.get(k) is not None:
+            cfg[k] = str(patch.get(k)).strip()
+    _cfg_set("wp_tool", json.dumps(cfg))
+    _audit("store", "wp.config", "wordpress tool config saved")
+    return cfg
+
+
+def _wp_auth_headers():
+    cfg = _wp_config()
+    user = (cfg.get("username") or "").strip()
+    pw = (cfg.get("app_password") or "").strip()
+    if not user or not pw:
+        return None
+    token = base64.b64encode(f"{user}:{pw}".encode("utf-8")).decode("ascii")
+    return {"Authorization": f"Basic {token}"}
+
+
+def _wp_publish(title, content, status="publish"):
+    """Create a WordPress post via the REST API. Returns (ok, result)."""
+    cfg = _wp_config()
+    site = (cfg.get("site_url") or "").strip().rstrip("/")
+    if not site:
+        return False, "not configured — add site URL in 🛡️ Gov → WordPress Publisher"
+    hdrs = _wp_auth_headers()
+    if not hdrs:
+        return False, "not configured — add username + app password in 🛡️ Gov → WordPress Publisher"
+    data, code = _http(f"{site}/wp-json/wp/v2/posts", method="POST", headers=hdrs,
+                       json_data={"title": str(title)[:200], "content": str(content),
+                                  "status": status if status in ("publish", "draft", "pending", "private") else "draft"},
+                       timeout=40)
+    if code in (200, 201) and isinstance(data, dict):
+        return True, {"id": data.get("id"), "link": data.get("link"),
+                      "status": data.get("status"), "title": (data.get("title") or {}).get("rendered", title)}
+    return False, f"HTTP {code}: {str(data)[:300]}"
+
+
+def _wp_test():
+    """Verify credentials: GET /wp-json/wp/v2/posts?per_page=1."""
+    cfg = _wp_config()
+    site = (cfg.get("site_url") or "").strip().rstrip("/")
+    if not site:
+        return False, "no site URL configured"
+    hdrs = _wp_auth_headers()
+    if not hdrs:
+        return False, "no credentials configured"
+    data, code = _http(f"{site}/wp-json/wp/v2/posts?per_page=1", headers=hdrs, timeout=25)
+    if code == 200:
+        n = len(data) if isinstance(data, list) else "?"
+        return True, f"auth OK — API reachable (sample: {n} post)"
+    return False, f"HTTP {code}: {str(data)[:300]}"
+
+
+def _parse_wp_payload(msg):
+    """Parse 'title: X\\ncontent' | JSON payload | plain content. Returns (title, content, status)."""
+    msg = (msg or "").strip()
+    status = "publish"
+    try:
+        obj = json.loads(msg)
+        if isinstance(obj, dict):
+            return str(obj.get("title") or "")[:200], str(obj.get("content") or ""), str(obj.get("status") or "publish")
+    except Exception:
+        pass
+    lines = msg.split("\n", 1)
+    first = lines[0].strip()
+    m = re.match(r"^title:\s*(.+)$", first, re.I)
+    if m and len(lines) > 1:
+        return m.group(1).strip()[:200], lines[1].strip(), status
+    if m:
+        return m.group(1).strip()[:200], "", status
+    return first[:80], msg, status
+
+
+def _action_wp_publish(msg):
+    """Action-skill handler for @wordpress-publishing in chat."""
+    title, content, status = _parse_wp_payload(msg)
+    if not content:
+        return ("⚠️ Nothing to publish — send the article content after @wordpress-publishing "
+                "(or use `title: My post` + content lines).")
+    ok, res = _wp_publish(title or f"Post from AppVault {datetime.now().strftime('%Y-%m-%d %H:%M')}", content, status)
+    _audit("chat", "wp.publish", f"{'ok' if ok else 'failed'} :: {res.get('link', str(res)[:120]) if isinstance(res, dict) else str(res)[:120]}")
+    if ok:
+        return (f"✅ **Published to WordPress** — [post #{res.get('id')}] ({res.get('link')}) "
+                f"· status: {res.get('status')}")
+    return f"⚠️ WordPress publish failed: {res}"
+
+
+def _run_skill_action(skill_row, msg):
+    """If the skill is an ACTION skill, execute its backend handler (else None)."""
+    if (skill_row or {}).get("kind") != "action":
+        return None
+    key = (skill_row.get("name") or "").lower().replace("-", " ")
+    handler = _ACTION_SKILL_HANDLERS.get(key)
+    if not handler:
+        return None
+    try:
+        return handler(msg)
+    except Exception as e:
+        return f"⚠️ Skill action failed: {str(e)[:200]}"
+
+
+_ACTION_SKILL_HANDLERS = {
+    "wordpress publishing": _action_wp_publish,
+    "wordpress-publishing": _action_wp_publish,
+}
+
+
+def _seed_wp_skill():
+    """Replace the test stub with the REAL WordPress publishing skill (no uses bump)."""
+    real_content = (
+        "# WordPress Publishing\n\n"
+        "Publish articles to your WordPress site through the built-in WordPress tool "
+        "(REST API + Application Passwords).\n\n"
+        "## When to Use\n- User asks to publish an article, blog post, or piece of content to WordPress\n"
+        "- A generated draft should go live (SEO articles, Oracle posts)\n"
+        "- A pipeline ends with 'publish to WordPress'\n\n"
+        "## How It Works\n"
+        "The tool is configured in 🛡️ Gov → WordPress Publisher (site URL, username, app password). "
+        "You do NOT need to write any API code — publishing is executed for you.\n\n"
+        "## Workflow\n"
+        "1. Accept the article title + full content (markdown or HTML).\n"
+        "2. If only raw text is given, derive a title from the first line.\n"
+        "3. Publish via the WordPress tool; report the post link + status back.\n"
+        "4. Never fabricate a published URL — only report what the tool returns.\n\n"
+        "## Environment Note\n"
+        "You are in a text-only agent. Do not attempt to call WordPress APIs yourself — "
+        "the tool runs for you. Just present title + content; the publish happens automatically.\n"
+    )
+    conn = _db()
+    # normalize: 'wordpress-publishing' == 'WordPress publishing' (hyphens == spaces)
+    rows = conn.execute(
+        "SELECT * FROM skills WHERE lower(replace(name,'-',' '))=lower(replace('wordpress-publishing','-',' '))"
+    ).fetchall()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if rows:
+        keep = rows[0]
+        for r in rows[1:]:
+            conn.execute("DELETE FROM skills WHERE id=?", (r["id"],))
+        conn.execute(
+            "UPDATE skills SET name='WordPress publishing', content=?, description=?, kind='action', "
+            "source='builtin:wordpress', tools='wordpress', updated=? WHERE id=?",
+            (real_content, "Publish articles to WordPress via the built-in REST tool (action skill — "
+             "@wordpress-publishing <content> publishes directly).", now, keep["id"]))
+    else:
+        conn.execute("INSERT INTO skills (name, description, content, source, tools, kind, uses, created, updated) "
+                     "VALUES (?,?,?,?,?,?,0,?,?)",
+                     ("WordPress publishing", "Publish articles to WordPress via the built-in REST tool (action "
+                      "skill — @wordpress-publishing <content> publishes directly).",
+                      real_content, "builtin:wordpress", "wordpress", "action", now, now))
+    conn.commit()
+    conn.close()
+
+
+# kind column for skills (prompt | action)
+def _migrate_skills_kind():
+    conn = _db()
+    try:
+        conn.execute("ALTER TABLE skills ADD COLUMN kind TEXT DEFAULT 'prompt'")
+        conn.commit()
+    except Exception:
+        pass
+    conn.close()
+
+
+_migrate_skills_kind()
+_seed_wp_skill()
+
+
+@agentic_bp.route("/api/agentic/tools/wordpress/config", methods=["GET", "POST", "OPTIONS"])
+def api_wp_config():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "POST":
+        data = request.get_json() or {}
+        cfg = _wp_save_config(data)
+        return jsonify({"status": "ok", "config": {
+            "site_url": cfg.get("site_url", ""),
+            "username": cfg.get("username", ""),
+            "app_password": ("********" if cfg.get("app_password") else ""),
+        }})
+    cfg = _wp_config()
+    return jsonify({"status": "ok", "config": {
+        "site_url": cfg.get("site_url", ""),
+        "username": cfg.get("username", ""),
+        "app_password": ("********" if cfg.get("app_password") else ""),
+    }})
+
+
+@agentic_bp.route("/api/agentic/tools/wordpress/test", methods=["POST", "OPTIONS"])
+def api_wp_test():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    ok, res = _wp_test()
+    _audit("store", "wp.test", "ok" if ok else f"failed: {res[:120]}")
+    return jsonify({"status": "ok" if ok else "error", "detail": res})
+
+
+@agentic_bp.route("/api/agentic/tools/wordpress/publish", methods=["POST", "OPTIONS"])
+def api_wp_publish():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    content = (data.get("content") or "").strip()
+    if not content:
+        return jsonify({"error": "content required"}), 400
+    ok, res = _wp_publish(data.get("title") or "Post from AppVault", content,
+                          (data.get("status") or "publish"))
+    _audit("store", "wp.publish", f"{'ok' if ok else 'failed'} :: {res.get('link', str(res)[:150]) if isinstance(res, dict) else str(res)[:150]}")
+    if ok:
+        return jsonify({"status": "ok", "post_id": res.get("id"), "link": res.get("link"),
+                        "post_status": res.get("status")})
+    return jsonify({"status": "error", "error": res}), 502
 
