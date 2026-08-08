@@ -5465,6 +5465,7 @@ def _slash_help():
             "- `/memory [n]` — recent shared memory\n"
             "- `/status` — agent fleet status\n"
             "- `/goals` — active goals\n"
+            "- `/mcp` — list/configure MCP servers · `/mcp <server> <tool> {json}` calls an MCP tool\n"
             "Schedules: `hourly` `daily` `weekly` `every 30m` `HH:MM` `mon:09:00`")
 
 
@@ -5617,6 +5618,8 @@ def _handle_slash_command(msg, agent_id="hermes"):
     if cmd == "/goals":
         goals = _goals_context(compact=False)
         return ("**Active goals:**\n" + goals) if goals else "No active goals — add some on the 🎯 Goals page."
+    if cmd == "/mcp":
+        return _slash_mcp(args)
     return (f"Unknown command `{cmd}`.\n\n" + _slash_help())
 
 
@@ -5784,4 +5787,175 @@ def api_roster_thread(agent, thread_id):
         if not t:
             return jsonify({"error": "thread not found"}), 404
     return jsonify({"status": "ok", "messages": msgs})
+
+
+# =============================================================================
+# MCP CLIENT (2026-08-08) — the agentic plane can CALL external MCP servers
+# (including our own gateway on :8087). Minimal stdlib JSON-RPC over HTTP.
+# Config: `mcp_servers` in the config table = JSON list of
+#   {"name": "...", "url": "http://host:port/mcp", "api_key": "..."}
+# Chat: /mcp · /mcp <server> · /mcp <server> <tool> [json args] · /mcp add name|url|key
+# =============================================================================
+def _mcp_servers():
+    raw = _cfg_get("mcp_servers") or ""
+    try:
+        servers = json.loads(raw) if raw else []
+        return servers if isinstance(servers, list) else []
+    except Exception:
+        return []
+
+
+def _mcp_save_servers(servers):
+    _cfg_set("mcp_servers", json.dumps(servers, indent=1))
+
+
+def _mcp_jsonrpc(url, payload, api_key=None, timeout=30, session=None):
+    headers = {"Content-Type": "application/json",
+               "Accept": "application/json, text/event-stream"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    if session:
+        headers["Mcp-Session-Id"] = session
+    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
+                                 headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        sid = r.headers.get("Mcp-Session-Id")
+        body = r.read().decode("utf-8", "replace")
+    # strip SSE framing if the server responds event-stream; a 202 notification
+    # ack has an EMPTY body (not an error)
+    if body.lstrip().startswith("event:") or "\ndata:" in body:
+        lines = [ln[5:].strip() for ln in body.splitlines() if ln.startswith("data:")]
+        body = "\n".join(lines)
+    if not body.strip():
+        return sid, None
+    return sid, json.loads(body)
+
+
+_MCP_SESSIONS = {}
+
+
+def _mcp_session(server):
+    """Return a valid Mcp-Session-Id for the server, handshaking if needed."""
+    url = (server.get("url") or "").rstrip("/")
+    key = server.get("api_key") or ""
+    sid = _MCP_SESSIONS.get(url)
+    if sid:
+        return sid
+    sid, init = _mcp_jsonrpc(url, {
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-03-26", "capabilities": {},
+                   "clientInfo": {"name": "appvault-agentic", "version": "1.0"}}}, key)
+    if sid:
+        _MCP_SESSIONS[url] = sid
+    try:
+        _mcp_jsonrpc(url, {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                     key, timeout=5, session=sid)
+    except Exception:
+        pass
+    return sid
+
+
+def _mcp_tools(server):
+    url = (server.get("url") or "").rstrip("/")
+    key = server.get("api_key") or ""
+    for attempt in range(2):
+        try:
+            sid = _mcp_session(server)
+            _, res = _mcp_jsonrpc(url, {"jsonrpc": "2.0", "id": 2,
+                                        "method": "tools/list", "params": {}}, key, session=sid)
+            if not res:
+                return {"error": "empty response from MCP server"}
+            return (res.get("result") or {}).get("tools", [])
+        except urllib.error.HTTPError as e:
+            if e.code == 400 and attempt == 0:
+                _MCP_SESSIONS.pop(url, None)  # stale session (server restarted)
+                continue
+            return {"error": f"HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:150]}"}
+        except Exception as e:
+            return {"error": str(e)[:200]}
+    return {"error": "session retry exhausted"}
+
+
+def _mcp_call(server, tool, args):
+    url = (server.get("url") or "").rstrip("/")
+    key = server.get("api_key") or ""
+    for attempt in range(2):
+        try:
+            sid = _mcp_session(server)
+            _, res = _mcp_jsonrpc(url, {
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": tool, "arguments": args or {}}}, key, timeout=120, session=sid)
+            if not res:
+                return "⚠️ empty response from MCP server"
+            result = res.get("result") or {}
+            content = result.get("content") or []
+            out = "\n".join(str(c.get("text") or c.get("content") or "")
+                            for c in content if isinstance(c, dict))
+            if not out:
+                out = json.dumps(result)[:600]
+            if result.get("isError"):
+                return f"⚠️ MCP error from {tool}: {str(out)[:400]}"
+            return str(out)[:2000]
+        except urllib.error.HTTPError as e:
+            if e.code == 400 and attempt == 0:
+                _MCP_SESSIONS.pop(url, None)
+                continue
+            return f"⚠️ MCP HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:150]}"
+        except Exception as e:
+            return f"⚠️ MCP call failed: {str(e)[:200]}"
+    return "⚠️ MCP call failed: session retry exhausted"
+
+
+def _slash_mcp(args):
+    m_add = re.match(r"^add\s+(.+)$", args, re.S)
+    if m_add:
+        parts = [p.strip() for p in m_add.group(1).split("|")]
+        if len(parts) >= 2:
+            name, url = parts[0], parts[1]
+            key = parts[2] if len(parts) > 2 else ""
+            if not url.startswith("http"):
+                return "⚠️ URL must start with http(s)://"
+            servers = _mcp_servers()
+            servers = [s for s in servers if s.get("name") != name]
+            servers.append({"name": name, "url": url, "api_key": key})
+            _mcp_save_servers(servers)
+            return f"✅ MCP server '{name}' added ({url}). Try: /mcp {name}"
+        return "⚠️ Usage: /mcp add <name>|<url>|<api-key-optional>"
+    m_del = re.match(r"^del\s+(\S+)$", args)
+    if m_del:
+        _mcp_save_servers([s for s in _mcp_servers() if s.get("name") != m_del.group(1)])
+        return f"🗑 MCP server '{m_del.group(1)}' removed"
+    servers = _mcp_servers()
+    if not args.strip():
+        if not servers:
+            return ("No MCP servers configured. Add one:\n"
+                    "`/mcp add my-server|http://host:port/mcp|optional-api-key`\n"
+                    "Try our own gateway: `/mcp add appvault|http://localhost:8087/mcp`")
+        lines = [f"- **{s['name']}** · {s.get('url')}" for s in servers]
+        return ("**MCP servers:**\n" + "\n".join(lines) +
+                "\n\n`/mcp <server>` lists its tools · `/mcp <server> <tool> {json}` calls one")
+    # token parse: server [tool [json-args]] — server names have NO spaces
+    m = re.match(r"^(\S+)(?:\s+(.+))?$", args.strip())
+    srv_name = m.group(1)
+    rest = (m.group(2) or "").strip()
+    srv = next((s for s in servers if s.get("name", "").lower() == srv_name.lower()), None)
+    if not srv:
+        return f"⚠️ No server named '{srv_name}' — /mcp to list"
+    if not rest:
+        tools = _mcp_tools(srv)
+        if isinstance(tools, dict) and tools.get("error"):
+            return f"⚠️ {tools['error']}"
+        if not tools:
+            return f"Server '{srv_name}' exposes no tools."
+        lines = [f"- **{t.get('name')}** — {t.get('description', '')[:90]}" for t in tools[:25]]
+        return f"**Tools on '{srv_name}' ({len(tools)}):**\n" + "\n".join(lines)
+    m2 = re.match(r"^(\S+)(?:\s+(.+))?$", rest)
+    tool = m2.group(1)
+    args_json = (m2.group(2) or "").strip()
+    try:
+        call_args = json.loads(args_json) if args_json else {}
+    except Exception:
+        return "⚠️ Arguments must be valid JSON (e.g. {\"message\": \"hi\"})"
+    _audit("chat", "mcp.call", f"{srv['name']}:{tool}")
+    return _mcp_call(srv, tool, call_args)
 

@@ -170,14 +170,42 @@ def container_status(name: str) -> str:
 # LOCAL CATALOG CACHE
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
+def _merge_mcp_manifests(catalog):
+    """Merge local per-app MCP tool manifests into a catalog dict (in place).
+    Survives central sync because callers re-apply it after every refresh."""
+    try:
+        _manifests_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mcp_manifests.json")
+        if not os.path.exists(_manifests_path):
+            return catalog
+        with open(_manifests_path, encoding="utf-8") as _f:
+            manifests = json.load(_f)
+        for _app in catalog.get("apps", []):
+            _mf = manifests.get(_app.get("id"))
+            if not _mf:
+                continue
+            _mcp = _app.setdefault("mcp", {})
+            _existing = {t.get("name") for t in _mcp.get("tools", [])}
+            for _td in _mf.get("tools", []):
+                if _td.get("name") and _td["name"] not in _existing:
+                    _mcp.setdefault("tools", []).append(_td)
+            if _mf.get("credential"):
+                _mcp.setdefault("credential", _mf["credential"])
+    except Exception as _e:
+        print(f"[agent] mcp manifests merge failed: {_e}")
+    return catalog
+
 def load_catalog_cache():
     if os.path.exists(CATALOG_CACHE_PATH):
         try:
             with open(CATALOG_CACHE_PATH) as f:
-                return json.load(f)
+                catalog = json.load(f)
         except:
-            pass
-    return {"version": 0, "apps": []}
+            catalog = None
+    else:
+        catalog = None
+    if not catalog:
+        catalog = {"version": 0, "apps": []}
+    return _merge_mcp_manifests(catalog)
 
 def save_catalog_cache(catalog):
     with open(CATALOG_CACHE_PATH, "w") as f:
@@ -330,7 +358,7 @@ def sync_catalog(force=False):
                 "api_key": effective_key
             })
             if catalog_result:
-                catalog_cache = catalog_result
+                catalog_cache = _merge_mcp_manifests(catalog_result)
                 save_catalog_cache(catalog_result)
                 print(f"[agent] Catalog synced: v{remote_ver} ({len(catalog_cache.get('apps', []))} apps)")
 
@@ -391,6 +419,65 @@ def execute_job(job):
 
 _PORT_CACHE = {}
 _PORT_CACHE_TTL = 15  # seconds; docker port lookups are expensive (~300ms each via CLI)
+_BULK_CACHE_TS = 0
+_BULK_CACHE_TTL = 10  # seconds
+
+def _refresh_bulk_container_state():
+    """Populate _PORT_CACHE in a single bulk docker ps command for all containers."""
+    global _BULK_CACHE_TS
+    now = time.time()
+    if now - _BULK_CACHE_TS < _BULK_CACHE_TTL:
+        return
+    _BULK_CACHE_TS = now
+    ok, out = _docker("ps", "-a", "--format", "{{.Names}}\t{{.State}}\t{{.Ports}}\t{{.Image}}\t{{.Labels}}", capture=True)
+    if not ok or not out:
+        return
+
+    for line in out.strip().splitlines():
+        parts = line.split("\t")
+        if len(parts) < 4:
+            continue
+        cname = parts[0].strip()
+        state = parts[1].strip().lower()  # e.g., 'running', 'exited'
+        ports_str = parts[2].strip()
+        image = parts[3].strip()
+        labels = parts[4].strip() if len(parts) > 4 else ""
+
+        is_running = (state == "running")
+        status_val = "installed" if is_running else "stopped"
+
+        _PORT_CACHE[("cr", cname)] = (now, is_running)
+        _PORT_CACHE[("ce", cname)] = (now, True)
+
+        app_id = ""
+        if cname.startswith("app-"):
+            app_id = cname[4:]
+        elif "appvault.app=" in labels:
+            for l in labels.split(","):
+                if l.strip().startswith("appvault.app="):
+                    app_id = l.strip().split("=", 1)[1]
+                    break
+
+        if app_id:
+            _PORT_CACHE[("st", app_id)] = (now, status_val)
+            _PORT_CACHE[("cn", app_id)] = (now, cname)
+            if image:
+                _PORT_CACHE[("img", app_id)] = (now, image)
+
+        if is_running and "->" in ports_str:
+            for mapping in ports_str.split(","):
+                mapping = mapping.strip()
+                if "->" in mapping:
+                    h_part, c_part = mapping.split("->", 1)
+                    if ":" in h_part:
+                        h_port = h_part.split(":")[-1].strip()
+                        c_port = c_part.split("/")[0].strip()
+                        if h_port:
+                            _PORT_CACHE[("hp", cname)] = (now, h_port)
+                            _PORT_CACHE[("ph", cname, c_port)] = (now, h_port)
+                            if c_port.isdigit():
+                                _PORT_CACHE[("ph", cname, int(c_port))] = (now, h_port)
+                            break
 
 def _cached_docker_port(key, fn, *args):
     """Cache docker port lookups for _PORT_CACHE_TTL seconds."""
@@ -410,13 +497,20 @@ def get_container_host_port(container_name):
 def _app_container_name(app_id):
     """Resolve the actual container name for an app: prefer app-<id>, then a
     container labeled appvault.app=<id> (compose-managed agentic stack etc.)."""
+    hit = _PORT_CACHE.get(("cn", app_id))
+    if hit and time.time() - hit[0] < _PORT_CACHE_TTL:
+        return hit[1]
     cname = f"app-{app_id}"
     if container_running(cname) or container_exists(cname):
+        _PORT_CACHE[("cn", app_id)] = (time.time(), cname)
         return cname
     ok, out = _docker("ps", "-a", "--filter", f"label=appvault.app={app_id}",
                       "--format", "{{.Names}}", capture=True)
     if ok and out and out.strip():
-        return out.strip().splitlines()[0].strip()
+        resolved = out.strip().splitlines()[0].strip()
+        _PORT_CACHE[("cn", app_id)] = (time.time(), resolved)
+        return resolved
+    _PORT_CACHE[("cn", app_id)] = (time.time(), cname)
     return cname
 
 def _get_container_host_port_uncached(container_name):
@@ -2083,13 +2177,13 @@ def get_app_status_local(app_id):
     return _cached_docker_port(("st", app_id), _get_app_status_local_uncached, app_id)
 
 def _get_app_status_local_uncached(app_id):
+    if _BULK_CACHE_TS > 0 and (time.time() - _BULK_CACHE_TS < _BULK_CACHE_TTL):
+        return "available"
     cname = f"app-{app_id}"
     if container_running(cname):
         return "installed"
     if container_exists(cname):
         return "stopped"
-    # ADDITIVE: stack apps run compose containers labeled appvault.app=<app_id>
-    # (e.g. twenty-server-1), so they are reported installed/stopped like single-image apps.
     ok, out = _docker("ps", "-a", "--filter", f"label=appvault.app={app_id}",
                       "--format", "{{.Names}}", capture=True)
     if ok and out and out.strip():
@@ -2108,6 +2202,7 @@ def get_app_image(app_id):
 @app.route("/api/catalog")
 def api_catalog():
     """Return the catalog with live local status and host ports."""
+    _refresh_bulk_container_state()
     result = []
     for app in catalog_cache.get("apps", []):
         if app.get("hidden") or app.get("disabled"):

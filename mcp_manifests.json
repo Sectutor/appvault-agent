@@ -1,0 +1,46 @@
+{
+  "openwebui": {
+    "credential": {"type": "api_key", "header": "Authorization", "via": "setup_wizard"},
+    "tools": [
+      {"name": "openwebui_models", "description": "List models available in OpenWebUI",
+       "handler": "http", "write": false, "method": "GET", "path": "/api/models",
+       "inputSchema": {"type": "object", "properties": {}}},
+      {"name": "openwebui_chat", "description": "Chat with a model in OpenWebUI (OpenAI-compatible)",
+       "handler": "http", "write": true, "method": "POST", "path": "/api/chat/completions",
+       "body": "{\"model\": \"{model}\", \"messages\": [{\"role\": \"user\", \"content\": \"{message}\"}], \"stream\": false}",
+       "inputSchema": {"type": "object", "properties": {
+         "model": {"type": "string", "description": "model id from openwebui_models"},
+         "message": {"type": "string", "description": "user message"}}}}
+    ]
+  },
+  "anythingllm": {
+    "credential": {"type": "api_key", "header": "Authorization", "via": "setup_wizard"},
+    "tools": [
+      {"name": "anythingllm_workspaces", "description": "List AnythingLLM workspaces",
+       "handler": "http", "write": false, "method": "GET", "path": "/api/v1/workspaces",
+       "inputSchema": {"type": "object", "properties": {}}},
+      {"name": "anythingllm_chat", "description": "Ask AnythingLLM (RAG over your documents)",
+       "handler": "http", "write": true, "method": "POST", "path": "/api/v1/chat",
+       "body": "{\"message\": \"{message}\", \"mode\": \"chat\"}",
+       "inputSchema": {"type": "object", "properties": {
+         "message": {"type": "string", "description": "question for your documents"}}}}
+    ]
+  },
+  "ollama": {
+    "tools": [
+      {"name": "ollama_models", "description": "List models loaded/available in Ollama",
+       "handler": "http", "write": false, "method": "GET", "path": "/api/tags",
+       "inputSchema": {"type": "object", "properties": {}}},
+      {"name": "ollama_generate", "description": "Generate text with an Ollama model",
+       "handler": "http", "write": true, "method": "POST", "path": "/api/generate",
+       "body": "{\"model\": \"{model}\", \"prompt\": \"{prompt}\", \"stream\": false}",
+       "inputSchema": {"type": "object", "properties": {
+         "model": {"type": "string"}, "prompt": {"type": "string"}}}},
+      {"name": "ollama_chat", "description": "Chat with an Ollama model",
+       "handler": "http", "write": true, "method": "POST", "path": "/api/chat",
+       "body": "{\"model\": \"{model}\", \"messages\": [{\"role\": \"user\", \"content\": \"{message}\"}], \"stream\": false}",
+       "inputSchema": {"type": "object", "properties": {
+         "model": {"type": "string"}, "message": {"type": "string"}}}}
+    ]
+  }
+}

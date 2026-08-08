@@ -42,27 +42,47 @@ _NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # ---------------------------------------------------------------- handlers
 
 def _http_call(td, kwargs, deps):
-    app_id = td["_app"]
-    host_port = deps["get_host_port"](f"app-{app_id}")
-    if not host_port:
-        return {"ok": False, "error": f"{app_id} not running (no mapped host port)"}
-    path = td.get("path", "/")
+    app_id = td.get("_app")
+    # absolute-url tools (AppVault-level: desktop helper, plane bridge) skip
+    # the host-port resolution
+    if td.get("url"):
+        url = td["url"]
+    else:
+        host_port = deps["get_host_port"](f"app-{app_id}")
+        if not host_port:
+            return {"ok": False, "error": f"{app_id} not running (no mapped host port)"}
+        url = f"http://{host_port}"
+    path = td.get("path", "" if td.get("url") else "/")
     used = {k for k in kwargs if "{" + k + "}" in path}
     for k in used:
         path = path.replace("{" + k + "}", str(kwargs[k]))
     rest = {k: v for k, v in kwargs.items() if k not in used}
-    # host_port is a "host:port" string resolved by the agent wiring
-    # (published host port, or container-internal IP:port on the docker network)
-    url = f"http://{host_port}{path}"
+    url = (url + path).rstrip("/")
     headers = {}
-    cred = deps["vault"](app_id)
-    if cred.get("header") and cred.get("value"):
-        headers[cred["header"]] = str(cred["value"])
+    if td.get("host_header"):
+        # connect via host.docker.internal but present a loopback Host so the
+        # helper's HttpListener (localhost prefix, no URL ACL) accepts it
+        headers["Host"] = td["host_header"]
+    if app_id:
+        cred = deps["vault"](app_id)
+        if cred.get("header") and cred.get("value"):
+            headers[cred["header"]] = str(cred["value"])
     try:
-        if td.get("method", "GET").upper() in ("POST", "PUT", "PATCH") and rest:
+        if td.get("method", "GET").upper() in ("POST", "PUT", "PATCH"):
             headers.setdefault("Content-Type", "application/json")
-            req = Request(url, data=json.dumps(rest).encode(), headers=headers,
-                          method=td.get("method", "POST").upper())
+            body_tpl = td.get("body")
+            if body_tpl:  # JSON template with {param} placeholders
+                body = body_tpl
+                for k, v in kwargs.items():
+                    body = body.replace("{" + k + "}", json.dumps(v))
+                req = Request(url, data=body.encode(), headers=headers,
+                              method=td.get("method", "POST").upper())
+            elif rest:
+                req = Request(url, data=json.dumps(rest).encode(), headers=headers,
+                              method=td.get("method", "POST").upper())
+            else:
+                req = Request(url, data=b"{}", headers=headers,
+                              method=td.get("method", "POST").upper())
         else:
             if rest:
                 url += ("&" if "?" in url else "?") + urlencode(rest)
@@ -297,6 +317,42 @@ _GENERIC_TOOLS = (
      "inputSchema": {"type": "object", "properties": {
          "lines": {"type": "integer", "description": "number of log lines", "default": 100}}}},
 )
+# AppVault-level tools, registered once (not per installed app): the desktop
+# launcher helper (:8791, ON THE HOST — reach it via host.docker.internal) and
+# the agentic plane bridge (:8086, same container). Any MCP client (Hermes
+# desktop, Claude Desktop, Cursor…) can control them.
+_APPVAULT_TOOLS = (
+    {"name": "desktop_apps", "description": "List desktop apps added to the AppVault launcher",
+     "handler": "http", "write": False, "host_header": "localhost:8791", "url": "http://host.docker.internal:8791/apps", "method": "GET",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "desktop_discover", "description": "Discover installed desktop apps (Start Menu scan)",
+     "handler": "http", "write": False, "host_header": "localhost:8791", "url": "http://host.docker.internal:8791/discover", "method": "GET",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "desktop_launch", "description": "Launch a desktop app from the launcher (id from desktop_apps)",
+     "handler": "http", "write": True, "host_header": "localhost:8791", "url": "http://host.docker.internal:8791/launch", "method": "POST",
+     "inputSchema": {"type": "object", "properties": {"id": {"type": "string", "description": "app id"}}}},
+    {"name": "desktop_add", "description": "Add a desktop app to the launcher (name + path)",
+     "handler": "http", "write": True, "host_header": "localhost:8791", "url": "http://host.docker.internal:8791/add", "method": "POST",
+     "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}, "path": {"type": "string"}}}},
+    {"name": "desktop_remove", "description": "Remove a desktop app from the launcher",
+     "handler": "http", "write": True, "host_header": "localhost:8791", "url": "http://host.docker.internal:8791/remove", "method": "POST",
+     "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}}},
+    {"name": "plane_ask", "description": "Ask the AppVault V agent (full context: memory, skills, vault, routing)",
+     "handler": "http", "write": False, "url": "http://localhost:8086/api/agentic/v", "method": "POST",
+     "inputSchema": {"type": "object", "properties": {"message": {"type": "string", "description": "question or instruction"}}}},
+    {"name": "plane_memory_search", "description": "Search the shared knowledge base / vault",
+     "handler": "http", "write": False, "url": "http://localhost:8086/api/agentic/search", "method": "GET",
+     "inputSchema": {"type": "object", "properties": {"q": {"type": "string", "description": "search query"}}}},
+    {"name": "plane_skills_list", "description": "List skills available in the agentic OS",
+     "handler": "http", "write": False, "url": "http://localhost:8086/api/agentic/skills", "method": "GET",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "plane_cron_list", "description": "List scheduled cron jobs",
+     "handler": "http", "write": False, "url": "http://localhost:8086/api/agentic/cron", "method": "GET",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "plane_wp_publish", "description": "Publish content to WordPress via the built-in tool",
+     "handler": "http", "write": True, "url": "http://localhost:8086/api/agentic/tools/wordpress/publish", "method": "POST",
+     "inputSchema": {"type": "object", "properties": {"title": {"type": "string"}, "content": {"type": "string"}, "status": {"type": "string"}}}},
+)
 
 def _ann(ps, default):
     """JSON-schema type -> python annotation string (for exec'd signature)."""
@@ -363,6 +419,12 @@ def build_gateway(catalog_getter, docker_fn, vault_getter, get_host_port, allow_
     deps = {"docker_fn": docker_fn, "vault": vault_getter,
             "get_host_port": get_host_port, "gate": gate}
     seen = set()
+    for td in _APPVAULT_TOOLS:
+        td = dict(td)
+        td["_app"] = "appvault"
+        mcp.add_tool(_make_run(td, deps), name=td["name"], description=td["description"])
+        seen.add(td["name"])
+        print(f"[mcp] registered {td['name']} (appvault-level)")
     for app in catalog_getter() or []:
         app_id = app.get("id")
         for td in app.get("mcp", {}).get("tools", []) or []:
