@@ -2941,6 +2941,9 @@ def _goal_row_to_dict(r):
         "kpis": (r["kpis"] or "").split(",") if r["kpis"] else [],
         "linked_feeds": (r["linked_feeds"] or "").split(",") if r["linked_feeds"] else [],
         "linked_crews": (r["linked_crews"] or "").split(",") if r["linked_crews"] else [],
+        "category": r["category"] if "category" in r.keys() else "business",
+        "next_steps": r["next_steps"] if "next_steps" in r.keys() else "",
+        "target": r["target"] if "target" in r.keys() else "",
         "created": r["created"], "updated": r["updated"],
     }
 
@@ -2982,7 +2985,19 @@ def api_goals():
         rows = conn.execute(
             "SELECT * FROM goals ORDER BY status='active' DESC, category ASC, priority ASC, id DESC").fetchall()
     conn.close()
-    return jsonify({"status": "ok", "goals": [_goal_row_to_dict(r) for r in rows]})
+    rawc = _cfg_get("goal_categories") or ""
+    try:
+        custom = json.loads(rawc) if rawc else []
+    except Exception:
+        custom = []
+    cats = list(GOAL_CATEGORIES)
+    for c in custom:
+        if c not in cats:
+            cats.append(c)
+    for r in rows:
+        if (r["category"] or "") not in cats and r["category"]:
+            cats.append(r["category"])
+    return jsonify({"status": "ok", "goals": [_goal_row_to_dict(r) for r in rows], "categories": cats})
 
 
 @agentic_bp.route("/api/agentic/goals/<int:gid>", methods=["PUT", "DELETE", "OPTIONS"])
@@ -6296,3 +6311,36 @@ def api_goal_report():
     conn.close()
     return jsonify({"status": "ok", "report": row["report"] if row else None,
                     "ts": row["ts"] if row else None})
+
+
+@agentic_bp.route("/api/agentic/goals/categories", methods=["GET", "POST", "OPTIONS"])
+def api_goal_categories():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    raw = _cfg_get("goal_categories") or ""
+    try:
+        custom = json.loads(raw) if raw else []
+    except Exception:
+        custom = []
+    if not isinstance(custom, list):
+        custom = []
+    if request.method == "POST":
+        data = request.get_json() or {}
+        name = (data.get("name") or "").strip().lower()
+        if not name:
+            return jsonify({"error": "category name required"}), 400
+        if name not in custom and name not in GOAL_CATEGORIES:
+            custom.append(name)
+            _cfg_set("goal_categories", json.dumps(custom))
+            return jsonify({"status": "ok", "categories": list(GOAL_CATEGORIES) + custom})
+        return jsonify({"status": "ok", "categories": list(GOAL_CATEGORIES) + custom})
+    # GET: defaults + custom + any categories in use
+    conn = _db()
+    used = [r[0] for r in conn.execute(
+        "SELECT DISTINCT category FROM goals WHERE category IS NOT NULL AND category != ''").fetchall()]
+    conn.close()
+    cats = list(GOAL_CATEGORIES)
+    for c in custom + used:
+        if c not in cats:
+            cats.append(c)
+    return jsonify({"status": "ok", "categories": cats, "custom": custom})
