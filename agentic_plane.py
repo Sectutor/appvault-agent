@@ -2802,7 +2802,20 @@ def _init_compounding_tables():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         ts TEXT, note TEXT
     );
-    """)
+    CREATE TABLE IF NOT EXISTS work_items (
+        id TEXT PRIMARY KEY,
+        category TEXT DEFAULT 'other',
+        title TEXT NOT NULL,
+        content TEXT DEFAULT '',
+        image_url TEXT DEFAULT '',
+        source TEXT DEFAULT 'manual',
+        status TEXT DEFAULT 'draft',
+        url TEXT DEFAULT '',
+        tags TEXT DEFAULT '',
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+    );
+    """ )
     conn.commit()
     conn.close()
 
@@ -4868,6 +4881,12 @@ def _wp_publish(title, content, status="publish"):
                                   "status": status if status in ("publish", "draft", "pending", "private") else "draft"},
                        timeout=40)
     if code in (200, 201) and isinstance(data, dict):
+        try:
+            _work_record(category="article", title=str(title)[:200], content=str(content),
+                         source="wordpress", status="published",
+                         url=data.get("link") or "", wid="wp-" + str(data.get("id")))
+        except Exception:
+            pass
         return True, {"id": data.get("id"), "link": data.get("link"),
                       "status": data.get("status"), "title": (data.get("title") or {}).get("rendered", title)}
     return False, f"HTTP {code}: {str(data)[:300]}"
@@ -5959,3 +5978,149 @@ def _slash_mcp(args):
     _audit("chat", "mcp.call", f"{srv['name']}:{tool}")
     return _mcp_call(srv, tool, call_args)
 
+
+# =============================================================================
+# WORK LEDGER (2026-08-08) — one place for all completed work: research,
+# articles, tweets, images, news. Category-tagged, previewable, publishable.
+# =============================================================================
+
+def _work_record(category="other", title="", content="", image_url="", source="manual",
+                 status="draft", url="", tags="", wid=None):
+    try:
+        import uuid as _uuid
+        wid = wid or _uuid.uuid4().hex[:12]
+        conn = _db()
+        conn.execute("""INSERT OR IGNORE INTO work_items
+            (id, category, title, content, image_url, source, status, url, tags, created_at, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?, datetime('now'), datetime('now'))""",
+            (wid, category, title[:4000], content or "", image_url or "", source,
+             status, url or "", tags or ""))
+        conn.commit(); conn.close()
+        return wid
+    except Exception:
+        return None
+
+def _work_seed_if_empty():
+    """First-run backfill so the Completed Work page isn't empty: vault outputs
+    (research/article drafts) + anything already published via WordPress."""
+    try:
+        conn = _db()
+        n = conn.execute("SELECT COUNT(*) FROM work_items").fetchone()[0]
+        if n > 0:
+            conn.close(); return 0
+        seeded = 0
+        # vault outputs -> research/article drafts
+        vault = _vault_path()
+        for sub in ("04_Projects/Outputs", "02_Agent_Logs"):
+            d = os.path.join(vault, sub)
+            if not os.path.isdir(d):
+                continue
+            for f in sorted(os.listdir(d))[:12]:
+                if not f.lower().endswith(".md"):
+                    continue
+                p = os.path.join(d, f)
+                try:
+                    body = open(p, encoding="utf-8", errors="replace").read()[:3000]
+                except Exception:
+                    continue
+                _work_record(category="research", title=f.replace(".md", "").replace("_", " ")[:120],
+                             content=body, source="backfill", status="draft",
+                             tags=sub.split("/")[-1], wid="seed-" + f[:24])
+                seeded += 1
+        conn.commit(); conn.close()
+        return seeded
+    except Exception:
+        return 0
+
+@agentic_bp.route("/api/agentic/work", methods=["GET", "POST", "OPTIONS"])
+def api_work_items():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "POST":
+        data = request.get_json() or {}
+        title = (data.get("title") or "").strip()
+        if not title:
+            return jsonify({"error": "title required"}), 400
+        wid = _work_record(category=(data.get("category") or "other"),
+                           title=title, content=data.get("content") or "",
+                           image_url=data.get("image_url") or "",
+                           source=data.get("source") or "manual",
+                           status=data.get("status") or "draft",
+                           tags=data.get("tags") or "")
+        _audit("store", "work.add", f"{title[:60]}")
+        return jsonify({"status": "ok", "id": wid})
+    category = (request.args.get("category") or "").strip()
+    st = (request.args.get("status") or "").strip()
+    q = (request.args.get("q") or "").strip().lower()
+    _work_seed_if_empty()
+    conn = _db()
+    sql = "SELECT * FROM work_items WHERE 1=1"
+    args = []
+    if category and category != "all":
+        sql += " AND category=?"; args.append(category)
+    if st:
+        sql += " AND status=?"; args.append(st)
+    if q:
+        sql += " AND (title LIKE ? OR tags LIKE ? OR content LIKE ?)"
+        args += [f"%{q}%", f"%{q}%", f"%{q}%"]
+    sql += " ORDER BY created_at DESC LIMIT 200"
+    rows = conn.execute(sql, args).fetchall()
+    cols = [c[0] for c in conn.execute("SELECT * FROM work_items LIMIT 0").description]
+    items = [dict(zip(cols, r)) for r in rows]
+    conn.close()
+    return jsonify({"items": items})
+
+@agentic_bp.route("/api/agentic/work/<wid>", methods=["GET", "DELETE", "OPTIONS"])
+def api_work_item(wid):
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    conn = _db()
+    row = conn.execute("SELECT * FROM work_items WHERE id=?", (wid,)).fetchone()
+    if not row:
+        conn.close(); return jsonify({"error": "not found"}), 404
+    if request.method == "DELETE":
+        conn.execute("DELETE FROM work_items WHERE id=?", (wid,))
+        conn.commit(); conn.close()
+        _audit("store", "work.delete", wid)
+        return jsonify({"status": "ok"})
+    cols = [c[0] for c in conn.execute("SELECT * FROM work_items LIMIT 0").description]
+    item = dict(zip(cols, row))
+    conn.close()
+    return jsonify({"item": item})
+
+@agentic_bp.route("/api/agentic/work/<wid>/status", methods=["POST", "OPTIONS"])
+def api_work_status(wid):
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    st = (data.get("status") or "").strip()
+    if st not in ("draft", "reviewed", "published", "archived"):
+        return jsonify({"error": "bad status"}), 400
+    conn = _db()
+    conn.execute("UPDATE work_items SET status=?, updated_at=datetime('now') WHERE id=?", (st, wid))
+    conn.commit(); conn.close()
+    _audit("store", "work.status", f"{wid} -> {st}")
+    return jsonify({"status": "ok"})
+
+@agentic_bp.route("/api/agentic/work/<wid>/publish", methods=["POST", "OPTIONS"])
+def api_work_publish(wid):
+    """Push a work item straight to WordPress (review -> publish in one click)."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    conn = _db()
+    row = conn.execute("SELECT * FROM work_items WHERE id=?", (wid,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "not found"}), 404
+    cols = [c[0] for c in conn.execute("SELECT * FROM work_items LIMIT 0").description]
+    item = dict(zip(cols, row))
+    conn.close()
+    ok, res = _wp_publish(item.get("title") or "Post from AppVault", item.get("content") or "")
+    if not ok:
+        return jsonify({"status": "error", "error": res}), 502
+    conn = _db()
+    conn.execute("UPDATE work_items SET status='published', url=?, updated_at=datetime('now') WHERE id=?",
+                 (res.get("link") or "", wid))
+    conn.commit(); conn.close()
+    _audit("store", "work.publish", f"{wid} -> {res.get('link', '')}")
+    return jsonify({"status": "ok", "post_id": res.get("id"), "link": res.get("link")})
