@@ -2958,19 +2958,29 @@ def api_goals():
         conn = _db()
         cur = conn.execute(
             "INSERT INTO goals (title, description, status, priority, progress, kpis, "
-            "linked_feeds, linked_crews, created, updated) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "linked_feeds, linked_crews, category, next_steps, target, created, updated) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (title, (data.get("description") or ""), (data.get("status") or "active"),
              int(data.get("priority", 3) or 3), int(data.get("progress", 0) or 0),
              ",".join(data.get("kpis") or []),
              ",".join(str(x) for x in (data.get("linked_feeds") or [])),
              ",".join(str(x) for x in (data.get("linked_crews") or [])),
+             (data.get("category") or "business"),
+             (data.get("next_steps") or ""), (data.get("target") or ""),
              now, now))
         conn.commit()
         row = conn.execute("SELECT * FROM goals WHERE id=?", (cur.lastrowid,)).fetchone()
         conn.close()
         return jsonify({"status": "ok", "goal": _goal_row_to_dict(row)})
     conn = _db()
-    rows = conn.execute("SELECT * FROM goals ORDER BY status='active' DESC, priority ASC, id DESC").fetchall()
+    category = (request.args.get("category") or "").strip()
+    if category and category != "all":
+        rows = conn.execute(
+            "SELECT * FROM goals WHERE category=? ORDER BY status='active' DESC, priority ASC, id DESC",
+            (category,)).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM goals ORDER BY status='active' DESC, category ASC, priority ASC, id DESC").fetchall()
     conn.close()
     return jsonify({"status": "ok", "goals": [_goal_row_to_dict(r) for r in rows]})
 
@@ -2992,7 +3002,8 @@ def api_goal(gid):
     data = request.get_json() or {}
     # PARTIAL update — absent fields keep existing values (PUT pitfall rule)
     merged = {}
-    for k in ("title", "description", "status", "kpis", "linked_feeds", "linked_crews"):
+    for k in ("title", "description", "status", "kpis", "linked_feeds", "linked_crews",
+              "category", "next_steps", "target"):
         if data.get(k) is not None:
             v = data[k]
             merged[k] = ",".join(v) if isinstance(v, list) else str(v)
@@ -3188,6 +3199,9 @@ def api_seo_generate():
     _work_record(category="article", title=f"SEO Article — {title_seed}", content=content,
                  source="seo", status="draft", tags=f"seo,{cluster}",
                  url=wp_link or "", wid="seo-" + str(post_id))
+    # goal-linked progress (business/content goals)
+    _goal_bump(title_seed + " " + cluster, "article", 6, "seo",
+               f"SEO article generated: {title_seed[:60]}")
     return jsonify({"status": "ok", "post_id": post_id, "content": content, "cluster": cluster,
                     "wp_link": wp_link, "wp_error": wp_error})
 
@@ -4275,6 +4289,7 @@ def _router_reply(message, agent_id="v", source="store"):
             _work_record(category="linkedin", title=f"LinkedIn: {msg[:70]}", content=content,
                          source="v", status="draft", tags="linkedin,v-router",
                          wid="vpost-" + str(int(time.time())))
+            _goal_bump(msg, "linkedin", 4, "v", f"LinkedIn post drafted: {msg[:50]}")
             return f"📝 Drafted a LinkedIn post from live signals (saved to vault + posts pipeline):\n\n{content[:900]}"
         except Exception as e:
             return f"⚠️ Content generation failed: {str(e)[:200]}"
@@ -5319,6 +5334,12 @@ def _run_cron_job(job):
             return "ok", f"{res.get('proposals', 0)} proposals"
         except Exception as e:
             return "error", str(e)[:200]
+    if action == "goal_report":
+        try:
+            _run_goal_report()
+            return "ok", "daily goal report written"
+        except Exception as e:
+            return "error", str(e)[:200]
     # default: LLM prompt task
     task = (job.get("task") or "").strip()
     if not task:
@@ -6032,13 +6053,19 @@ def api_work_items():
         title = (data.get("title") or "").strip()
         if not title:
             return jsonify({"error": "title required"}), 400
-        wid = _work_record(category=(data.get("category") or "other"),
-                           title=title, content=data.get("content") or "",
-                           image_url=data.get("image_url") or "",
-                           source=data.get("source") or "manual",
-                           status=data.get("status") or "draft",
-                           tags=data.get("tags") or "")
-        _audit("store", "work.add", f"{title[:60]}")
+        wid = data.get("id") or ("w-" + str(int(time.time() * 1000)))
+        _work_record(category=data.get("category") or "other",
+                     title=data.get("title") or "Untitled",
+                     content=data.get("content") or "",
+                     image_url=data.get("image_url") or "",
+                     source=data.get("source") or "manual",
+                     status=data.get("status") or "draft",
+                     url=data.get("url") or "",
+                     tags=data.get("tags") or "",
+                     wid=wid)
+        _goal_bump((data.get("title") or "") + " " + (data.get("tags") or ""),
+                   data.get("category") or "", 5, "work",
+                   f"Work recorded: {(data.get('title') or '')[:60]}")
         return jsonify({"status": "ok", "id": wid})
     category = (request.args.get("category") or "").strip()
     st = (request.args.get("status") or "").strip()
@@ -6130,3 +6157,142 @@ def api_work_publish(wid):
     conn.commit(); conn.close()
     _audit("store", "work.publish", f"{wid} -> {res.get('link', '')}")
     return jsonify({"status": "ok", "post_id": res.get("id"), "link": res.get("link")})
+
+# =============================================================================
+# GOALS v2 (2026-08-08) — categorized goals (business/professional/private/
+# health), activity-linked auto-progress, daily morning report + next steps.
+# =============================================================================
+from datetime import timedelta
+
+GOAL_CATEGORIES = ("business", "professional", "private", "health")
+
+
+def _goals_v2_migrate():
+    conn = _db()
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(goals)").fetchall()]
+    if "category" not in cols:
+        conn.execute("ALTER TABLE goals ADD COLUMN category TEXT DEFAULT 'business'")
+    if "next_steps" not in cols:
+        conn.execute("ALTER TABLE goals ADD COLUMN next_steps TEXT DEFAULT ''")
+    if "target" not in cols:
+        conn.execute("ALTER TABLE goals ADD COLUMN target TEXT DEFAULT ''")
+    conn.execute("""CREATE TABLE IF NOT EXISTS goal_activity (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, goal_id INTEGER, source TEXT,
+        note TEXT, delta INTEGER DEFAULT 0, ts TEXT DEFAULT (datetime('now')))""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS goal_reports (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT DEFAULT (datetime('now')), report TEXT)""")
+    conn.commit()
+    conn.close()
+    # register the daily morning report job (08:00) once
+    try:
+        row = conn and None
+        conn = _db()
+        exists = conn.execute("SELECT id FROM cron_jobs WHERE name='goal-daily-report'").fetchone()
+        if not exists:
+            conn.execute(
+                "INSERT INTO cron_jobs (name, schedule, task, action, enabled, next_run, created, updated) "
+                "VALUES (?,?,?,?,1,NULL,?,?)",
+                ("goal-daily-report", "08:00", "Daily goal progress report", "goal_report",
+                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"), datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+_goals_v2_migrate()
+
+
+def _goal_bump(keywords, category, amount, source, note=""):
+    """Auto-progress: bump active goals whose title matches keywords or category."""
+    try:
+        conn = _db()
+        kws = [k.lower() for k in (keywords or "").split() if len(k) > 2]
+        rows = conn.execute("SELECT * FROM goals WHERE status='active'").fetchall()
+        for r in rows:
+            title = (r["title"] or "").lower()
+            cat = (r["category"] or "").lower()
+            match = (cat == (category or "").lower()) or any(k in title for k in kws)
+            if not match:
+                continue
+            nprog = min(100, (r["progress"] or 0) + amount)
+            conn.execute("UPDATE goals SET progress=?, updated=? WHERE id=?",
+                         (nprog, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), r["id"]))
+            conn.execute("INSERT INTO goal_activity (goal_id, source, note, delta) VALUES (?,?,?,?)",
+                         (r["id"], source, (note or "")[:200], amount))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def _run_goal_report():
+    """Build the daily goal report: per-category progress + last-24h activity + next steps."""
+    conn = _db()
+    goals = conn.execute(
+        "SELECT * FROM goals ORDER BY status='active' DESC, category ASC, priority ASC, id DESC").fetchall()
+    since = (datetime.now() - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+    acts = conn.execute(
+        "SELECT * FROM goal_activity WHERE ts >= ? ORDER BY id DESC LIMIT 30", (since,)).fetchall()
+    work = conn.execute(
+        "SELECT * FROM work_items WHERE created_at >= ? ORDER BY created_at DESC LIMIT 12", (since,)).fetchall()
+    conn.close()
+    lines = [f"# 📊 Goal Progress Report — {datetime.now().strftime('%Y-%m-%d %A')}", ""]
+    cur_cat = None
+    for g in goals:
+        cat = (g["category"] or "business").title()
+        if cat != cur_cat:
+            cur_cat = cat
+            lines.append(f"\n## {cat}")
+        p = g["progress"] or 0
+        bar = "█" * (p // 10) + "░" * (10 - p // 10)
+        lines.append(f"- **{g['title']}** — {p}% {bar} [{g['status']}]")
+        ns = (g["next_steps"] or "").strip()
+        if ns:
+            lines.append(f"  - Next: {ns[:180]}")
+        tgt = (g["target"] or "").strip()
+        if tgt:
+            lines.append(f"  - Target: {tgt[:120]}")
+    lines.append("\n## Activity (last 24h)")
+    if acts:
+        for a in acts:
+            lines.append(f"- {a['ts'][:16]} · +{a['delta']}% — {a['note']}")
+    else:
+        lines.append("- No goal-linked activity in the last 24h.")
+    if work:
+        lines.append("\n## Completed work (last 24h)")
+        for w in work:
+            lines.append(f"- [{w['category']}] {w['title'][:90]}")
+    report = "\n".join(lines)
+    conn = _db()
+    conn.execute("INSERT INTO goal_reports (report) VALUES (?)", (report,))
+    conn.commit()
+    conn.close()
+    try:
+        _write_vault_output("04_Projects/Outputs",
+                            f"Goal_Report_{datetime.now().strftime('%Y%m%d')}.md",
+                            report, tag="Goal Report", agent="Goals")
+    except Exception:
+        pass
+    try:
+        _telegram_send(f"📊 Daily Goal Report:\n\n{report[:3500]}")
+    except Exception:
+        pass
+    return report
+
+
+@agentic_bp.route("/api/agentic/goals/report", methods=["GET", "POST", "OPTIONS"])
+def api_goal_report():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "POST":
+        try:
+            report = _run_goal_report()
+            return jsonify({"status": "ok", "report": report})
+        except Exception as e:
+            return jsonify({"status": "error", "error": str(e)[:200]}), 500
+    conn = _db()
+    row = conn.execute("SELECT * FROM goal_reports ORDER BY id DESC LIMIT 1").fetchone()
+    conn.close()
+    return jsonify({"status": "ok", "report": row["report"] if row else None,
+                    "ts": row["ts"] if row else None})
