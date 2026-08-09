@@ -6001,36 +6001,12 @@ def _work_record(category="other", title="", content="", image_url="", source="m
         return None
 
 def _work_seed_if_empty():
-    """First-run backfill so the Completed Work page isn't empty: vault outputs
-    (research/article drafts) + anything already published via WordPress."""
-    try:
-        conn = _db()
-        n = conn.execute("SELECT COUNT(*) FROM work_items").fetchone()[0]
-        if n > 0:
-            conn.close(); return 0
-        seeded = 0
-        # vault outputs -> research/article drafts
-        vault = _vault_path()
-        for sub in ("04_Projects/Outputs", "02_Agent_Logs"):
-            d = os.path.join(vault, sub)
-            if not os.path.isdir(d):
-                continue
-            for f in sorted(os.listdir(d))[:12]:
-                if not f.lower().endswith(".md"):
-                    continue
-                p = os.path.join(d, f)
-                try:
-                    body = open(p, encoding="utf-8", errors="replace").read()[:3000]
-                except Exception:
-                    continue
-                _work_record(category="research", title=f.replace(".md", "").replace("_", " ")[:120],
-                             content=body, source="backfill", status="draft",
-                             tags=sub.split("/")[-1], wid="seed-" + f[:24])
-                seeded += 1
-        conn.commit(); conn.close()
-        return seeded
-    except Exception:
-        return 0
+    """Backfill is DISABLED (2026-08-08): it pulled raw pipeline/system logs
+    (02_Agent_Logs, Pipeline_*/SEO_*/Crew Execution files) into the ledger as
+    'research' — noise. The Completed Work page shows ONLY real work items:
+    articles/X posts/LinkedIn/images recorded by the WP hook, pipeline hooks,
+    or manual adds."""
+    return 0
 
 @agentic_bp.route("/api/agentic/work", methods=["GET", "POST", "OPTIONS"])
 def api_work_items():
