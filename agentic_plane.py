@@ -6054,7 +6054,7 @@ def api_work_items():
     conn.close()
     return jsonify({"items": items})
 
-@agentic_bp.route("/api/agentic/work/<wid>", methods=["GET", "DELETE", "OPTIONS"])
+@agentic_bp.route("/api/agentic/work/<wid>", methods=["GET", "DELETE", "PUT", "OPTIONS"])
 def api_work_item(wid):
     if request.method == "OPTIONS":
         return jsonify({"status": "ok"})
@@ -6066,6 +6066,21 @@ def api_work_item(wid):
         conn.execute("DELETE FROM work_items WHERE id=?", (wid,))
         conn.commit(); conn.close()
         _audit("store", "work.delete", wid)
+        return jsonify({"status": "ok"})
+    if request.method == "PUT":
+        data = request.get_json() or {}
+        sets, args = [], []
+        for col in ("title", "content", "category", "tags", "image_url", "url"):
+            if col in data and data[col] is not None:
+                sets.append(f"{col}=?")
+                args.append(str(data[col])[:6000] if col == "content" else str(data[col])[:500])
+        if not sets:
+            conn.close()
+            return jsonify({"error": "nothing to update"}), 400
+        sets.append("updated_at=datetime('now')")
+        conn.execute(f"UPDATE work_items SET {', '.join(sets)} WHERE id=?", args + [wid])
+        conn.commit(); conn.close()
+        _audit("store", "work.edit", wid)
         return jsonify({"status": "ok"})
     cols = [c[0] for c in conn.execute("SELECT * FROM work_items LIMIT 0").description]
     item = dict(zip(cols, row))
