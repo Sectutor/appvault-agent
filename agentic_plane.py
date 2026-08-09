@@ -2384,6 +2384,8 @@ NAV_CONFIG_DEFAULTS = {
     "section_order": [],
     "item_order": {},
     "pinned_defaults": [],
+    "expanded_defaults": [],
+    "groups": {},
 }
 
 
