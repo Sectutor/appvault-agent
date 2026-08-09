@@ -253,7 +253,7 @@ Step "Starting AppVault Agent"
 $apiKey = -join ((48..57)+(65..90)+(97..122) | Get-Random -Count 32 | ForEach-Object {[char]$_})
 Write-Host "  Pulling AppVault images..."
 & $docker pull ghcr.io/sectutor/appvault-agent:latest 2>&1 | Out-Null
-& $docker pull ghcr.io/sectutor/appvault-releases:v66 2>&1 | Out-Null
+& $docker pull ghcr.io/sectutor/appvault-releases:v67 2>&1 | Out-Null
 
 # Create data directory
 mkdir "$env:USERPROFILE\.appvault\data" -Force | Out-Null
@@ -303,7 +303,7 @@ Remove-Item "$env:USERPROFILE\.appvault\heimdall-config\www" -Recurse -Force -Er
   -e PUID=1000 `
   -e PGID=1000 `
   -e TZ=Etc/UTC `
-  ghcr.io/sectutor/appvault-releases:v66
+  ghcr.io/sectutor/appvault-releases:v67
 
 # Register auto-start scheduled task so containers launch on Windows boot
 Step "Configuring Windows Startup Task"
