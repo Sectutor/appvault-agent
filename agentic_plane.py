@@ -3184,6 +3184,10 @@ def api_seo_generate():
     _write_vault_output("04_Projects/Outputs", f"SEO_{int(time.time())}.md",
                         f"# SEO Article — {title_seed}\n\n**Cluster:** {cluster}\n\n{content}\n",
                         tag="SEO Article", agent="Oracle SEO")
+    # record into the Completed Work ledger (clean work item, not system noise)
+    _work_record(category="article", title=f"SEO Article — {title_seed}", content=content,
+                 source="seo", status="draft", tags=f"seo,{cluster}",
+                 url=wp_link or "", wid="seo-" + str(post_id))
     return jsonify({"status": "ok", "post_id": post_id, "content": content, "cluster": cluster,
                     "wp_link": wp_link, "wp_error": wp_error})
 
@@ -4260,6 +4264,10 @@ def _router_reply(message, agent_id="v", source="store"):
             conn.close()
             _write_vault_output("04_Projects/Outputs", f"V_Post_{int(time.time())}.md",
                                 f"# V-Routed Post: {msg}\n\n{content}\n", tag="V Content", agent="V")
+            # record into the Completed Work ledger (LinkedIn post)
+            _work_record(category="linkedin", title=f"LinkedIn: {msg[:70]}", content=content,
+                         source="v", status="draft", tags="linkedin,v-router",
+                         wid="vpost-" + str(int(time.time())))
             return f"📝 Drafted a LinkedIn post from live signals (saved to vault + posts pipeline):\n\n{content[:900]}"
         except Exception as e:
             return f"⚠️ Content generation failed: {str(e)[:200]}"
