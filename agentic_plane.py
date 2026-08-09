@@ -6426,6 +6426,17 @@ MISSION_TEMPLATES = {
             {"title": "Record + report + goal bump", "task_type": "report", "executor": "mission", "depends_on": 3},
         ],
     },
+    "product": {
+        "name": "Product mission",
+        "description": "Spec -> build -> verify (compile) -> ship (manifest + ledger) -> report",
+        "tasks": [
+            {"title": "Write the build spec (files + acceptance criteria)", "task_type": "spec", "executor": "mission"},
+            {"title": "Build the artifact (Python code)", "task_type": "build", "executor": "mission", "depends_on": 0},
+            {"title": "Verify the artifact (compile + gates)", "task_type": "verify_build", "executor": "mission", "depends_on": 1},
+            {"title": "Ship the artifact (manifest + work record)", "task_type": "ship", "executor": "mission", "depends_on": 2},
+            {"title": "Record + report + goal bump", "task_type": "report", "executor": "mission", "depends_on": 3},
+        ],
+    },
 }
 
 
@@ -6444,6 +6455,10 @@ def _missions_migrate():
         status TEXT DEFAULT 'queued', attempts INTEGER DEFAULT 0, last_error TEXT,
         wait_until TEXT, depends_on INTEGER, result_ref TEXT, verified INTEGER DEFAULT 0,
         created TEXT, updated TEXT
+    );
+    CREATE TABLE IF NOT EXISTS metrics (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        metric_type TEXT, value REAL, note TEXT, ts TEXT DEFAULT (datetime('now'))
     );
     """)
     conn.commit()
@@ -6686,6 +6701,16 @@ def _mission_report(mission, task, ctx):
     conn.close()
     lines = ["# Mission report: %s" % mission.get("title", "")]
     lines.append("Objective: %s | Status: %s" % (mission.get("objective_type", ""), mission.get("status", "")))
+    try:
+        conn = _db()
+        mrows = conn.execute("SELECT metric_type, value, note FROM metrics ORDER BY id DESC LIMIT 3").fetchall()
+        conn.close()
+        if mrows:
+            lines.append("\nRecent metrics:")
+            for mr in mrows:
+                lines.append("- %s: %s%s" % (mr["metric_type"], mr["value"], (" (" + mr["note"] + ")") if mr["note"] else ""))
+    except Exception:
+        pass
     for t in tasks:
         mark = "x" if t["verified"] else " "
         lines.append("- [%s] %s (%s)%s" % (mark, t["title"], t["status"],
@@ -6798,6 +6823,76 @@ def _mission_followup(mission, task, ctx):
     return (True, path + (" sent:%d" % sent if sent else ""), None)
 
 
+def _mission_spec(mission, task, ctx):
+    topic = mission.get("title") or "Build a small tool"
+    prompt = ("You are the engineer arm of an autonomous business agent. Voice: %s\n"
+              "Write a build spec for: %s\nSpec must include: purpose, 1-3 files (Python), "
+              "key functions, and 3 acceptance criteria. Output ONLY the spec (markdown)."
+              % (ctx["voice"], topic))
+    out = _call_llm_with({}, prompt, agent="hermes", timeout=180)
+    out = (out or "").strip()
+    if len(out) < 150:
+        return (False, None, "spec too short (%d chars)" % len(out))
+    path = _write_vault_output("05_Build", "spec_%s.md" % _mission_slug(topic), out, tag="Spec", agent="Mission")
+    return (True, path, None)
+
+
+def _mission_build(mission, task, ctx):
+    spec = _read_dep_result(task) or ""
+    topic = mission.get("title") or "tool"
+    prompt = ("You are the engineer arm of an autonomous business agent. Voice: %s\n"
+              "Write the COMPLETE, syntactically valid Python 3 script implementing this spec. "
+              "Output ONLY the code (no markdown fences, no explanation).\n\nSpec:\n%s"
+              % (ctx["voice"], spec[:3000]))
+    out = _call_llm_with({}, prompt, agent="hermes", timeout=300)
+    out = (out or "").strip()
+    out = out.replace("```python", "").replace("```", "").strip()
+    if len(out) < 60:
+        return (False, None, "artifact too short (%d chars)" % len(out))
+    path = _write_vault_output("05_Build", "%s.py" % _mission_slug(topic), out, tag="Build", agent="Mission")
+    return (True, path, None)
+
+
+def _mission_verify_build(mission, task, ctx):
+    code = _read_dep_result(task) or ""
+    if not code:
+        return (False, None, "no artifact to verify")
+    try:
+        compile(code, "<mission>", "exec")
+    except SyntaxError as e:
+        return (False, None, "SYNTAX ERROR line %s: %s" % (getattr(e, "lineno", "?"), str(e)[:120]))
+    if len(code) < 60:
+        return (False, None, "artifact too short (%d chars)" % len(code))
+    lines = len(code.splitlines())
+    return (True, "compile-ok %d lines" % lines, None)
+
+
+def _mission_ship(mission, task, ctx):
+    code = _read_dep_result(task) or ""
+    slug = _mission_slug(mission.get("title") or "artifact")
+    shipped = []
+    try:
+        vault = _vault_path()
+        d = os.path.join(vault, "05_Build", "shipped")
+        os.makedirs(d, exist_ok=True)
+        spath = os.path.join(d, "%s.py" % slug)
+        with open(spath, "w", encoding="utf-8") as f:
+            f.write(code)
+        manifest = os.path.join(d, "SHIPPED.md")
+        with open(manifest, "a", encoding="utf-8") as f:
+            f.write("- %s | %s | %d lines | %s\n" % (slug, mission.get("title", ""), len(code.splitlines()),
+                                                      datetime.now().strftime("%Y-%m-%d %H:%M")))
+        shipped.append(spath)
+    except Exception as e:
+        return (False, None, "ship failed: %s" % str(e)[:150])
+    try:
+        _work_record(category="product", title=mission.get("title") or "Product artifact",
+                     content=("shipped artifact: %s" % slug)[:500], source="mission")
+    except Exception:
+        pass
+    return (True, "shipped:%s" % slug, None)
+
+
 def _mission_review(mission):
     """Post-mission learning: review file + append lessons to MISSION_LESSONS.md."""
     try:
@@ -6858,9 +6953,65 @@ def _mission_execute(mission, task):
             return _mission_send_emails(mission, task, ctx)
         if ttype == "followup":
             return _mission_followup(mission, task, ctx)
+        if ttype == "spec":
+            return _mission_spec(mission, task, ctx)
+        if ttype == "build":
+            return _mission_build(mission, task, ctx)
+        if ttype == "verify_build":
+            return _mission_verify_build(mission, task, ctx)
+        if ttype == "ship":
+            return _mission_ship(mission, task, ctx)
         return (False, None, "unknown task_type: %s" % ttype)
     except Exception as e:
         return (False, None, str(e)[:300])
+
+
+def _mission_run_task(mission, task):
+    """Run one task and persist the outcome (daemon thread)."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        ok, ref, err = _mission_execute(mission, task)
+    except Exception as e:
+        ok, ref, err = False, None, str(e)[:300]
+    try:
+        conn = _db()
+        if ok:
+            conn.execute("UPDATE mission_tasks SET status='verified', verified=1, result_ref=?, last_error=NULL, updated=? WHERE id=?",
+                         (ref, now, task["id"]))
+            # a verified producer un-blocks its verifier so the new artifact gets checked
+            if task.get("task_type") in ("build", "draft"):
+                conn.execute("UPDATE mission_tasks SET status='queued', attempts=0, last_error=NULL, updated=? "
+                             "WHERE mission_id=? AND task_type IN ('verify_build','qa') AND status='blocked'",
+                             (now, task.get("mission_id")))
+            conn.commit()
+            conn.close()
+            return
+        attempts = (task.get("attempts") or 0) + 1
+        # self-correction: a failed verification re-queues its producer to regenerate
+        if task.get("task_type") in ("verify_build", "qa") and task.get("depends_on"):
+            conn.execute("UPDATE mission_tasks SET status='queued', attempts=0, last_error=NULL, updated=? WHERE id=?",
+                         (now, task["depends_on"]))
+        if attempts >= 3:
+            conn.execute("UPDATE mission_tasks SET status='blocked', attempts=?, last_error=?, updated=? WHERE id=?",
+                         (attempts, str(err)[:300], now, task["id"]))
+            out_note = "blocked: %s" % str(err)[:80]
+        else:
+            conn.execute("UPDATE mission_tasks SET status='queued', attempts=?, last_error=?, updated=? WHERE id=?",
+                         (attempts, str(err)[:300], now, task["id"]))
+            out_note = "retry(%d)" % attempts
+        conn.commit()
+        conn.close()
+        return out_note
+    except Exception as e:
+        try:
+            conn = _db()
+            conn.execute("UPDATE mission_tasks SET last_error=?, updated=? WHERE id=?",
+                         ("worker-db-error: %s" % str(e)[:200], now, task["id"]))
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+        return None
 
 
 def _mission_tick():
@@ -6876,6 +7027,12 @@ def _mission_tick():
             chosen = None
             for t in tasks:
                 tdict = dict(t)
+                # self-heal: outcome landed but status went stale (thread race)
+                if tdict["status"] == "running" and tdict["verified"]:
+                    conn.execute("UPDATE mission_tasks SET status='verified', updated=? WHERE id=?", (now, tdict["id"]))
+                    conn.commit()
+                    out.append("M%d T%d healed" % (m["id"], tdict["id"]))
+                    continue
                 if tdict["status"] != "queued":
                     continue
                 if tdict["depends_on"]:
@@ -6904,24 +7061,12 @@ def _mission_tick():
             conn.execute("UPDATE mission_tasks SET status='running', updated=? WHERE id=?", (now, chosen["id"]))
             conn.commit()
             conn.close()
-            ok, ref, err = _mission_execute(mdict, chosen)
-            conn = _db()
-            if ok:
-                conn.execute("UPDATE mission_tasks SET status='verified', verified=1, result_ref=?, last_error=NULL, updated=? WHERE id=?",
-                             (ref, now, chosen["id"]))
-                out.append("M%d T%d ok" % (m["id"], chosen["id"]))
-            else:
-                attempts = chosen["attempts"] + 1
-                if attempts >= 3:
-                    conn.execute("UPDATE mission_tasks SET status='blocked', attempts=?, last_error=?, updated=? WHERE id=?",
-                                 (attempts, str(err)[:300], now, chosen["id"]))
-                    out.append("M%d T%d blocked: %s" % (m["id"], chosen["id"], str(err)[:80]))
-                else:
-                    conn.execute("UPDATE mission_tasks SET status='queued', attempts=?, last_error=?, updated=? WHERE id=?",
-                                 (attempts, str(err)[:300], now, chosen["id"]))
-                    out.append("M%d T%d retry(%d)" % (m["id"], chosen["id"], attempts))
-            conn.commit()
-            conn.close()
+            # async: run in a daemon thread so the tick never blocks on LLM calls
+            try:
+                threading.Thread(target=_mission_run_task, args=(mdict, chosen), daemon=True).start()
+            except Exception:
+                _mission_run_task(mdict, chosen)
+            out.append("M%d T%d started" % (m["id"], chosen["id"]))
             conn = _db()
         conn.close()
     except Exception as e:
@@ -7065,6 +7210,54 @@ def api_mission_tick():
     return jsonify({"status": "ok", "events": res})
 
 
+@agentic_bp.route("/api/agentic/metrics", methods=["GET", "POST", "OPTIONS"])
+def api_metrics():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "POST":
+        data = request.get_json() or {}
+        mtype = (data.get("type") or "").strip().lower()
+        if mtype not in ("revenue", "leads", "traffic"):
+            return jsonify({"error": "type must be revenue|leads|traffic"}), 400
+        try:
+            value = float(data.get("value") or 0)
+        except Exception:
+            return jsonify({"error": "value must be a number"}), 400
+        note = (data.get("note") or "").strip()[:200]
+        conn = _db()
+        cur = conn.execute("INSERT INTO metrics (metric_type, value, note) VALUES (?,?,?)", (mtype, value, note))
+        conn.commit()
+        conn.close()
+        # revenue metrics feed business goals
+        if mtype == "revenue" and value > 0:
+            _goal_bump("revenue", "revenue", 2, "metrics", note=("Revenue recorded: $%s" % value))
+        return jsonify({"status": "ok", "metric_id": cur.lastrowid})
+    conn = _db()
+    rows = conn.execute("SELECT * FROM metrics ORDER BY id DESC LIMIT 50").fetchall()
+    conn.close()
+    return jsonify({"status": "ok", "metrics": [dict(r) for r in rows]})
+
+
+@agentic_bp.route("/api/agentic/tasks/<int:tid>/delay", methods=["POST", "OPTIONS"])
+def api_task_delay(tid):
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    try:
+        minutes = int(data.get("minutes") or 0)
+    except Exception:
+        return jsonify({"error": "minutes required"}), 400
+    if minutes < 1:
+        return jsonify({"error": "minutes must be >= 1"}), 400
+    wait = (datetime.now() + timedelta(minutes=minutes)).strftime("%Y-%m-%d %H:%M:%S")
+    conn = _db()
+    conn.execute("UPDATE mission_tasks SET wait_until=?, updated=? WHERE id=?", (wait, wait, tid))
+    conn.commit()
+    row = conn.execute("SELECT * FROM mission_tasks WHERE id=?", (tid,)).fetchone()
+    conn.close()
+    return jsonify({"status": "ok", "task": _mtask_to_dict(row) if row else None})
+
+
 @agentic_bp.route("/api/agentic/missions/templates", methods=["GET", "OPTIONS"])
 def api_mission_templates():
     if request.method == "OPTIONS":
@@ -7073,3 +7266,156 @@ def api_mission_templates():
 
 
 _missions_migrate()
+
+# =============================================================================
+# SECOND BRAIN GRAPH (2026-08-08) — the Memory page: wiki-link graph of the
+# Obsidian GRC-Brain vault + note CRUD. Vault mounted at /data/second-brain.
+# =============================================================================
+SECOND_BRAIN_ROOT = os.environ.get("SECOND_BRAIN_ROOT", "/data/second-brain/GRC-Brain")
+
+
+def _sb_path(path):
+    """Resolve a note path safely inside the vault root."""
+    root = os.path.realpath(SECOND_BRAIN_ROOT)
+    full = os.path.realpath(os.path.join(root, (path or "").lstrip("/\\")))
+    if not full.startswith(root + os.sep) and full != root:
+        return None
+    return full
+
+
+def _sb_note_title(path):
+    """Title from the first # heading, else the filename."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("# "):
+                    return line[2:].strip() or os.path.splitext(os.path.basename(path))[0]
+                if line:
+                    return os.path.splitext(os.path.basename(path))[0]
+    except Exception:
+        pass
+    return os.path.splitext(os.path.basename(path))[0]
+
+
+def _second_brain_graph():
+    """Scan the vault: nodes = markdown notes (sized by in-link count),
+    edges = [[wiki-links]]. Clusters = top-level folders."""
+    root = SECOND_BRAIN_ROOT
+    nodes, edges = [], []
+    index = {}          # relpath -> node dict
+    links_out = {}      # relpath -> [targets]
+    link_counts = {}    # relpath -> int (in-links)
+    link_re = re.compile(r"\[\[([^\]|#]+)(?:\|[^\]]+)?\]\]")
+    if not os.path.isdir(root):
+        return {"nodes": [], "edges": [], "folders": []}
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".") and d != ".obsidian"]
+        for fn in filenames:
+            if not fn.endswith(".md"):
+                continue
+            full = os.path.join(dirpath, fn)
+            rel = os.path.relpath(full, root).replace("\\", "/")
+            folder = rel.split("/")[0] if "/" in rel else "root"
+            try:
+                with open(full, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read(12000)
+            except Exception:
+                continue
+            title = _sb_note_title(full)
+            targets = []
+            for m in link_re.finditer(content):
+                tgt = m.group(1).strip().replace("\\", "/")
+                if tgt.startswith("http") or "/" not in tgt and "." in tgt:
+                    continue
+                targets.append(tgt)
+            index[rel] = {"id": rel, "title": title, "folder": folder, "path": rel}
+            links_out[rel] = targets
+            for t in targets:
+                key = t + ".md" if not t.endswith(".md") else t
+                key = key if key.endswith(".md") else key + ".md"
+                link_counts[key] = link_counts.get(key, 0) + 1
+    # build nodes with size + edges (resolve targets to existing relpaths)
+    for rel, node in index.items():
+        node["size"] = 1 + min(12, link_counts.get(rel, 0))
+        nodes.append(node)
+    id_set = set(index.keys())
+    for rel, targets in links_out.items():
+        for t in targets:
+            cand = t if t.endswith(".md") else t + ".md"
+            if cand in id_set:
+                edges.append({"from": rel, "to": cand})
+            elif t in id_set:
+                edges.append({"from": rel, "to": t})
+    folders = sorted({n["folder"] for n in nodes})
+    return {"nodes": nodes, "edges": edges, "folders": folders}
+
+
+@agentic_bp.route("/api/agentic/brain/graph", methods=["GET", "OPTIONS"])
+def api_brain_graph():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    try:
+        g = _second_brain_graph()
+        return jsonify({"status": "ok", **g})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)[:200]}), 500
+
+
+@agentic_bp.route("/api/agentic/brain/note", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+def api_brain_note():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "GET":
+        rel = (request.args.get("path") or "").strip()
+        full = _sb_path(rel)
+        if not full or not os.path.isfile(full):
+            return jsonify({"error": "note not found"}), 404
+        try:
+            with open(full, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+        except Exception as e:
+            return jsonify({"error": str(e)[:200]}), 500
+        return jsonify({"status": "ok", "path": rel, "content": content,
+                        "title": _sb_note_title(full)})
+    data = request.get_json(silent=True) or {}
+    rel = (data.get("path") or "").strip().lstrip("/\\")
+    if request.method == "DELETE":
+        rel = (request.args.get("path") or rel or "").strip().lstrip("/\\")
+    if not rel.endswith(".md"):
+        rel += ".md"
+    full = _sb_path(rel)
+    if not full:
+        return jsonify({"error": "path outside vault"}), 400
+    if request.method == "POST":
+        if os.path.exists(full):
+            return jsonify({"error": "note already exists"}), 409
+        content = data.get("content") or f"# {(data.get('title') or rel)}\n\n"
+        try:
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "w", encoding="utf-8") as f:
+                f.write(content)
+            _audit("store", "brain.note.create", rel)
+            return jsonify({"status": "ok", "path": rel})
+        except Exception as e:
+            return jsonify({"error": str(e)[:200]}), 500
+    if request.method == "PUT":
+        if not os.path.isfile(full):
+            return jsonify({"error": "note not found"}), 404
+        try:
+            with open(full, "w", encoding="utf-8") as f:
+                f.write(data.get("content") or "")
+            _audit("store", "brain.note.update", rel)
+            return jsonify({"status": "ok", "path": rel})
+        except Exception as e:
+            return jsonify({"error": str(e)[:200]}), 500
+    if request.method == "DELETE":
+        if not os.path.isfile(full):
+            return jsonify({"error": "note not found"}), 404
+        try:
+            os.remove(full)
+            _audit("store", "brain.note.delete", rel)
+            return jsonify({"status": "ok", "deleted": rel})
+        except Exception as e:
+            return jsonify({"error": str(e)[:200]}), 500
+    return jsonify({"error": "method not allowed"}), 405
