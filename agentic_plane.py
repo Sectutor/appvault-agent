@@ -836,12 +836,22 @@ def api_memory():
         conn.close()
         return jsonify({"status": "ok", "memory": [dict(r) for r in rows], "semantic": True, "query": q})
     conn = _db()
+    ex_sys = request.args.get("exclude_system") == "1"
     if tier:
-        rows = conn.execute("SELECT * FROM memory WHERE tier=? ORDER BY id DESC LIMIT 60", (tier,)).fetchall()
+        if ex_sys:
+            rows = conn.execute(
+                "SELECT * FROM memory WHERE tier=? AND agent NOT LIKE 'Cron:%' AND NOT (agent='Hermes Oracle Core' AND tag='Radar Signal') ORDER BY id DESC LIMIT 60",
+                (tier,)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM memory WHERE tier=? ORDER BY id DESC LIMIT 60", (tier,)).fetchall()
     else:
-        rows = conn.execute("SELECT * FROM memory ORDER BY id DESC LIMIT 60").fetchall()
+        if ex_sys:
+            rows = conn.execute(
+                "SELECT * FROM memory WHERE agent NOT LIKE 'Cron:%' AND NOT (agent='Hermes Oracle Core' AND tag='Radar Signal') ORDER BY id DESC LIMIT 60").fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM memory ORDER BY id DESC LIMIT 60").fetchall()
     conn.close()
-    return jsonify({"status": "ok", "memory": [dict(r) for r in rows]})
+    return jsonify({"status": "ok", "memory": [dict(r) for r in rows], "excluded_system": ex_sys})
 
 @agentic_bp.route("/api/agentic/memory/<int:mid>", methods=["DELETE", "PUT", "OPTIONS"])
 def api_memory_item(mid):
@@ -930,9 +940,8 @@ def api_oracle():
     cur = conn.execute("SELECT last_insert_rowid()")
     mem_id = cur.fetchone()[0]
     top_titles = "\n".join(f"  - {s['title'][:110]}" for s in stories[:4])
-    conn.execute("INSERT INTO memory (ts, agent, tag, content) VALUES (?,?,?,?)",
-                 (datetime.now().strftime("%H:%M LOCAL"), "Hermes Oracle Core", "Radar Signal",
-                  f"Live sweep for '{query}' found {len(stories)} signals -> `{os.path.basename(signal_file) if signal_file else 'in-memory'}`:\n{top_titles}"))
+    # (2026-08-08) radar sweeps no longer duplicate into the memory table — the
+    # sweeps table + vault signal file are the record.
     conn.commit()
     conn.close()
 
@@ -2206,13 +2215,20 @@ def _second_brain_graph():
             except Exception:
                 continue
             title = _sb_note_title(full)
+            preview = ""
+            try:
+                with open(full, "r", encoding="utf-8", errors="replace") as f:
+                    raw = f.read(900)
+                preview = re.sub(r"\s+", " ", re.sub(r"[#*`>|\[\]]", " ", raw)).strip()[:160]
+            except Exception:
+                pass
             targets = []
             for m in link_re.finditer(content):
                 tgt = m.group(1).strip().replace("\\", "/")
                 if tgt.startswith("http") or "/" not in tgt and "." in tgt:
                     continue
                 targets.append(tgt)
-            index[rel] = {"id": rel, "title": title, "folder": folder, "path": rel}
+            index[rel] = {"id": rel, "title": title, "folder": folder, "path": rel, "preview": preview}
             links_out[rel] = targets
             for t in targets:
                 key = t + ".md" if not t.endswith(".md") else t
@@ -5627,16 +5643,8 @@ def _complete_cron_job(job, status, output):
                   now, job["id"]))
     conn.commit()
     conn.close()
-    # compounding loop: every cron result lands in memory + vault
-    try:
-        conn = _db()
-        conn.execute("INSERT INTO memory (ts, agent, tag, content, tier, source, updated) VALUES (?,?,?,?,?,?,?)",
-                     (datetime.now().strftime("%H:%M LOCAL"), f"Cron: {job.get('name')}", "Cron Job",
-                      f"Cron '{job.get('name')}' -> {status}: {(output or '')[:250]}", "auto", "cron", now))
-        conn.commit()
-        conn.close()
-    except Exception:
-        pass
+    # (2026-08-08) cron results NO LONGER land in the memory table — that polluted
+    # agent memory with 'Cron X -> ok' ticks. The vault log below is the record.
     vault = _vault_path()
     d = os.path.join(vault, "02_Agent_Logs", "Cron")
     try:
@@ -7091,7 +7099,10 @@ def _mission_verify_build(mission, task, ctx):
 
 
 def _mission_ship(mission, task, ctx):
-    code = _read_dep_result(task) or ""
+    build_ref = _mission_result_by_type(mission.get("id"), "build")
+    code = _read_ref(build_ref) or ""
+    if not code:
+        return (False, None, "no build artifact found to ship")
     slug = _mission_slug(mission.get("title") or "artifact")
     shipped = []
     try:
