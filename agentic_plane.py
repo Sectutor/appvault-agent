@@ -2827,7 +2827,7 @@ _init_compounding_tables()
 #    (the video's Layer 2 pain: "none of them actually know who you are")
 # ---------------------------------------------------------------------------
 IDENTITY_DEFAULTS = {
-    "name": "",
+    "name": "Tisha Andrews",
     "brand": "",
     "voice": "",
     "audience": "",
