@@ -2151,6 +2151,191 @@ def _build_vault_graph():
     return nodes, edges
 
 
+# SECOND BRAIN GRAPH (2026-08-08) — the Memory page: wiki-link graph of the
+# Obsidian GRC-Brain vault + note CRUD. Vault mounted at /data/second-brain.
+# =============================================================================
+SECOND_BRAIN_ROOT = os.environ.get("SECOND_BRAIN_ROOT", "/data/second-brain/GRC-Brain")
+
+
+def _sb_path(path):
+    """Resolve a note path safely inside the vault root."""
+    root = os.path.realpath(SECOND_BRAIN_ROOT)
+    full = os.path.realpath(os.path.join(root, (path or "").lstrip("/\\")))
+    if not full.startswith(root + os.sep) and full != root:
+        return None
+    return full
+
+
+def _sb_note_title(path):
+    """Title from the first # heading, else the filename."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("# "):
+                    return line[2:].strip() or os.path.splitext(os.path.basename(path))[0]
+                if line:
+                    return os.path.splitext(os.path.basename(path))[0]
+    except Exception:
+        pass
+    return os.path.splitext(os.path.basename(path))[0]
+
+
+def _second_brain_graph():
+    """Scan the vault: nodes = markdown notes (sized by in-link count),
+    edges = [[wiki-links]]. Clusters = top-level folders."""
+    root = SECOND_BRAIN_ROOT
+    nodes, edges = [], []
+    index = {}          # relpath -> node dict
+    links_out = {}      # relpath -> [targets]
+    link_counts = {}    # relpath -> int (in-links)
+    link_re = re.compile(r"\[\[([^\]|#]+)(?:\|[^\]]+)?\]\]")
+    if not os.path.isdir(root):
+        return {"nodes": [], "edges": [], "folders": []}
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".") and d != ".obsidian"]
+        for fn in filenames:
+            if not fn.endswith(".md"):
+                continue
+            full = os.path.join(dirpath, fn)
+            rel = os.path.relpath(full, root).replace("\\", "/")
+            folder = rel.split("/")[0] if "/" in rel else "root"
+            try:
+                with open(full, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read(12000)
+            except Exception:
+                continue
+            title = _sb_note_title(full)
+            targets = []
+            for m in link_re.finditer(content):
+                tgt = m.group(1).strip().replace("\\", "/")
+                if tgt.startswith("http") or "/" not in tgt and "." in tgt:
+                    continue
+                targets.append(tgt)
+            index[rel] = {"id": rel, "title": title, "folder": folder, "path": rel}
+            links_out[rel] = targets
+            for t in targets:
+                key = t + ".md" if not t.endswith(".md") else t
+                key = key if key.endswith(".md") else key + ".md"
+                link_counts[key] = link_counts.get(key, 0) + 1
+    # build nodes with size + edges (resolve targets to existing relpaths)
+    for rel, node in index.items():
+        node["size"] = 1 + min(12, link_counts.get(rel, 0))
+        nodes.append(node)
+    id_set = set(index.keys())
+    for rel, targets in links_out.items():
+        for t in targets:
+            cand = t if t.endswith(".md") else t + ".md"
+            if cand in id_set:
+                edges.append({"from": rel, "to": cand})
+            elif t in id_set:
+                edges.append({"from": rel, "to": t})
+    folders = sorted({n["folder"] for n in nodes})
+    return {"nodes": nodes, "edges": edges, "folders": folders}
+
+
+@agentic_bp.route("/api/agentic/brain/graph", methods=["GET", "OPTIONS"])
+def api_brain_graph():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    try:
+        g = _second_brain_graph()
+        if request.args.get("include_memory") == "1":
+            g["memories"] = _brain_memory_overlay(g["nodes"])
+        return jsonify({"status": "ok", **g})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)[:200]}), 500
+
+
+@agentic_bp.route("/api/agentic/brain/note", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+def api_brain_note():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "GET":
+        rel = (request.args.get("path") or "").strip()
+        full = _sb_path(rel)
+        if not full or not os.path.isfile(full):
+            return jsonify({"error": "note not found"}), 404
+        try:
+            with open(full, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+        except Exception as e:
+            return jsonify({"error": str(e)[:200]}), 500
+        return jsonify({"status": "ok", "path": rel, "content": content,
+                        "title": _sb_note_title(full)})
+    data = request.get_json(silent=True) or {}
+    rel = (data.get("path") or "").strip().lstrip("/\\")
+    if request.method == "DELETE":
+        rel = (request.args.get("path") or rel or "").strip().lstrip("/\\")
+    if not rel.endswith(".md"):
+        rel += ".md"
+    full = _sb_path(rel)
+    if not full:
+        return jsonify({"error": "path outside vault"}), 400
+    if request.method == "POST":
+        if os.path.exists(full):
+            return jsonify({"error": "note already exists"}), 409
+        content = data.get("content") or f"# {(data.get('title') or rel)}\n\n"
+        try:
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "w", encoding="utf-8") as f:
+                f.write(content)
+            _audit("store", "brain.note.create", rel)
+            return jsonify({"status": "ok", "path": rel})
+        except Exception as e:
+            return jsonify({"error": str(e)[:200]}), 500
+    if request.method == "PUT":
+        if not os.path.isfile(full):
+            return jsonify({"error": "note not found"}), 404
+        try:
+            with open(full, "w", encoding="utf-8") as f:
+                f.write(data.get("content") or "")
+            _audit("store", "brain.note.update", rel)
+            return jsonify({"status": "ok", "path": rel})
+        except Exception as e:
+            return jsonify({"error": str(e)[:200]}), 500
+    if request.method == "DELETE":
+        if not os.path.isfile(full):
+            return jsonify({"error": "note not found"}), 404
+        try:
+            os.remove(full)
+            _audit("store", "brain.note.delete", rel)
+            return jsonify({"status": "ok", "deleted": rel})
+        except Exception as e:
+            return jsonify({"error": str(e)[:200]}), 500
+    return jsonify({"error": "method not allowed"}), 405
+
+def _brain_memory_overlay(nodes):
+    """Match recent memory entries to graph notes by keyword overlap on titles."""
+    try:
+        conn = _db()
+        rows = conn.execute("SELECT * FROM memory ORDER BY id DESC LIMIT 40").fetchall()
+        conn.close()
+    except Exception:
+        return []
+    def toks(s):
+        return set(re.findall(r"[a-z0-9]{4,}", (s or "").lower()))
+    node_toks = [(n["id"], toks(n.get("title", ""))) for n in nodes]
+    out = []
+    for r in rows:
+        mt = toks(r["content"])
+        if not mt:
+            continue
+        best = None
+        best_score = 1
+        for nid, nt in node_toks:
+            ov = len(mt & nt)
+            if ov > best_score:
+                best = nid
+                best_score = ov
+        out.append({"id": r["id"], "content": (r["content"] or "")[:140],
+                    "tag": r["tag"] or "General", "tier": r["tier"] or "working",
+                    "agent": r["agent"] or "System", "node_id": best,
+                    "ts": (r["ts"] or "")[:16]})
+    return out
+
+
+
 @agentic_bp.route("/api/agentic/vault/graph", methods=["GET", "OPTIONS"])
 def api_vault_graph():
     if request.method == "OPTIONS":
@@ -6865,7 +7050,8 @@ def _mission_build(mission, task, ctx):
     topic = mission.get("title") or "tool"
     prompt = ("You are the engineer arm of an autonomous business agent. Voice: %s\n"
               "Write the COMPLETE, syntactically valid Python 3 script implementing this spec. "
-              "Output ONLY the code (no markdown fences, no explanation).\n\nSpec:\n%s"
+              "Rules: output ONLY code (no markdown fences, no explanation); a single self-contained file; "
+              "no comments naming other files; NO 'from __future__' imports (the compiler rejects them here).\n\nSpec:\n%s"
               % (ctx["voice"], spec[:3000]))
     # adaptive feedback: previous verification failure
     try:
@@ -6877,7 +7063,8 @@ def _mission_build(mission, task, ctx):
         conn.close()
         if v and v["last_error"]:
             prompt += ("\n\nIMPORTANT: your previous attempt was REJECTED by the compiler with:\n%s\n"
-                       "Fix that exact issue. Output a single, self-contained, compilable Python file." % v["last_error"])
+                       "Fix that exact issue, and remember: NO 'from __future__' imports, single file, "
+                       "output only code." % v["last_error"])
     except Exception:
         pass
     out = _call_llm_with({}, prompt, agent="hermes", timeout=300)
