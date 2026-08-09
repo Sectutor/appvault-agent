@@ -3768,11 +3768,14 @@ def _audit(actor, action, detail):
 #    (video: "it's not truly yours... a folder with an instructions.md")
 # ---------------------------------------------------------------------------
 def _get_agent_prompt(agent):
-    """Soul override wins > built-in AGENT_PROMPTS > default."""
+    """Profile-wide soul override wins > per-agent soul (legacy) > built-in > default."""
     try:
         raw = _cfg_get("souls") or ""
         souls = json.loads(raw) if raw else {}
-        if souls.get(agent):
+        pname = (_get_profile().get("name") or "default").strip() or "default"
+        if souls.get(pname):
+            return souls[pname]
+        if souls.get(agent):  # legacy per-agent souls (pre-profile, 2026-08-08)
             return souls[agent]
     except Exception:
         pass
@@ -3783,27 +3786,31 @@ def _get_agent_prompt(agent):
 def api_souls():
     if request.method == "OPTIONS":
         return jsonify({"status": "ok"})
-    if request.method == "POST":
-        data = request.get_json() or {}
-        raw = _cfg_get("souls") or ""
-        try:
-            souls = json.loads(raw) if raw else {}
-        except Exception:
-            souls = {}
-        for agent, prompt in (data.get("souls") or {}).items():
-            if prompt is not None:
-                souls[agent] = str(prompt)
-        _cfg_set("souls", json.dumps(souls))
-        _audit("store", "souls.update", f"updated {len(data.get('souls') or {})} agent souls")
-        return jsonify({"status": "ok", "souls": souls})
     raw = _cfg_get("souls") or ""
     try:
         souls = json.loads(raw) if raw else {}
     except Exception:
         souls = {}
-    # include built-in prompts so the UI can show + edit everything
-    all_souls = {agent: souls.get(agent, prompt) for agent, prompt in AGENT_PROMPTS.items()}
-    return jsonify({"status": "ok", "souls": all_souls})
+    pname = (_get_profile().get("name") or "default").strip() or "default"
+    if request.method == "POST":
+        data = request.get_json() or {}
+        if data.get("profile"):
+            pname = str(data["profile"]).strip() or pname
+        if "content" in data:
+            if data["content"] is None or str(data["content"]).strip() == "":
+                souls.pop(pname, None)
+            else:
+                souls[pname] = str(data["content"])
+            _cfg_set("souls", json.dumps(souls))
+            _audit("store", "souls.update", f"profile {pname} soul updated")
+            return jsonify({"status": "ok", "profile": pname})
+        for profile, prompt in (data.get("souls") or {}).items():
+            if prompt is not None:
+                souls[profile] = str(prompt)
+        _cfg_set("souls", json.dumps(souls))
+        _audit("store", "souls.update", f"updated {len(data.get('souls') or {})} profile souls")
+    return jsonify({"status": "ok", "profiles": sorted(set(list(souls.keys()) + [pname])),
+                    "current": pname, "souls": souls})
 
 
 # ---------------------------------------------------------------------------
