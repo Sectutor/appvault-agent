@@ -8085,6 +8085,17 @@ def _df_prepare():
         else:
             out.append(l)
     if wrote:
+        # Collapse duplicate seeded secrets: keep the LAST occurrence (the
+        # effective value compose used at container creation).
+        seen = {}
+        for i in range(len(out) - 1, -1, -1):
+            k = out[i].split("=", 1)[0].strip()
+            if k in ("BETTER_AUTH_SECRET", "DEER_FLOW_INTERNAL_AUTH_TOKEN"):
+                if k in seen:
+                    out[i] = None
+                else:
+                    seen[k] = True
+        out = [l for l in out if l is not None]
         with open(env_path, "w") as f:
             f.writelines(out)
     # frontend/.env (compose env_file ../frontend/.env)
@@ -8158,6 +8169,8 @@ def _df_runner():
         _DEERFLOW_STATE["phase"] = "up" if p.returncode == 0 else "error"
         if p.returncode != 0:
             _DEERFLOW_STATE["error"] = "compose up failed (see launch.log tail)"
+        else:
+            _df_sync_ensure()
     except Exception as e:
         _DEERFLOW_STATE["phase"] = "error"
         _DEERFLOW_STATE["error"] = str(e)[:300]
@@ -8184,9 +8197,17 @@ def api_deerflow_status():
     phase = _DEERFLOW_STATE["phase"]
     if phase == "up" and st != "online":
         phase = "degraded"
+    if st == "online":
+        _df_sync_ensure()
+    admin = {}
+    _df_cfg = _cfg_get("deerflow")
+    if isinstance(_df_cfg, dict) and _df_cfg.get("password"):
+        admin = {"email": _df_cfg.get("email", ""), "password": _df_cfg["password"]}
     return jsonify({"status": "online" if st == "online" else phase,
                     "phase": phase, "probe": st, "http": code,
                     "error": _DEERFLOW_STATE.get("error", ""),
+                    "sync": _DEERFLOW_STATE.get("sync", ""),
+                    "admin": admin,
                     "log": _df_tail_log(40)})
 
 @agentic_bp.route("/api/agentic/agents/deerflow/stop", methods=["POST", "OPTIONS"])
@@ -8199,3 +8220,169 @@ def api_deerflow_stop():
     with _DEERFLOW_LOCK:
         _DEERFLOW_STATE["phase"] = "idle"
     return jsonify({"status": "ok" if ok else "error", "output": out[-400:]})
+
+# ---------------------------------------------------------------------------
+# DEERFLOW RUN AUTO-SYNC — every completed run mirrors into the Agentic OS
+# shared memory (same store the vault syncs), the work ledger, and the bus.
+# Auth: internal token (X-DeerFlow-Internal-Token) + CSRF double-submit
+# satisfied with a matching cookie/header pair — a non-browser trusted client
+# needs no user account and no UI login. Idempotent via deerflow_sync table.
+# ---------------------------------------------------------------------------
+_DF_SYNC_FLAG = [False]
+
+def _df_read_env(key):
+    """Read a key from the DeerFlow .env — LAST non-empty occurrence wins,
+    matching compose --env-file semantics (seed runs may have appended dupes)."""
+    try:
+        with open(os.path.join(_DEERFLOW_DIR, ".env"), errors="replace") as f:
+            val = None
+            for l in f.read().splitlines():
+                l = l.strip()
+                if l.startswith(key + "="):
+                    v = l.split("=", 1)[1].strip().strip('"').strip("'")
+                    if v:
+                        val = v
+            return val
+    except Exception:
+        pass
+    return None
+
+def _df_api(method, path, payload=None, timeout=30, owner=None):
+    """Call the DeerFlow gateway API through nginx (:2026) as a trusted
+    internal client (token auth + CSRF double-submit pair). Bypasses the
+    outbound proxy — a proxied request strips the internal-token header and
+    returns 401, while a direct call returns 200 (verified empirically)."""
+    token = _df_read_env("DEER_FLOW_INTERNAL_AUTH_TOKEN")
+    if not token:
+        return 0, {"_error": "no internal token"}
+    url = "http://host.docker.internal:2026" + path
+    headers = {
+        "X-DeerFlow-Internal-Token": token,
+        "X-CSRF-Token": token,
+        "Cookie": "csrf_token=" + token,
+    }
+    if owner:
+        headers["X-DeerFlow-Owner-User-Id"] = owner
+    data = None
+    if payload is not None:
+        data = json.dumps(payload).encode()
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(req, timeout=timeout) as r:
+            body = r.read().decode("utf-8", "replace")
+        try:
+            return 200, json.loads(body)
+        except Exception:
+            return 200, {"_raw": body[:3000]}
+    except urllib.error.HTTPError as e:
+        return e.code, (e.read().decode("utf-8", "replace")[:1500])
+    except Exception as e:
+        return 0, {"_error": str(e)[:300]}
+
+def _df_bootstrap_admin():
+    """Ensure a DeerFlow admin exists so UI threads are visible to the sync.
+
+    Creates it via the legitimate first-boot flow (POST /api/v1/auth/initialize)
+    when the instance is still in setup state; stores creds in the plane
+    config so the user can log into the DeerFlow UI with them. If a user
+    already exists (e.g. created in the UI), the sync falls back to the
+    'default' namespace. Returns the admin user id or None."""
+    cfg = _cfg_get("deerflow")
+    if isinstance(cfg, dict) and cfg.get("user_id"):
+        return cfg["user_id"]
+    code, data = _df_api("GET", "/api/v1/auth/setup-status")
+    if code != 200:
+        return None
+    email = "admin@appvault.io"
+    password = "".join(_df_random.choices("abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789", k=16))
+    uid = None
+    if data.get("needs_setup"):
+        code, data = _df_api("POST", "/api/v1/auth/initialize",
+                             {"email": email, "password": password})
+        if code in (200, 201):
+            uid = (data or {}).get("id") or (data or {}).get("user", {}).get("id")
+    _cfg_set("deerflow", {"email": email, "password": password, "user_id": uid})
+    return uid
+
+def _df_run_summary(thread_id, owner=None):
+    """Last AI message text from a thread (empty if none)."""
+    code, msgs = _df_api("GET", f"/api/threads/{thread_id}/messages", owner=owner)
+    if code != 200 or not isinstance(msgs, list):
+        return ""
+    for m in reversed(msgs):
+        if (m.get("type") or "").lower() in ("ai", "assistant", "agent"):
+            c = m.get("content")
+            if isinstance(c, str):
+                return c.strip()
+            if isinstance(c, list):
+                parts = [b.get("text", "") for b in c if isinstance(b, dict) and b.get("text")]
+                if parts:
+                    return " ".join(parts).strip()
+    return ""
+
+def _df_sync_once():
+    """One pass: completed DeerFlow runs -> shared memory + work + bus."""
+    owner = _df_bootstrap_admin()
+    code, data = _df_api("POST", "/api/threads/search", {}, owner=owner)
+    if code != 200:
+        return f"search HTTP {code}"
+    threads = data if isinstance(data, list) else []
+    conn = _db()
+    conn.execute("CREATE TABLE IF NOT EXISTS deerflow_sync (run_id TEXT PRIMARY KEY, synced_at TEXT)")
+    done = {r["run_id"] for r in conn.execute("SELECT run_id FROM deerflow_sync").fetchall()}
+    new_total = 0
+    for th in threads:
+        tid = th.get("thread_id") or th.get("id")
+        if not tid:
+            continue
+        title = (th.get("title") or th.get("display_name") or tid)[:120]
+        code, runs = _df_api("GET", f"/api/threads/{tid}/runs", owner=owner)
+        if code != 200 or not isinstance(runs, list):
+            continue
+        for run in runs:
+            rid = run.get("id") or run.get("run_id")
+            status = (run.get("status") or "").lower()
+            if not rid or rid in done or status not in ("completed", "success", "done", "succeeded"):
+                continue
+            summary = _df_run_summary(tid, owner=owner)
+            if not summary:
+                continue
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cur = conn.execute(
+                "INSERT INTO memory (ts, agent, tag, content, tier, source, updated) VALUES (?,?,?,?,?,?,?)",
+                (datetime.now().strftime("%H:%M LOCAL"), "DeerFlow", "DeerFlow Run",
+                 summary[:1500], "working", "deerflow-sync", now))
+            conn.commit()
+            row = conn.execute("SELECT * FROM memory WHERE id=?", (cur.lastrowid,)).fetchone()
+            _sync_memory_to_vault(row["id"], dict(row))
+            _work_record(category="research", title=f"🦌 {title}", content=summary[:1500],
+                         source="deerflow-sync", status="done")
+            _bus_publish("deerflow.run", {"thread_id": tid, "run_id": rid, "title": title,
+                                          "summary": summary[:500]})
+            conn.execute("INSERT OR IGNORE INTO deerflow_sync (run_id, synced_at) VALUES (?, ?)",
+                         (rid, now))
+            conn.commit()
+            new_total += 1
+    conn.close()
+    _DEERFLOW_STATE["sync"] = f"{new_total} new run(s)"
+    return f"{new_total} new run(s)"
+
+def _df_sync_worker():
+    while True:
+        try:
+            if _df_probe()[0] == "online":
+                try:
+                    _df_sync_once()
+                except Exception as e:
+                    _DEERFLOW_STATE["sync"] = "error: " + str(e)[:200]
+        except Exception:
+            pass
+        time.sleep(60)
+
+def _df_sync_ensure():
+    """Start the sync worker once (idempotent across restarts)."""
+    if not _DF_SYNC_FLAG[0]:
+        _DF_SYNC_FLAG[0] = True
+        threading.Thread(target=_df_sync_worker, daemon=True).start()
