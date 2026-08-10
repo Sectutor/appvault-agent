@@ -9052,6 +9052,115 @@ def api_social_schedule(wid):
                                                "title": item.get("title")})
     return jsonify({"status": "ok", "item": it, "detail": detail})
 
+# ---------------------------------------------------------------------------
+# ARTICLE HTML VIEW — render a stored markdown article as a full styled HTML
+# page (standalone browser view; also a pre-publish preview of the WP post).
+# ---------------------------------------------------------------------------
+def _md_inline_html(t):
+    s = (t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+    s = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)",
+               r'<img src="\2" alt="\1" style="max-width:100%;border-radius:8px;margin:12px 0;">', s)
+    s = re.sub(r"\[([^\]]+)\]\(([^)]+)\)",
+               r'<a href="\2" target="_blank" rel="noopener">\1</a>', s)
+    s = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", s)
+    s = re.sub(r"(^|[^*])\*([^*]+)\*", r"\1<em>\2</em>", s)
+    s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
+    return s
+
+def _md_to_html_page(text):
+    out, in_code, code_buf, in_list = [], False, [], None
+    def close():
+        nonlocal in_list
+        if in_list:
+            out.append("</ul>" if in_list == "ul" else "</ol>")
+            in_list = None
+    for raw in (text or "").split("\n"):
+        t = raw.strip()
+        if t.startswith("```"):
+            if in_code:
+                out.append("<pre><code>" + "\n".join(code_buf).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") + "</code></pre>")
+                code_buf = []
+                in_code = False
+            else:
+                close()
+                in_code = True
+            continue
+        if in_code:
+            code_buf.append(raw)
+            continue
+        m = re.match(r"^(#{1,4})\s+(.*)$", t)
+        if m:
+            close()
+            n = len(m.group(1))
+            out.append(f"<h{n}>{_md_inline_html(m.group(2))}</h{n}>")
+            continue
+        if t.startswith("> "):
+            close()
+            out.append(f"<blockquote><p>{_md_inline_html(t[2:])}</p></blockquote>")
+            continue
+        m = re.match(r"^[-*]\s+(.*)$", t)
+        if m:
+            if in_list != "ul":
+                close()
+                out.append("<ul>")
+                in_list = "ul"
+            out.append(f"<li>{_md_inline_html(m.group(1))}</li>")
+            continue
+        m = re.match(r"^\d+\.\s+(.*)$", t)
+        if m:
+            if in_list != "ol":
+                close()
+                out.append("<ol>")
+                in_list = "ol"
+            out.append(f"<li>{_md_inline_html(m.group(1))}</li>")
+            continue
+        close()
+        if not t:
+            continue
+        out.append(f"<p>{_md_inline_html(t)}</p>")
+    close()
+    if in_code:
+        out.append("<pre><code>" + "\n".join(code_buf).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") + "</code></pre>")
+    return "\n".join(out)
+
+@agentic_bp.route("/api/agentic/pipeline/<wid>/view", methods=["GET", "OPTIONS"])
+def api_pipeline_view(wid):
+    """Standalone styled HTML page for an article (or any pipeline item)."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    item = _pipeline_get(wid)
+    if not item:
+        return "Not found", 404
+    title = (item.get("title") or "Article").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    body = _md_to_html_page(item.get("content") or "")
+    img = item.get("image_url") or ""
+    img_html = (f'<img src="{img}" style="max-width:100%;border-radius:12px;margin:0 0 24px;'
+                f'border:1px solid rgba(51,65,85,0.5);">') if img else ""
+    status = (item.get("status") or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    page = f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<title>{title}</title><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{{background:#0b1120;color:#e2e8f0;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;margin:0;line-height:1.65;}}
+.wrap{{max-width:760px;margin:0 auto;padding:48px 24px 80px;}}
+h1{{font-size:30px;line-height:1.25;color:#f8fafc;margin:0 0 10px;}}
+h2{{font-size:21px;color:#f1f5f9;margin:32px 0 10px;}}
+h3{{font-size:17px;color:#f1f5f9;margin:26px 0 8px;}}
+p{{font-size:16px;color:#cbd5e1;margin:14px 0;}}
+a{{color:#38bdf8;}}
+ul,ol{{font-size:16px;color:#cbd5e1;}}
+li{{margin:6px 0;}}
+blockquote{{border-left:3px solid #38bdf8;margin:16px 0;padding:4px 16px;color:#94a3b8;background:rgba(56,189,248,0.06);border-radius:0 8px 8px 0;}}
+pre{{background:#0f172a;border:1px solid rgba(51,65,85,0.6);border-radius:8px;padding:14px;overflow-x:auto;font-size:13.5px;color:#7dd3fc;}}
+code{{background:#0f172a;border-radius:4px;padding:1px 6px;color:#7dd3fc;font-size:13.5px;}}
+.meta{{font-size:12.5px;color:#64748b;margin-bottom:24px;}}
+.badge{{display:inline-block;padding:3px 10px;border-radius:999px;font-size:11px;color:#94a3b8;border:1px solid rgba(51,65,85,0.6);}}
+</style></head><body><div class="wrap">
+<h1>{title}</h1>
+<div class="meta"><span class="badge">{status}</span></div>
+{img_html}
+{body}
+</div></body></html>"""
+    return Response(page, mimetype="text/html")
+
 def _pipeline_worker():
     """Auto-advance: brief -> draft -> refine; approved -> publish (auto gate)."""
     while True:
