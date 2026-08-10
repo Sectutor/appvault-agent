@@ -8618,3 +8618,236 @@ def api_chat_stream():
 
     return Response(generate(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+# ---------------------------------------------------------------------------
+# CONTENT PIPELINE — signal -> brief -> draft -> refine -> APPROVAL -> publish
+# A state machine over work_items (source='pipeline:*'):
+#   ready_to_write (brief) -> needs_refinement (draft) -> ready_for_approval
+#   -> approved (HUMAN gate) -> published (reuses _wp_publish).
+# Auto-advances up to the approval gate when auto is on; approve/reject are
+# human-only. Editor pass runs a DIFFERENT model (deepseek-reasoner by
+# default) + the humanise-text skill.
+# ---------------------------------------------------------------------------
+_PIPELINE_FLAG = [False]
+
+def _pipeline_cfg():
+    cfg = _cfg_get("pipeline")
+    if not isinstance(cfg, dict):
+        cfg = {}
+    out = {"auto": True, "editor_model": ""}
+    out.update({k: v for k, v in cfg.items() if k in out})
+    return out
+
+def _pipeline_get(wid):
+    conn = _db()
+    row = conn.execute("SELECT * FROM work_items WHERE id=?", (wid,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def _pipeline_update(wid, **fields):
+    sets = ", ".join(f"{k}=?" for k in fields)
+    conn = _db()
+    conn.execute(f"UPDATE work_items SET {sets}, updated_at=datetime('now') WHERE id=?",
+                 (*fields.values(), wid))
+    conn.commit()
+    row = conn.execute("SELECT * FROM work_items WHERE id=?", (wid,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def _pipeline_brief_from_signal(signal_text, source="radar"):
+    """Strategist: a scored signal -> structured content brief (ready_to_write)."""
+    sys_p = ("You are the Content Strategist for an SEO content engine. Convert the signal into a "
+             "STRICT JSON brief with EXACTLY these keys: angle (the hook), keyword_target (primary "
+             "SEO keyword), pillar (which content pillar it maps to), pain_point (audience pain it "
+             "solves), cta (call to action), title_proposal, outline (array of section headings). "
+             "No prose outside the JSON.")
+    raw = _call_llm(f"Signal: {signal_text[:1200]}", system_prompt=sys_p,
+                    agent="strategist", timeout=90)
+    brief = {}
+    try:
+        m = re.search(r"\{.*\}", raw, re.S)
+        if m:
+            brief = json.loads(m.group(0))
+    except Exception:
+        brief = {}
+    title = (brief.get("title_proposal") or "").strip() or (signal_text[:80] + " (brief)")
+    content = json.dumps(brief, indent=2, ensure_ascii=False) if brief else raw[:3000]
+    wid = _work_record(category="content", title=title[:4000], content=content,
+                       source="pipeline:strategist", status="ready_to_write",
+                       tags=f"brief,{str(brief.get('pillar') or 'general').lower()}")
+    if wid:
+        _bus_publish("pipeline.brief.ready", {"wid": wid, "title": title})
+    return wid, brief
+
+def _pipeline_draft(wid):
+    """Writer: brief -> draft (needs_refinement). Strictly on-brief."""
+    item = _pipeline_get(wid)
+    if not item:
+        return None, "not found"
+    sys_p = ("You are the Writer Agent. Write the article EXACTLY from this brief: follow the "
+             "angle, keyword, outline and CTA. No freelancing, no extra sections, no preamble. "
+             "Return ONLY the article body in markdown.\n\n===== BRIEF =====\n"
+             + (item.get("content") or "")[:4000])
+    draft = _call_llm("Write the article now.", system_prompt=sys_p,
+                      agent="writer", timeout=120)
+    it = _pipeline_update(wid, content=draft, status="needs_refinement",
+                          tags=(item.get("tags") or "") + ",draft")
+    _bus_publish("pipeline.draft.ready", {"wid": wid, "title": item.get("title")})
+    return it, None
+
+def _pipeline_refine(wid):
+    """Editor: draft -> ready_for_approval. DIFFERENT model + humanise-text."""
+    item = _pipeline_get(wid)
+    if not item:
+        return None, "not found"
+    draft = item.get("content") or ""
+    humanise = ""
+    try:
+        conn = _db()
+        row = conn.execute("SELECT content FROM skills WHERE name=? LIMIT 1",
+                           ("humanise-text",)).fetchone()
+        conn.close()
+        if row:
+            humanise = row["content"]
+    except Exception:
+        pass
+    cfg = _pipeline_cfg()
+    overrides = {}
+    if cfg.get("editor_model"):
+        overrides["model"] = cfg["editor_model"]
+    elif (_get_llm_config().get("provider") or "").lower() == "deepseek":
+        overrides["model"] = "deepseek-reasoner"  # genuinely different weights than deepseek-chat
+    sys_p = ("You are the Editor Agent. Apply the humanise-text skill: strip AI tells, m-dashes, "
+             "verbose phrasing; tighten every paragraph; keep the SEO angle and keyword intact. "
+             "Return ONLY the refined article.\n\n===== HUMANISE RULES =====\n"
+             + (humanise[:3000] if humanise else "(no skill file — apply standard anti-AI-tell rules)")
+             + "\n\n===== DRAFT =====\n" + draft[:8000])
+    refined = _call_llm_with(overrides, "Refine this draft.", system_prompt=sys_p,
+                             agent="editor", timeout=180)
+    it = _pipeline_update(wid, content=refined, status="ready_for_approval",
+                          tags=(item.get("tags") or "") + ",refined")
+    _bus_publish("pipeline.refined.ready", {"wid": wid, "title": item.get("title")})
+    return it, None
+
+def _pipeline_publish(wid):
+    """Publisher: approved -> published via _wp_publish (same path as the Work page)."""
+    item = _pipeline_get(wid)
+    if not item:
+        return None, "not found"
+    ok, res = _wp_publish(item.get("title") or "Post from AppVault", item.get("content") or "")
+    if not ok:
+        return None, res
+    it = _pipeline_update(wid, status="published", url=(res.get("link") or "") if isinstance(res, dict) else "")
+    _bus_publish("pipeline.published", {"wid": wid, "title": item.get("title"),
+                                        "url": (res.get("link") or "") if isinstance(res, dict) else ""})
+    return it, None
+
+def _pipeline_worker():
+    """Auto-advance: brief -> draft -> refine; approved -> publish (auto gate)."""
+    while True:
+        try:
+            if _pipeline_cfg().get("auto"):
+                conn = _db()
+                rows = conn.execute(
+                    "SELECT id, status, source FROM work_items "
+                    "WHERE status IN ('ready_to_write','needs_refinement','approved')").fetchall()
+                conn.close()
+                for r in rows:
+                    if not (r["source"] or "").startswith("pipeline"):
+                        continue
+                    try:
+                        if r["status"] == "ready_to_write":
+                            _pipeline_draft(r["id"])
+                        elif r["status"] == "needs_refinement":
+                            _pipeline_refine(r["id"])
+                        elif r["status"] == "approved":
+                            _pipeline_publish(r["id"])
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        time.sleep(45)
+
+def _pipeline_ensure():
+    if not _PIPELINE_FLAG[0]:
+        _PIPELINE_FLAG[0] = True
+        threading.Thread(target=_pipeline_worker, daemon=True).start()
+
+@agentic_bp.route("/api/agentic/pipeline", methods=["GET", "OPTIONS"])
+def api_pipeline_list():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    _pipeline_ensure()
+    conn = _db()
+    rows = conn.execute(
+        "SELECT * FROM work_items WHERE source LIKE 'pipeline%' "
+        "OR status IN ('ready_to_write','needs_refinement','ready_for_approval','approved','rejected') "
+        "ORDER BY updated_at DESC LIMIT 60").fetchall()
+    conn.close()
+    return jsonify({"status": "ok", "items": [dict(r) for r in rows], "config": _pipeline_cfg()})
+
+@agentic_bp.route("/api/agentic/pipeline/brief", methods=["POST", "OPTIONS"])
+def api_pipeline_brief():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    _pipeline_ensure()
+    data = request.get_json() or {}
+    signal = (data.get("signal") or "").strip()
+    if not signal:
+        try:
+            conn = _db()
+            row = conn.execute("SELECT content FROM memory WHERE tag IN ('Signal','Radar') "
+                               "ORDER BY id DESC LIMIT 1").fetchone()
+            conn.close()
+            if row:
+                signal = row["content"]
+        except Exception:
+            pass
+    if not signal:
+        try:
+            top = _sweep_feeds(1)
+            if top:
+                signal = top[0]["title"] + " — " + (top[0].get("summary") or "")
+        except Exception:
+            pass
+    if not signal:
+        return jsonify({"error": "no signal available (memory has no Signal/Radar rows and RSS sweep failed)"}), 400
+    wid, brief = _pipeline_brief_from_signal(signal, data.get("source") or "manual")
+    return jsonify({"status": "ok", "wid": wid, "brief": brief, "signal": signal[:300]})
+
+@agentic_bp.route("/api/agentic/pipeline/<wid>/<action>", methods=["POST", "OPTIONS"])
+def api_pipeline_action(wid, action):
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    _pipeline_ensure()
+    if action == "draft":
+        it, err = _pipeline_draft(wid)
+    elif action == "refine":
+        it, err = _pipeline_refine(wid)
+    elif action == "approve":
+        it = _pipeline_update(wid, status="approved")
+        err = None
+        if it:
+            _bus_publish("pipeline.approved", {"wid": wid, "title": it.get("title")})
+    elif action == "reject":
+        it = _pipeline_update(wid, status="rejected")
+        err = None
+        if it:
+            _bus_publish("pipeline.rejected", {"wid": wid, "title": it.get("title")})
+    elif action == "publish":
+        it, err = _pipeline_publish(wid)
+    else:
+        return jsonify({"error": "unknown action (draft|refine|approve|reject|publish)"}), 400
+    if err:
+        return jsonify({"status": "error", "error": err}), (502 if action == "publish" else 400)
+    return jsonify({"status": "ok", "item": it})
+
+@agentic_bp.route("/api/agentic/pipeline/auto", methods=["POST", "OPTIONS"])
+def api_pipeline_auto():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    cfg = _pipeline_cfg()
+    cfg["auto"] = bool(data.get("auto", cfg.get("auto", True)))
+    _cfg_set("pipeline", cfg)
+    return jsonify({"status": "ok", "config": cfg})
