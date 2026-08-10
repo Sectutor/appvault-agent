@@ -8885,6 +8885,99 @@ def _pipeline_socialize(wid):
     except Exception:
         pass
 
+# ---------------------------------------------------------------------------
+# SOCIAL ROUTER — route approved posts to an external scheduler (Ocoya via
+# Zapier/Make/n8n webhook, or any HTTP API). Config key "social_router":
+# {provider, url, method, auth_header ("Name: Value"), auto_route}.
+# ---------------------------------------------------------------------------
+def _social_router_cfg():
+    cfg = _cfg_get("social_router")
+    return cfg if isinstance(cfg, dict) else {}
+
+def _social_router_send(post):
+    """Send an approved post to the configured scheduling service.
+    Returns (ok, detail)."""
+    cfg = _social_router_cfg()
+    url = (cfg.get("url") or "").strip()
+    if not url:
+        return False, "no router configured — set the webhook in the 📱 Social tab"
+    payload = {
+        "title": post.get("title") or "",
+        "platform": post.get("category") or "",
+        "content": post.get("content") or "",
+        "image_url": post.get("image_url") or "",
+        "article_id": (post.get("tags") or "").replace("article:", "")[:40],
+        "source": "appvault-pipeline",
+    }
+    hdrs = {"Content-Type": "application/json"}
+    ah = (cfg.get("auth_header") or "").strip()
+    if ah and ":" in ah:
+        hdrs[ah.split(":", 1)[0].strip()] = ah.split(":", 1)[1].strip()
+    method = (cfg.get("method") or "POST").upper()
+    try:
+        data, status = _http(url, method=method, headers=hdrs, json_data=payload, timeout=30)
+    except Exception as e:
+        return False, f"router call failed: {str(e)[:200]}"
+    if status in (200, 201, 202, 204):
+        return True, f"HTTP {status}"
+    return False, f"HTTP {status}: {str(data)[:200]}"
+
+def _social_auto_route(wid):
+    """auto_route: try scheduling an approved post; mark scheduled on success."""
+    try:
+        ok, detail = _social_router_send(_pipeline_get(wid))
+        if ok:
+            _pipeline_update(wid, status="scheduled")
+            _bus_publish("pipeline.social.scheduled", {"wid": wid})
+    except Exception:
+        pass
+
+@agentic_bp.route("/api/agentic/pipeline/social/config", methods=["GET", "POST", "OPTIONS"])
+def api_social_router_config():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "POST":
+        data = request.get_json() or {}
+        if data.get("reset"):
+            _cfg_set("social_router", {})
+            return jsonify({"status": "ok", "config": {}})
+        cfg = {}
+        for k in ("provider", "url", "method", "auth_header", "auto_route"):
+            if k in data:
+                cfg[k] = data[k]
+        _cfg_set("social_router", cfg)
+        if data.get("test"):
+            ok, detail = _social_router_send({"title": "AppVault router test",
+                                              "category": "test", "content": "Pipeline router test — ignore.",
+                                              "tags": ""})
+            return jsonify({"status": "ok" if ok else "error", "config": _social_router_cfg(),
+                            "test": detail})
+        return jsonify({"status": "ok", "config": _social_router_cfg()})
+    cfg = dict(_social_router_cfg())
+    if cfg.get("auth_header"):
+        cfg["auth_header"] = "•••••• (set)"
+    return jsonify({"status": "ok", "config": cfg})
+
+@agentic_bp.route("/api/agentic/pipeline/social/<wid>/schedule", methods=["POST", "OPTIONS"])
+def api_social_schedule(wid):
+    """Route one approved social post to the scheduler -> status scheduled."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    item = _pipeline_get(wid)
+    if not item:
+        return jsonify({"error": "not found"}), 404
+    if item.get("category") not in ("x", "linkedin", "facebook", "instagram"):
+        return jsonify({"error": "not a social post"}), 400
+    if item.get("status") != "approved":
+        return jsonify({"error": "only approved posts can be scheduled (approve it first)"}), 400
+    ok, detail = _social_router_send(item)
+    if not ok:
+        return jsonify({"status": "error", "error": detail}), 502
+    it = _pipeline_update(wid, status="scheduled")
+    _bus_publish("pipeline.social.scheduled", {"wid": wid, "platform": item.get("category"),
+                                               "title": item.get("title")})
+    return jsonify({"status": "ok", "item": it, "detail": detail})
+
 def _pipeline_worker():
     """Auto-advance: brief -> draft -> refine; approved -> publish (auto gate)."""
     while True:
@@ -9126,6 +9219,9 @@ def api_pipeline_action(wid, action):
             # Article approval auto-generates the cover image + platform posts
             if (it.get("category") or "") == "content" or (it.get("source") or "").startswith("pipeline:strategist"):
                 threading.Thread(target=_pipeline_socialize, args=(wid,), daemon=True).start()
+            # auto_route: approved social posts go to the scheduler immediately
+            elif it.get("category") in ("x", "linkedin", "facebook", "instagram") and _social_router_cfg().get("auto_route"):
+                threading.Thread(target=_social_auto_route, args=(wid,), daemon=True).start()
     elif action == "reject":
         it = _pipeline_update(wid, status="rejected")
         err = None
