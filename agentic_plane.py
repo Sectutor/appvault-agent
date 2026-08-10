@@ -9069,6 +9069,7 @@ def _md_inline_html(t):
 
 def _md_to_html_page(text):
     out, in_code, code_buf, in_list = [], False, [], None
+    in_html5, html5_buf = False, []
     def close():
         nonlocal in_list
         if in_list:
@@ -9076,6 +9077,18 @@ def _md_to_html_page(text):
             in_list = None
     for raw in (text or "").split("\n"):
         t = raw.strip()
+        if in_html5:
+            if t == "```":
+                out.append(_sanitize_visual_html("\n".join(html5_buf)))
+                html5_buf = []
+                in_html5 = False
+            else:
+                html5_buf.append(raw)
+            continue
+        if t == "```html5" or t.startswith("```html5 "):
+            close()
+            in_html5 = True
+            continue
         if t.startswith("```"):
             if in_code:
                 out.append("<pre><code>" + "\n".join(code_buf).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") + "</code></pre>")
@@ -9122,6 +9135,92 @@ def _md_to_html_page(text):
     if in_code:
         out.append("<pre><code>" + "\n".join(code_buf).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") + "</code></pre>")
     return "\n".join(out)
+
+# ---------------------------------------------------------------------------
+# AI VISUALS — LLM-generated self-contained HTML5 blocks inside articles
+# (comparison tables, charts, diagrams…). Stored as ```html5 fences in the
+# markdown; rendered live in TipTap, preview, View page and WordPress.
+# ---------------------------------------------------------------------------
+def _sanitize_visual_html(html):
+    """Strip anything executable from generated visual HTML: scripts,
+    iframes, event handlers, javascript: URLs. Styles/SVG/tables survive."""
+    if not html:
+        return ""
+    h = html
+    h = re.sub(r"<script\b.*?</script>", "", h, flags=re.S | re.I)
+    h = re.sub(r"<iframe\b.*?</iframe>", "", h, flags=re.S | re.I)
+    h = re.sub(r"<object\b.*?</object>", "", h, flags=re.S | re.I)
+    h = re.sub(r"(?i)\s(on[a-z]+)\s*=\s*(\"[^\"]*\"|'[^']*')", "", h)
+    h = re.sub(r"(?i)(?<![a-z])on[a-z]+\s*=\s*(\"[^\"]*\"|'[^']*')", "", h)
+    h = re.sub(r"(?i)href\s*=\s*[\"']?\s*javascript:", 'href="#"', h)
+    h = re.sub(r"(?i)src\s*=\s*[\"']?\s*javascript:", 'src=""', h)
+    return h.strip()
+
+_VISUAL_TYPE_PROMPTS = {
+    "comparison": ("Build a clean COMPARISON TABLE as self-contained HTML. "
+                   "Two or more columns, header row, styled rows, responsive."),
+    "bar": ("Build a BAR CHART comparing values as self-contained HTML using "
+            "inline CSS (div bars) or SVG. Axis labels, value labels on bars."),
+    "line": ("Build a LINE CHART as self-contained HTML using inline SVG. "
+             "Axes, gridlines, data points, legend if multiple series."),
+    "pie": ("Build a PIE/DOUGHNUT CHART as self-contained HTML using inline "
+            "SVG with conic segments or a conic-gradient. Legend with values."),
+    "flow": ("Build a FLOW DIAGRAM / process chart as self-contained HTML. "
+             "Boxes connected with arrows (flexbox + CSS), step labels."),
+    "timeline": ("Build a vertical TIMELINE as self-contained HTML. Alternating "
+                 "entries with dates and short descriptions, connecting line."),
+    "proscons": ("Build a PROS & CONS two-column comparison as self-contained "
+                 "HTML. Green/red styling, bullet items, header."),
+    "pricing": ("Build a PRICING TABLE (plan columns, price, features, CTA "
+                "button) as self-contained HTML. Highlight one 'popular' column."),
+    "stats": ("Build a STATS GRID (2-4 big-number stat cards with labels and "
+              "small captions) as self-contained HTML."),
+    "quote": ("Build an attractive QUOTE CARD as self-contained HTML. Large "
+              "quote text, attribution, decorative styling."),
+    "custom": ("Build whatever the user asked for as self-contained HTML5."),
+}
+
+@agentic_bp.route("/api/agentic/pipeline/visual/generate", methods=["POST", "OPTIONS"])
+def api_visual_generate():
+    """Generate a self-contained HTML5 visual for insertion into an article."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    prompt = (data.get("prompt") or "").strip()
+    vtype = (data.get("type") or "custom").strip()
+    wid = (data.get("wid") or "").strip()
+    if not prompt:
+        return jsonify({"error": "prompt required"}), 400
+    ctx = ""
+    if wid:
+        item = _pipeline_get(wid)
+        if item:
+            ctx = (f"Article title: {item.get('title') or ''}\n\n"
+                   f"Article excerpt:\n{(item.get('content') or '')[:1200]}")
+    sys_p = ("You generate self-contained HTML5 visuals for a tech blog. Rules: "
+             "inline CSS or one <style> block scoped to your root element; SVG for "
+             "charts; NO <script>, NO external libraries/CDNs, NO event handlers, "
+             "NO javascript: URLs, NO <iframe>. Dark theme (#0b1120 background, "
+             "#e2e8f0 text, accent #38bdf8) unless the request says otherwise. "
+             "Output ONLY the HTML fragment — no markdown fences, no preamble.\n\n"
+             + _VISUAL_TYPE_PROMPTS.get(vtype, _VISUAL_TYPE_PROMPTS["custom"]))
+    try:
+        html = _call_llm(f"{ctx}\n\nVisual request: {prompt}\n\nOutput ONLY the HTML.",
+                         system_prompt=sys_p, agent="visual", timeout=120)
+    except Exception as e:
+        return jsonify({"status": "error", "error": f"generation failed: {str(e)[:200]}"}), 502
+    html = (html or "").strip()
+    if html.startswith("```"):
+        lines = html.split("\n")
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        html = "\n".join(lines).strip()
+    html = _sanitize_visual_html(html)
+    if not html:
+        return jsonify({"status": "error", "error": "generated empty HTML"}), 502
+    return jsonify({"status": "ok", "html": html})
 
 @agentic_bp.route("/api/agentic/pipeline/<wid>/preview", methods=["GET", "OPTIONS"])
 def api_pipeline_preview(wid):
