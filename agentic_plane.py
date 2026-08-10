@@ -8102,6 +8102,36 @@ def _df_prepare():
             elif dst.endswith(".json"):
                 with open(dstp, "w") as f:
                     f.write("{}\n")
+    _df_write_extensions()
+
+def _df_write_extensions():
+    """Register the AppVault MCP gateway in DeerFlow's extensions_config.json
+    so harness agents share the SAME memory and data as the Agentic OS
+    (plane_memory_search/write, plane_ask, plane_skills_list, plane_work_log,
+    plane_bus_publish, brain_*). Merge-safe: preserves existing servers/skills.
+    The gateway reads this file at startup — restart deer-flow-gateway after
+    writing it on an already-running stack."""
+    p = os.path.join(_DEERFLOW_DIR, "extensions_config.json")
+    data = {}
+    if os.path.exists(p):
+        try:
+            with open(p, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+    servers = dict(data.get("mcpServers") or {})
+    servers["appvault"] = {
+        "enabled": True,
+        "type": "http",
+        "url": "http://host.docker.internal:8087/mcp",
+        "description": "AppVault Agentic OS shared memory & plane bridge (same memory, work ledger, bus)",
+        "routing": {"mode": "prefer", "priority": 90,
+                    "keywords": ["shared memory", "appvault", "vault", "brain", "skill",
+                                 "work log", "publish", "agentic", "memory"]},
+    }
+    data["mcpServers"] = servers
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
 
 def _df_runner():
     """Background: prepare -> compose up -d --build; logs streamed to file."""

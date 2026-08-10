@@ -64,7 +64,7 @@ def _http_call(td, kwargs, deps):
         # helper's HttpListener (localhost prefix, no URL ACL) accepts it
         headers["Host"] = td["host_header"]
     if app_id:
-        cred = deps["vault"](app_id)
+        cred = deps["vault"](td.get("vault_app") or app_id)
         if cred.get("header") and cred.get("value"):
             headers[cred["header"]] = str(cred["value"])
     try:
@@ -352,6 +352,44 @@ _APPVAULT_TOOLS = (
     {"name": "plane_wp_publish", "description": "Publish content to WordPress via the built-in tool",
      "handler": "http", "write": True, "url": "http://localhost:8086/api/agentic/tools/wordpress/publish", "method": "POST",
      "inputSchema": {"type": "object", "properties": {"title": {"type": "string"}, "content": {"type": "string"}, "status": {"type": "string"}}}},
+    # Shared-memory bridge (DeerFlow & external MCP clients): first-party plane
+    # writes — the SAME data roster-agent chat writes directly to SQLite. These
+    # are intentionally NOT gated like third-party app writes (the approval gate
+    # protects host actions / foreign apps; the plane's own memory/work/bus are
+    # open to every internal agent by design).
+    {"name": "plane_memory_write", "description": "Write a fact into the Agentic OS shared memory (same store the vault syncs; auto-tiered)",
+     "handler": "http", "write": False, "url": "http://localhost:8086/api/agentic/memory", "method": "POST",
+     "inputSchema": {"type": "object", "properties": {
+         "content": {"type": "string", "description": "the fact/memory text (required)"},
+         "tier": {"type": "string", "description": "core|working|ephemeral (optional; auto-classified by tag/agent)"},
+         "tag": {"type": "string", "description": "category tag, e.g. research, decision, deerflow"},
+         "agent": {"type": "string", "description": "who is writing (optional)"}}}},
+    {"name": "plane_work_log", "description": "Log a completed work item into the Agentic OS ledger (visible to missions, goals, and the vault)",
+     "handler": "http", "write": False, "url": "http://localhost:8086/api/agentic/work", "method": "POST",
+     "inputSchema": {"type": "object", "properties": {
+         "title": {"type": "string", "description": "work item title (required)"},
+         "content": {"type": "string", "description": "summary / outcome"},
+         "category": {"type": "string", "description": "category, e.g. research, content, code, analysis"}}}},
+    {"name": "plane_bus_publish", "description": "Publish an event to the Agentic OS bus — live to every subscribed agent/worker",
+     "handler": "http", "write": False, "url": "http://localhost:8086/api/agentic/bus/publish", "method": "POST",
+     "inputSchema": {"type": "object", "properties": {
+         "topic": {"type": "string", "description": "topic — letters, digits, . _ - (required)"},
+         "payload": {"type": "object", "description": "event payload (any JSON)"},
+         "ttl": {"type": "integer", "description": "optional TTL in seconds"}}}},
+    # BrainOutside bridge (:8008, host) — the tiered/gated brain server. REST is
+    # endpoint-registry-driven; creds live in the vault under vault_app "brain".
+    {"name": "brain_get_index", "description": "Read the BrainOutside brain index (tier-scoped entity catalog)", "handler": "http", "write": False,
+     "url": "http://host.docker.internal:8008/api/v1/get-index", "method": "POST", "vault_app": "brain",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "brain_list_notes", "description": "List brain notes/entities, filterable by kind (take/story/lesson/fact/project/lens)", "handler": "http", "write": False,
+     "url": "http://host.docker.internal:8008/api/v1/list-notes", "method": "POST", "vault_app": "brain",
+     "inputSchema": {"type": "object", "properties": {"kind": {"type": "string", "description": "optional kind filter"}}}},
+    {"name": "brain_get_note", "description": "Fetch one brain note's full markdown by entity_id", "handler": "http", "write": False,
+     "url": "http://host.docker.internal:8008/api/v1/get-note", "method": "POST", "vault_app": "brain",
+     "inputSchema": {"type": "object", "properties": {"entity_id": {"type": "string", "description": "entity id from brain_get_index"}}}},
+    {"name": "brain_get_identity", "description": "Read the identity core (voice, beliefs) at your tier", "handler": "http", "write": False,
+     "url": "http://host.docker.internal:8008/api/v1/get-identity", "method": "POST", "vault_app": "brain",
+     "inputSchema": {"type": "object", "properties": {}}},
 )
 
 def _ann(ps, default):
