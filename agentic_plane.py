@@ -9123,6 +9123,19 @@ def _md_to_html_page(text):
         out.append("<pre><code>" + "\n".join(code_buf).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") + "</code></pre>")
     return "\n".join(out)
 
+@agentic_bp.route("/api/agentic/pipeline/<wid>/preview", methods=["GET", "OPTIONS"])
+def api_pipeline_preview(wid):
+    """Rendered article BODY HTML for the preview pane (server-side render —
+    the same proven renderer as /view, without the page chrome)."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    item = _pipeline_get(wid)
+    if not item:
+        return jsonify({"error": "not found"}), 404
+    return jsonify({"status": "ok", "title": item.get("title") or "",
+                    "image_url": item.get("image_url") or "",
+                    "body": _md_to_html_page(item.get("content") or "")})
+
 @agentic_bp.route("/api/agentic/pipeline/<wid>/view", methods=["GET", "OPTIONS"])
 def api_pipeline_view(wid):
     """Standalone styled HTML page for an article (or any pipeline item)."""
