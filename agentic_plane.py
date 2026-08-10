@@ -8789,6 +8789,8 @@ def _pipeline_publish(wid):
     item = _pipeline_get(wid)
     if not item:
         return None, "not found"
+    if (item.get("category") or "") != "content":
+        return None, "social posts publish to their platform (n8n connector), not WordPress"
     ok, res = _wp_publish(item.get("title") or "Post from AppVault", item.get("content") or "")
     if not ok:
         return None, res
@@ -8796,6 +8798,92 @@ def _pipeline_publish(wid):
     _bus_publish("pipeline.published", {"wid": wid, "title": item.get("title"),
                                         "url": (res.get("link") or "") if isinstance(res, dict) else ""})
     return it, None
+
+_PIPELINE_PLATFORMS = ("x", "linkedin", "facebook", "instagram")
+
+def _pipeline_social_posts(wid):
+    """From an approved article, generate one post per platform — each its own
+    work_item (ready_for_approval, source pipeline:social)."""
+    item = _pipeline_get(wid)
+    if not item:
+        return 0
+    title = item.get("title") or "Post"
+    article = item.get("content") or ""
+    sys_prompts = {
+        "x": ("You write X/Twitter posts. From the article, output ONLY the post text (max 280 "
+              "chars): a hook plus one sharp insight from the article. No preamble, no hashtag spam."),
+        "linkedin": ("You write LinkedIn posts. From the article, write a professional post "
+                     "(200-320 words): bold hook line, 3 concrete takeaways, and a question to drive "
+                     "comments. Plain text, short paragraphs, no hashtag spam. Output ONLY the post body."),
+        "facebook": ("You write Facebook posts. From the article, write a conversational post "
+                     "(150-250 words): friendly hook, the key insight, a question to drive comments. "
+                     "Short paragraphs, light emoji use, a few hashtags. Output ONLY the post body."),
+        "instagram": ("You write Instagram captions. From the article, write a caption (120-220 "
+                      "words): strong hook, line breaks for readability, and 8-12 relevant hashtags "
+                      "at the end. Output ONLY the caption."),
+    }
+    made = 0
+    for p in _PIPELINE_PLATFORMS:
+        try:
+            post = _call_llm(f"Article title: {title}\n\nARTICLE:\n{article[:5000]}",
+                             system_prompt=sys_prompts[p], agent="social", timeout=90)
+        except Exception:
+            continue
+        post = _pipeline_strip_leaks(post)
+        if not post:
+            continue
+        _work_record(category=p, title=f"{title[:60]} — {p}", content=post[:3000],
+                     source="pipeline:social", status="ready_for_approval",
+                     tags=f"social,platform:{p},article:{wid}")
+        made += 1
+    if made:
+        _bus_publish("pipeline.social.ready", {"wid": wid, "title": title, "posts": made})
+    return made
+
+def _pipeline_cover_image(wid, prompt=None):
+    """Keyless cover image (pollinations, same as the Media Agent) into the
+    vault 05_Media; stores image_url on the work item."""
+    item = _pipeline_get(wid)
+    if not item:
+        return None
+    base = prompt or (item.get("title") or "Technology article cover")
+    full_prompt = f"{base}, modern editorial illustration, clean composition, no text"
+    url = ("https://image.pollinations.ai/prompt/" + urllib.parse.quote(full_prompt) +
+           "?width=1200&height=675&nologo=true&seed=" + str(int(time.time()) % 1000000))
+    body, status = _http_bytes(url, timeout=120)
+    if status != 200 or not body:
+        return None
+    vault = _vault_path()
+    d = os.path.join(vault, "05_Media")
+    try:
+        os.makedirs(d, exist_ok=True)
+        fname = f"COVER_{datetime.now().strftime('%Y%m%d-%H%M%S')}.png"
+        with open(os.path.join(d, fname), "wb") as f:
+            f.write(body)
+    except Exception:
+        return None
+    _pipeline_update(wid, image_url=f"/api/agentic/media/file/{fname}")
+    try:
+        conn = _db()
+        conn.execute("INSERT INTO media_assets (prompt, style, file, provider, created) VALUES (?,?,?,?,?)",
+                     (full_prompt, "photo", fname, "pollinations",
+                      datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+    return f"/api/agentic/media/file/{fname}"
+
+def _pipeline_socialize(wid):
+    """On article approval: cover image + one post per platform (background)."""
+    try:
+        _pipeline_cover_image(wid)
+    except Exception:
+        pass
+    try:
+        _pipeline_social_posts(wid)
+    except Exception:
+        pass
 
 def _pipeline_worker():
     """Auto-advance: brief -> draft -> refine; approved -> publish (auto gate)."""
@@ -9035,6 +9123,9 @@ def api_pipeline_action(wid, action):
         err = None
         if it:
             _bus_publish("pipeline.approved", {"wid": wid, "title": it.get("title")})
+            # Article approval auto-generates the cover image + platform posts
+            if (it.get("category") or "") == "content" or (it.get("source") or "").startswith("pipeline:strategist"):
+                threading.Thread(target=_pipeline_socialize, args=(wid,), daemon=True).start()
     elif action == "reject":
         it = _pipeline_update(wid, status="rejected")
         err = None
