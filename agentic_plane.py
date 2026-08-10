@@ -8851,3 +8851,33 @@ def api_pipeline_auto():
     cfg["auto"] = bool(data.get("auto", cfg.get("auto", True)))
     _cfg_set("pipeline", cfg)
     return jsonify({"status": "ok", "config": cfg})
+
+# ---------------------------------------------------------------------------
+# HELP — the plain-English guide, served from the vault
+# (GRC-Brain/AGENTIC_OS_HELP.md, visible to the agent at /data/second-brain).
+# Editing the vault file updates the in-app Help page.
+# ---------------------------------------------------------------------------
+_HELP_CANDIDATES = (
+    "/data/second-brain/GRC-Brain/AGENTIC_OS_HELP.md",
+    "D:/ObsidianVault/GRC-Brain/AGENTIC_OS_HELP.md",
+    "/data/vault/GRC-Brain/AGENTIC_OS_HELP.md",
+)
+
+@agentic_bp.route("/api/agentic/help", methods=["GET", "OPTIONS"])
+def api_help():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    text = ""
+    for p in _HELP_CANDIDATES:
+        try:
+            if os.path.exists(p):
+                with open(p, encoding="utf-8") as f:
+                    text = f.read()
+                break
+        except Exception:
+            continue
+    if not text:
+        text = ("# Agentic OS Help\n\n(The help file is missing — restore it from "
+                "your vault: `GRC-Brain/AGENTIC_OS_HELP.md`.)")
+    return jsonify({"status": "ok", "markdown": text,
+                    "updated": datetime.now().strftime("%Y-%m-%d %H:%M")})
