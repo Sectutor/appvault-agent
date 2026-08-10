@@ -8703,14 +8703,49 @@ def _pipeline_draft(wid):
         return None, "not found"
     sys_p = ("You are the Writer Agent. Write the article EXACTLY from this brief: follow the "
              "angle, keyword, outline and CTA. No freelancing, no extra sections, no preamble. "
-             "Return ONLY the article body in markdown.\n\n===== BRIEF =====\n"
+             "You have NO tools and NO filesystem — never output XML tags, tool calls, code fences "
+             "or commands. Return ONLY the article body in markdown.\n\n===== BRIEF =====\n"
              + (item.get("content") or "")[:4000])
     draft = _call_llm("Write the article now.", system_prompt=sys_p,
                       agent="writer", timeout=120)
+    draft = _pipeline_strip_leaks(draft)
     it = _pipeline_update(wid, content=draft, status="needs_refinement",
                           tags=(item.get("tags") or "") + ",draft")
     _bus_publish("pipeline.draft.ready", {"wid": wid, "title": item.get("title")})
     return it, None
+
+def _skill_prose(content, cap=3500):
+    """Extract only the textual RULES from a skill file — strip code fences,
+    script/CLI artifacts and step headers, so an injected skill carries
+    guidance, not executable-looking instructions the model might echo."""
+    out, in_fence = [], False
+    for l in (content or "").splitlines():
+        t = l.strip()
+        if t.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        low = t.lower()
+        if t.startswith(("#",)) and any(k in low for k in ("step", "workflow", "execution", "script", "usage")):
+            continue
+        if any(k in low for k in ("cat >", "python3", "inputeof", "/tmp/", ".py", "./reference", "$ ", "chmod", "sudo ", "curl ")):
+            continue
+        out.append(l)
+    return "\n".join(out)[:cap]
+
+def _pipeline_strip_leaks(text):
+    """Strip tool-call XML and script artifacts a model may leak into output
+    (e.g. <invoke> blocks, bash heredocs, code fences)."""
+    if not text:
+        return text
+    t = re.sub(r"<invoke\b.*?</invoke>", "", text, flags=re.S | re.I)
+    t = re.sub(r"<invoke\b[^>]*>", "", t)
+    t = re.sub(r"</invoke>", "", t)
+    t = re.sub(r"```[a-z]*\n.*?```", "", t, flags=re.S)
+    t = re.sub(r"(?m)^\s*(cat >|python3?\b|INPUTEOF|rm \S+|chmod\b|export\b|cd /tmp).*$", "", t)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    return t.strip()
 
 def _pipeline_refine(wid):
     """Editor: draft -> ready_for_approval. DIFFERENT model + humanise-text."""
@@ -8734,13 +8769,16 @@ def _pipeline_refine(wid):
         overrides["model"] = cfg["editor_model"]
     elif (_get_llm_config().get("provider") or "").lower() == "deepseek":
         overrides["model"] = "deepseek-reasoner"  # genuinely different weights than deepseek-chat
-    sys_p = ("You are the Editor Agent. Apply the humanise-text skill: strip AI tells, m-dashes, "
-             "verbose phrasing; tighten every paragraph; keep the SEO angle and keyword intact. "
-             "Return ONLY the refined article.\n\n===== HUMANISE RULES =====\n"
-             + (humanise[:3000] if humanise else "(no skill file — apply standard anti-AI-tell rules)")
+    sys_p = ("You are the Editor Agent. Apply the humanise-text rules below: strip AI tells, "
+             "m-dashes, verbose phrasing; tighten every paragraph; keep the SEO angle and keyword "
+             "intact. You have NO tools, NO filesystem, NO scripts — never output XML tags, tool "
+             "calls, code fences, bash commands or heredocs. Return ONLY the refined article text.\n\n"
+             "===== HUMANISE RULES =====\n"
+             + (_skill_prose(humanise) if humanise else "(no skill file — apply standard anti-AI-tell rules)")
              + "\n\n===== DRAFT =====\n" + draft[:8000])
-    refined = _call_llm_with(overrides, "Refine this draft.", system_prompt=sys_p,
-                             agent="editor", timeout=180)
+    refined = _call_llm_with(overrides, "Refine this draft. Output ONLY the article text.",
+                             system_prompt=sys_p, agent="editor", timeout=180)
+    refined = _pipeline_strip_leaks(refined)
     it = _pipeline_update(wid, content=refined, status="ready_for_approval",
                           tags=(item.get("tags") or "") + ",refined")
     _bus_publish("pipeline.refined.ready", {"wid": wid, "title": item.get("title")})
