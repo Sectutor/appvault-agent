@@ -128,6 +128,14 @@ def _init_db():
         mtime REAL,
         vector TEXT
     );
+    CREATE TABLE IF NOT EXISTS mail_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        subject TEXT, body TEXT, to_addr TEXT,
+        status TEXT DEFAULT 'pending',
+        attempts INTEGER DEFAULT 0,
+        last_error TEXT,
+        created TEXT, sent TEXT
+    );
     """)
     conn.commit()
     conn.close()
@@ -212,6 +220,10 @@ AGENT_PROMPTS = {
                      "actual code/artifacts for the task.",
     "crew-reviewer": "You are the crew Code Reviewer. Review the proposed work for correctness, "
                      "security, and quality, and report concrete findings.",
+    "deerflow": "You are DeerFlow, the long-horizon super-agent harness. You research deeply, "
+                "write and run code in sandboxes, persist memories, and orchestrate sub-agents and "
+                "skills to complete tasks that take minutes to hours. Break big asks into "
+                "verifiable steps and report concrete results, not just plans.",
 }
 
 def _get_llm_config():
@@ -658,6 +670,7 @@ SERVICES = [
     ("openwebui", "Open WebUI", "Local AI Interface", "llms", "Private Chat Interface (:3000)", "3000/", "webui/port-3000"),
     ("anythingllm", "AnythingLLM", "RAG Knowledge Base", "llms", "Obsidian Document RAG Engine (:59742)", "59742/", "rag/port-59742"),
     ("mcp", "MCP Gateway", "Tool Gateway", "llms", "Installed-app tools for LLMs (:8087)", "8087/", "mcp/port-8087"),
+    ("deerflow", "DeerFlow", "SuperAgent Harness", "agents", "Long-horizon Research & Coding Agent (:2026)", "2026/", "deerflow/port-2026"),
 ]
 
 def _probe_port(path):
@@ -3295,10 +3308,22 @@ def api_goal(gid):
         merged["priority"] = int(data["priority"])
     if data.get("progress") is not None:
         merged["progress"] = max(0, min(100, int(data["progress"])))
+    old_status = row["status"] if row else None
     merged["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     sets = ", ".join(f"{k}=?" for k in merged)
     conn.execute(f"UPDATE goals SET {sets} WHERE id=?", (*merged.values(), gid))
     conn.commit()
+    # P0-1 mail notify: report goal completion headlessly
+    new_status = merged.get("status", old_status)
+    if new_status in ("done", "completed") and old_status not in ("done", "completed"):
+        try:
+            gtitle = merged.get("title") or row["title"]
+            _queue_mail("🎯 Goal complete: %s" % gtitle,
+                        "Goal #%d \"%s\" is now %s.\n\n%s" % (
+                            gid, gtitle, new_status,
+                            (merged.get("description") or row["description"] or "")))
+        except Exception:
+            pass
     row = conn.execute("SELECT * FROM goals WHERE id=?", (gid,)).fetchone()
     conn.close()
     return jsonify({"status": "ok", "goal": _goal_row_to_dict(row)})
@@ -5414,8 +5439,10 @@ def _init_parity_tables():
         conn.execute("INSERT INTO profiles (name, identity, created, updated) VALUES (?,?,?,?)",
                      ("Default", legacy, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                       datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-        _cfg_set("active_profile", "Default")
+        # commit BEFORE opening a second writer connection (_cfg_set) —
+        # otherwise the open INSERT transaction locks the DB (fresh-install bug)
         conn.commit()
+        _cfg_set("active_profile", "Default")
     conn.close()
 
 _init_parity_tables()
@@ -7288,9 +7315,17 @@ def _mission_tick():
                     conn.commit()
                     try:
                         rev = _mission_review(mdict)
-                        out.append("M%d done%s" % (m["id"], (" review:" + rev) if rev else ""))
+                        out.append("M%d done%s" % (m["id"], (rev and (" review:" + rev)) or ""))
                     except Exception:
                         out.append("M%d done" % m["id"])
+                    # P0-1 mail notify: report mission completion headlessly
+                    try:
+                        mt = mdict.get("title") or ("M%d" % m["id"])
+                        _queue_mail("✅ Mission complete: %s" % mt,
+                                    "Mission \"%s\" finished — every task verified.\n\n%s" % (
+                                        mt, (mdict.get("description") or "")[:400]))
+                    except Exception:
+                        pass
                 continue
             conn.execute("UPDATE mission_tasks SET status='running', updated=? WHERE id=?", (now, chosen["id"]))
             conn.commit()
@@ -7500,3 +7535,637 @@ def api_mission_templates():
 
 
 _missions_migrate()
+
+
+# =============================================================================
+# MAIL NOTIFY (2026-08-10) — P0-1 roadmap: smtplib + mail_queue + completion hooks.
+# Config stored in the config table under key "mail":
+#   {"enabled": true, "host": "smtp.example.com", "port": 587, "tls": true,
+#    "ssl": false, "user": "...", "password": "...", "from_addr": "...", "to_addr": "..."}
+# Endpoints:
+#   GET/PUT /api/agentic/mail/config   read/update SMTP config (password masked on read)
+#   POST    /api/agentic/mail/test     send a test email now
+#   POST    /api/agentic/mail/notify   generic headless notify: {subject, body, to?}
+#   GET/POST /api/agentic/mail/queue   view queue; POST {"flush": true} retries failed
+# =============================================================================
+try:
+    import smtplib
+    from email.mime.text import MIMEText
+    _MAIL_IMPORT_OK = True
+except Exception:
+    _MAIL_IMPORT_OK = False
+
+
+def _mail_cfg():
+    cfg = _cfg_get("mail") or {}
+    defaults = {"enabled": False, "host": "", "port": 587, "tls": True, "ssl": False,
+                "user": "", "password": "", "from_addr": "", "to_addr": ""}
+    defaults.update({k: v for k, v in cfg.items() if v is not None})
+    return defaults
+
+
+def _mask_mail_cfg(cfg):
+    out = dict(cfg)
+    if out.get("password"):
+        out["password"] = "****"
+    return out
+
+
+def _send_mail(subject, body, to_addr=None, cfg=None):
+    if not _MAIL_IMPORT_OK:
+        return {"ok": False, "error": "smtplib unavailable in this image"}
+    cfg = cfg or _mail_cfg()
+    if not cfg.get("enabled") or not cfg.get("host"):
+        return {"ok": False, "error": "mail not configured (PUT /api/agentic/mail/config)"}
+    to = (to_addr or cfg.get("to_addr") or "").strip()
+    if not to:
+        return {"ok": False, "error": "no to_addr configured"}
+    sender = cfg.get("from_addr") or cfg.get("user") or "AppVault Agent"
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = subject
+    msg["From"] = sender
+    msg["To"] = to
+    dests = [x.strip() for x in to.split(",") if x.strip()]
+    try:
+        if cfg.get("ssl"):
+            srv = smtplib.SMTP_SSL(cfg["host"], int(cfg.get("port") or 465), timeout=15)
+        else:
+            srv = smtplib.SMTP(cfg["host"], int(cfg.get("port") or 587), timeout=15)
+        try:
+            srv.ehlo()
+            if cfg.get("tls"):
+                srv.starttls()
+                srv.ehlo()
+            if cfg.get("user"):
+                srv.login(cfg["user"], cfg.get("password") or "")
+            srv.sendmail(sender, dests, msg.as_string())
+        finally:
+            try:
+                srv.quit()
+            except Exception:
+                pass
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:300]}
+
+
+def _flush_mail_queue(limit=20):
+    """Send pending mails; mark sent/failed. Never raises."""
+    try:
+        conn = _db()
+        rows = conn.execute(
+            "SELECT * FROM mail_queue WHERE status='pending' ORDER BY id LIMIT ?",
+            (int(limit),)).fetchall()
+        conn.close()
+    except Exception:
+        return {"ok": False, "error": "queue read failed"}
+    sent, failed = 0, []
+    for r in rows:
+        res = _send_mail(r["subject"], r["body"], r["to_addr"] or None)
+        try:
+            conn = _db()
+            if res.get("ok"):
+                conn.execute(
+                    "UPDATE mail_queue SET status='sent', sent=?, last_error=NULL WHERE id=?",
+                    (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), r["id"]))
+                sent += 1
+            else:
+                conn.execute(
+                    "UPDATE mail_queue SET status='failed', attempts=attempts+1, last_error=? WHERE id=?",
+                    (res.get("error", "")[:300], r["id"]))
+                failed.append(r["id"])
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+    return {"ok": True, "sent": sent, "failed": failed}
+
+
+def _queue_mail(subject, body, to_addr=None):
+    """Insert into mail_queue and attempt an immediate flush. Never raises."""
+    try:
+        conn = _db()
+        conn.execute(
+            "INSERT INTO mail_queue (subject, body, to_addr, status, created) VALUES (?,?,?,?,?)",
+            (subject, body, to_addr or "", "pending",
+             datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+    return _flush_mail_queue()
+
+
+@agentic_bp.route("/api/agentic/mail/config", methods=["GET", "PUT", "OPTIONS"])
+def api_mail_config():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "PUT":
+        data = request.get_json() or {}
+        cfg = _mail_cfg()
+        for k in ("enabled", "host", "port", "tls", "ssl", "user", "password",
+                  "from_addr", "to_addr"):
+            if data.get(k) is not None:
+                cfg[k] = data[k]
+        _cfg_set("mail", cfg)
+        return jsonify({"status": "ok", "mail": _mask_mail_cfg(cfg)})
+    return jsonify({"status": "ok", "mail": _mask_mail_cfg(_mail_cfg())})
+
+
+@agentic_bp.route("/api/agentic/mail/test", methods=["POST", "OPTIONS"])
+def api_mail_test():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    cfg = _mail_cfg()
+    if not cfg.get("enabled") or not cfg.get("host"):
+        return jsonify({"status": "error",
+                        "error": "mail not configured yet (PUT /api/agentic/mail/config)"}), 400
+    res = _send_mail(data.get("subject") or "AppVault test email",
+                     data.get("body") or "This is a test email from the AppVault Agent.",
+                     data.get("to"))
+    return jsonify(res), (200 if res.get("ok") else 502)
+
+
+@agentic_bp.route("/api/agentic/mail/notify", methods=["POST", "OPTIONS"])
+def api_mail_notify():
+    """Generic headless notify — swarm/crews/missions call this to report back."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    subject = (data.get("subject") or "").strip()
+    body = (data.get("body") or "").strip()
+    if not subject or not body:
+        return jsonify({"error": "subject and body required"}), 400
+    res = _queue_mail(subject, body, data.get("to"))
+    return jsonify({"status": "ok", "queued": True, **res})
+
+
+@agentic_bp.route("/api/agentic/mail/queue", methods=["GET", "POST", "OPTIONS"])
+def api_mail_queue():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        if data.get("flush"):
+            return jsonify({"status": "ok", **_flush_mail_queue()})
+    conn = _db()
+    rows = conn.execute("SELECT * FROM mail_queue ORDER BY id DESC LIMIT 100").fetchall()
+    conn.close()
+    return jsonify({"status": "ok", "mails": [dict(r) for r in rows]})
+
+
+# =============================================================================
+# MESSAGE BUS (2026-08-10) — P0-2 roadmap: SQLite-backed pub/sub + SSE + replay.
+# Any process (agents, swarm members, n8n, CrewAI, Open WebUI) can publish and
+# subscribe. Events persist in bus_events (survive restarts) and also feed the
+# shared memory table (tag="bus:<topic>") so they become RAG-searchable.
+# Endpoints (under the agentic blueprint = same auth posture as the other
+# agentic routes; external apps use the AppVault API key):
+#   POST /api/agentic/bus/<topic>             publish {json payload}?ttl=seconds
+#   POST /api/agentic/bus/publish             same, topic in body {"topic": ...}
+#   GET  /api/agentic/bus/stream?topics=a,b   SSE subscribe ("*" = all), ?since=id
+#   GET  /api/agentic/bus/replay?topics=&since=&limit=   poll missed events
+#   GET  /api/agentic/bus/topics              list topics + counts
+# Retention: rows expire after their TTL, or after bus_retention_days (default 7).
+# =============================================================================
+import queue as _bus_queue
+
+_BUS_SUBSCRIBERS = {}   # topic -> set of Queue
+_BUS_LOCK = threading.Lock()
+
+
+def _init_bus_tables():
+    conn = _db()
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS bus_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        topic TEXT NOT NULL,
+        payload TEXT,
+        created TEXT,
+        expires_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_bus_events_topic ON bus_events(topic, id);
+    """)
+    conn.commit()
+    conn.close()
+
+
+_init_bus_tables()
+
+
+def _bus_purge():
+    """Delete expired rows and anything older than the retention window."""
+    try:
+        days = int(_cfg_get("bus_retention_days", 7) or 7)
+    except Exception:
+        days = 7
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    conn = _db()
+    conn.execute("DELETE FROM bus_events WHERE expires_at IS NOT NULL AND expires_at <= ?", (now,))
+    conn.execute("DELETE FROM bus_events WHERE created < ?", (cutoff,))
+    conn.commit()
+    conn.close()
+
+
+def _bus_publish(topic, payload, ttl=None):
+    """Persist an event, log it to shared memory, and fan out to live subscribers."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    expires = None
+    if ttl is not None:
+        try:
+            secs = max(0, int(ttl))
+            expires = (datetime.now() + timedelta(seconds=secs)).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            expires = None
+    _bus_purge()
+    conn = _db()
+    cur = conn.execute(
+        "INSERT INTO bus_events (topic, payload, created, expires_at) VALUES (?,?,?,?)",
+        (topic, json.dumps(payload, ensure_ascii=False), now, expires))
+    conn.commit()
+    eid = cur.lastrowid
+    conn.close()
+    # operational log -> shared memory (vector-vault ingest point)
+    try:
+        conn = _db()
+        conn.execute(
+            "INSERT INTO memory (ts, agent, tag, content, tier, source, updated) VALUES (?,?,?,?,?,?,?)",
+            (now, "bus", "bus:" + topic, json.dumps(payload, ensure_ascii=False)[:2000],
+             "working", "bus", now))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+    event = {"id": eid, "topic": topic, "payload": payload, "created": now}
+    with _BUS_LOCK:
+        subs = set(_BUS_SUBSCRIBERS.get("*", set())) | set(_BUS_SUBSCRIBERS.get(topic, set()))
+    for q in subs:
+        try:
+            q.put_nowait(event)
+        except Exception:
+            pass
+    return event
+
+
+def _bus_subscribe(topics):
+    q = _bus_queue.Queue(maxsize=1000)
+    with _BUS_LOCK:
+        for t in topics:
+            _BUS_SUBSCRIBERS.setdefault(t, set()).add(q)
+    return q
+
+
+def _bus_unsubscribe(topics, q):
+    with _BUS_LOCK:
+        for t in topics:
+            s = _BUS_SUBSCRIBERS.get(t)
+            if s:
+                s.discard(q)
+                if not s:
+                    _BUS_SUBSCRIBERS.pop(t, None)
+
+
+def _bus_events_after(since_id=0, topics=None, limit=200):
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    q = "SELECT * FROM bus_events WHERE id>?"
+    args = [int(since_id or 0)]
+    if topics:
+        ph = ",".join("?" * len(topics))
+        q += " AND topic IN (%s)" % ph
+        args += list(topics)
+    q += " AND (expires_at IS NULL OR expires_at > ?) ORDER BY id LIMIT ?"
+    args += [now, min(max(int(limit or 200), 1), 1000)]
+    conn = _db()
+    rows = conn.execute(q, args).fetchall()
+    conn.close()
+    out = []
+    for r in rows:
+        try:
+            payload = json.loads(r["payload"] or "{}")
+        except Exception:
+            payload = r["payload"]
+        out.append({"id": r["id"], "topic": r["topic"], "payload": payload, "created": r["created"]})
+    return out
+
+
+def _bus_validate_topic(topic):
+    topic = (topic or "").strip().lower()
+    if not topic or len(topic) > 100:
+        return None
+    for ch in topic:
+        if not (ch.isalnum() or ch in "._-"):
+            return None
+    return topic
+
+
+@agentic_bp.route("/api/agentic/bus/publish", methods=["POST", "OPTIONS"])
+def api_bus_publish_body():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json(silent=True) or {}
+    topic = _bus_validate_topic(data.get("topic"))
+    if not topic:
+        return jsonify({"error": "topic required (letters, digits, . _ -)"}), 400
+    ev = _bus_publish(topic, data.get("payload"), ttl=data.get("ttl"))
+    return jsonify({"status": "ok", "event": ev})
+
+
+@agentic_bp.route("/api/agentic/bus/<topic>", methods=["POST", "OPTIONS"])
+def api_bus_publish_path(topic):
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    t = _bus_validate_topic(topic)
+    if not t:
+        return jsonify({"error": "invalid topic (letters, digits, . _ -)"}), 400
+    payload = request.get_json(silent=True)
+    if payload is None:
+        payload = request.get_data(as_text=True)
+    ttl = None
+    if request.args.get("ttl") is not None:
+        try:
+            ttl = int(request.args.get("ttl"))
+        except Exception:
+            ttl = None
+    ev = _bus_publish(t, payload, ttl=ttl)
+    return jsonify({"status": "ok", "event": ev})
+
+
+@agentic_bp.route("/api/agentic/bus/stream", methods=["GET", "OPTIONS"])
+def api_bus_stream():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    raw = request.args.get("topics") or "*"
+    topics = [t.strip().lower() for t in raw.split(",") if t.strip()]
+    want_all = "*" in topics
+    topics = [t for t in topics if t != "*"]
+    since = request.args.get("since", type=int, default=0)
+
+    def gen():
+        # replay missed events first (late-joiner pattern)
+        for ev in _bus_events_after(since, topics or None, 200):
+            yield "event: message\ndata: %s\n\n" % json.dumps(ev, ensure_ascii=False)
+        if want_all:
+            topics.append("*")
+        q = _bus_subscribe(topics)
+        try:
+            while True:
+                try:
+                    ev = q.get(timeout=15)
+                    if want_all or ev["topic"] in topics:
+                        yield "event: message\ndata: %s\n\n" % json.dumps(ev, ensure_ascii=False)
+                except _bus_queue.Empty:
+                    yield ": ping\n\n"
+        finally:
+            _bus_unsubscribe(topics, q)
+
+    return Response(gen(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@agentic_bp.route("/api/agentic/bus/replay", methods=["GET", "OPTIONS"])
+def api_bus_replay():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    raw = request.args.get("topics") or ""
+    topics = [t.strip().lower() for t in raw.split(",") if t.strip()]
+    since = request.args.get("since", type=int, default=0)
+    limit = request.args.get("limit", 200)
+    return jsonify({"status": "ok",
+                    "events": _bus_events_after(since, topics or None, limit)})
+
+
+@agentic_bp.route("/api/agentic/bus/topics", methods=["GET", "OPTIONS"])
+def api_bus_topics():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    conn = _db()
+    rows = conn.execute(
+        "SELECT topic, COUNT(*) c, MAX(id) last_id FROM bus_events "
+        "GROUP BY topic ORDER BY topic").fetchall()
+    conn.close()
+    return jsonify({"status": "ok", "topics": [dict(r) for r in rows]})
+
+# ---------------------------------------------------------------------------
+# DEERFLOW AGENT — plane-native provision (launch/stop/status) for the
+# bytedance/deer-flow SuperAgent harness. NOT a catalog app: the roster exposes
+# DeerFlow as a first-class agent; these routes make it runnable from the page
+# (clone -> env/config prep -> `docker compose up -d --build`, streamed log).
+# Prep is idempotent and preserves user edits: .env / config.yaml / frontend
+# .env are seeded only when missing. Loopback-only by default (DeerFlow's own
+# security posture — the agent can execute commands).
+# ---------------------------------------------------------------------------
+import subprocess as _df_subprocess
+import random as _df_random
+import shutil as _df_shutil
+
+_DEERFLOW_DIR = "/data/apps/deer-flow"
+_DEERFLOW_REPO = "https://github.com/bytedance/deer-flow.git"
+_DEERFLOW_LOG = "/data/apps/deer-flow/launch.log"
+_DEERFLOW_STATE = {"phase": "idle", "error": "", "log": []}
+_DEERFLOW_LOCK = threading.Lock()
+
+def _df_tail_log(n=40):
+    try:
+        with open(_DEERFLOW_LOG, "r", errors="replace") as f:
+            return f.readlines()[-n:]
+    except Exception:
+        return []
+
+def _df_probe():
+    """Roster probe: the stack publishes nginx on host loopback :2026."""
+    for host in PROBE_HOSTS:
+        try:
+            _, code = _http(f"http://{host}:2026/", timeout=1.5)
+            if code:
+                return ("online" if code < 500 else "error"), code
+        except Exception:
+            continue
+    return "offline", 0
+
+def _df_daemon_prefix():
+    """Map the agent container's /data/apps to the daemon-visible source path.
+
+    On Docker Desktop the daemon lives in a VM: bind sources must be the
+    host-side path (e.g. /run/desktop/mnt/host/d/appvault-data), otherwise the
+    daemon auto-creates DIRECTORIES at missing bind sources (nginx.conf ->
+    dir, config.yaml -> dir -> IsADirectoryError). On Linux the Source equals
+    the container path, so no rewrite is needed. Returns (old, new) or ("","").
+    """
+    try:
+        r = _df_subprocess.run(
+            ["docker", "inspect", "appvault-agent", "--format", "{{json .Mounts}}"],
+            capture_output=True, text=True, timeout=30)
+        for m in json.loads(r.stdout):
+            if m.get("Type") == "bind" and m.get("Destination") == "/data/apps":
+                src = (m.get("Source") or "").rstrip("/")
+                if src and src != "/data/apps":
+                    return ("/data/apps", src)
+    except Exception:
+        pass
+    return ("", "")
+
+def _df_patch_compose():
+    """Write docker/docker-compose.appvault.yaml with daemon-visible bind sources."""
+    old, new = _df_daemon_prefix()
+    src = os.path.join(_DEERFLOW_DIR, "docker", "docker-compose.yaml")
+    dst = os.path.join(_DEERFLOW_DIR, "docker", "docker-compose.appvault.yaml")
+    with open(src, encoding="utf-8") as f:
+        text = f.read()
+    if old:
+        text = text.replace("./nginx/nginx.conf", f"{new}/deer-flow/docker/nginx/nginx.conf")
+        text = text.replace("../skills", f"{new}/deer-flow/skills")
+    with open(dst, "w", encoding="utf-8") as f:
+        f.write(text)
+    return dst
+
+def _df_compose(args, timeout=120):
+    """Run a docker compose subcommand for the deer-flow project."""
+    compose_file = os.path.join(_DEERFLOW_DIR, "docker", "docker-compose.appvault.yaml")
+    cmd = ["docker", "compose", "--env-file", ".env", "-p", "deer-flow",
+           "-f", compose_file] + args
+    try:
+        r = _df_subprocess.run(cmd, cwd=_DEERFLOW_DIR, capture_output=True,
+                               text=True, timeout=timeout)
+        return r.returncode == 0, (r.stdout or "") + (r.stderr or "")
+    except Exception as e:
+        return False, str(e)
+
+def _df_seed_env(env_path, base):
+    """Seed required secrets/paths into .env when missing (keeps user values)."""
+    with open(env_path, "a") as f:
+        f.write("\n# auto-seeded by AppVault Agentic OS\n")
+        f.write(f"DEER_FLOW_CONFIG_PATH={base}/config.yaml\n")
+        f.write(f"DEER_FLOW_EXTENSIONS_CONFIG_PATH={base}/extensions_config.json\n")
+        f.write(f"DEER_FLOW_HOME={base}/.deer-flow\n")
+        for key in ("BETTER_AUTH_SECRET", "DEER_FLOW_INTERNAL_AUTH_TOKEN"):
+            f.write(f"{key}=" + "".join(_df_random.choices("abcdef0123456789", k=32)) + "\n")
+
+def _df_prepare():
+    """Clone/update the repo and seed .env + config files (idempotent)."""
+    if not os.path.isdir(_DEERFLOW_DIR):
+        os.makedirs(os.path.dirname(_DEERFLOW_DIR), exist_ok=True)
+        r = _df_subprocess.run(["git", "clone", "--depth", "1", _DEERFLOW_REPO, _DEERFLOW_DIR],
+                               capture_output=True, text=True, timeout=600)
+        if r.returncode != 0:
+            raise RuntimeError("clone failed: " + (r.stderr or "")[-300:])
+    else:
+        _df_subprocess.run(["git", "-C", _DEERFLOW_DIR, "pull", "--ff-only"],
+                           capture_output=True, text=True, timeout=300)
+    # Bind sources must be daemon-visible (Docker Desktop VM vs container paths)
+    old, new = _df_daemon_prefix()
+    base = (new + "/deer-flow") if old else _DEERFLOW_DIR
+    _df_patch_compose()
+    env_path = os.path.join(_DEERFLOW_DIR, ".env")
+    if not os.path.exists(env_path) and os.path.exists(env_path + ".example"):
+        _df_shutil.copy(env_path + ".example", env_path)
+    if not os.path.exists(env_path):
+        raise RuntimeError("no .env.example in repo")
+    missing = []
+    with open(env_path, errors="replace") as f:
+        existing = f.read()
+    for key in ("BETTER_AUTH_SECRET", "DEER_FLOW_INTERNAL_AUTH_TOKEN"):
+        if not any(l.strip().startswith(key + "=") and l.strip().split("=", 1)[1]
+                   for l in existing.splitlines()):
+            missing.append(key)
+    if missing:
+        _df_seed_env(env_path, base)
+    # Normalize the three path vars every run (daemon-visible, not user secrets)
+    with open(env_path, "r", errors="replace") as f:
+        lines = f.readlines()
+    out, wrote = [], False
+    for l in lines:
+        k = l.split("=", 1)[0].strip()
+        if k in ("DEER_FLOW_CONFIG_PATH", "DEER_FLOW_EXTENSIONS_CONFIG_PATH", "DEER_FLOW_HOME"):
+            out.append(f"{k}={base}/" + {"DEER_FLOW_CONFIG_PATH": "config.yaml",
+                                         "DEER_FLOW_EXTENSIONS_CONFIG_PATH": "extensions_config.json",
+                                         "DEER_FLOW_HOME": ".deer-flow"}[k] + "\n")
+            wrote = True
+        else:
+            out.append(l)
+    if wrote:
+        with open(env_path, "w") as f:
+            f.writelines(out)
+    # frontend/.env (compose env_file ../frontend/.env)
+    fe = os.path.join(_DEERFLOW_DIR, "frontend", ".env")
+    if not os.path.exists(fe) and os.path.exists(fe + ".example"):
+        _df_shutil.copy(fe + ".example", fe)
+    # config.yaml + extensions_config.json from examples
+    for src, dst in (("config.example.yaml", "config.yaml"),
+                     ("extensions_config.example.json", "extensions_config.json")):
+        dstp = os.path.join(_DEERFLOW_DIR, dst)
+        if not os.path.exists(dstp):
+            srcp = os.path.join(_DEERFLOW_DIR, src)
+            if os.path.exists(srcp):
+                _df_shutil.copy(srcp, dstp)
+            elif dst.endswith(".json"):
+                with open(dstp, "w") as f:
+                    f.write("{}\n")
+
+def _df_runner():
+    """Background: prepare -> compose up -d --build; logs streamed to file."""
+    try:
+        _df_prepare()
+        os.makedirs(os.path.join(_DEERFLOW_DIR, ".deer-flow"), exist_ok=True)
+        _DEERFLOW_STATE["phase"] = "building"
+        compose_file = os.path.join(_DEERFLOW_DIR, "docker", "docker-compose.appvault.yaml")
+        with open(_DEERFLOW_LOG, "w") as lf:
+            p = _df_subprocess.Popen(
+                ["docker", "compose", "--env-file", ".env", "-p", "deer-flow",
+                 "-f", compose_file, "up", "-d", "--build"],
+                cwd=_DEERFLOW_DIR, stdout=lf, stderr=_df_subprocess.STDOUT, text=True)
+            p.wait()
+        # Provisioner is the optional Kubernetes sandbox component — it needs a
+        # kubeconfig and crash-loops without one. Local sandbox mode doesn't use it.
+        if p.returncode == 0:
+            with open(_DEERFLOW_LOG, "a") as lf:
+                q = _df_subprocess.Popen(
+                    ["docker", "compose", "--env-file", ".env", "-p", "deer-flow",
+                     "-f", compose_file, "stop", "provisioner"],
+                    cwd=_DEERFLOW_DIR, stdout=lf, stderr=_df_subprocess.STDOUT, text=True)
+                q.wait()
+        _DEERFLOW_STATE["phase"] = "up" if p.returncode == 0 else "error"
+        if p.returncode != 0:
+            _DEERFLOW_STATE["error"] = "compose up failed (see launch.log tail)"
+    except Exception as e:
+        _DEERFLOW_STATE["phase"] = "error"
+        _DEERFLOW_STATE["error"] = str(e)[:300]
+
+@agentic_bp.route("/api/agentic/agents/deerflow/launch", methods=["POST", "OPTIONS"])
+def api_deerflow_launch():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    with _DEERFLOW_LOCK:
+        if _DEERFLOW_STATE["phase"] in ("preparing", "building"):
+            return jsonify({"status": "busy", "phase": _DEERFLOW_STATE["phase"]}), 409
+        st, _ = _df_probe()
+        if st == "online":
+            return jsonify({"status": "already_up"})
+        _DEERFLOW_STATE.update({"phase": "preparing", "error": ""})
+        threading.Thread(target=_df_runner, daemon=True).start()
+    return jsonify({"status": "started", "phase": "preparing"})
+
+@agentic_bp.route("/api/agentic/agents/deerflow/status", methods=["GET", "OPTIONS"])
+def api_deerflow_status():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    st, code = _df_probe()
+    phase = _DEERFLOW_STATE["phase"]
+    if phase == "up" and st != "online":
+        phase = "degraded"
+    return jsonify({"status": "online" if st == "online" else phase,
+                    "phase": phase, "probe": st, "http": code,
+                    "error": _DEERFLOW_STATE.get("error", ""),
+                    "log": _df_tail_log(40)})
+
+@agentic_bp.route("/api/agentic/agents/deerflow/stop", methods=["POST", "OPTIONS"])
+def api_deerflow_stop():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if not os.path.isdir(_DEERFLOW_DIR):
+        return jsonify({"status": "ok", "note": "not provisioned"})
+    ok, out = _df_compose(["down"])
+    with _DEERFLOW_LOCK:
+        _DEERFLOW_STATE["phase"] = "idle"
+    return jsonify({"status": "ok" if ok else "error", "output": out[-400:]})
