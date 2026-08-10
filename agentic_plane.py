@@ -8386,3 +8386,235 @@ def _df_sync_ensure():
     if not _DF_SYNC_FLAG[0]:
         _DF_SYNC_FLAG[0] = True
         threading.Thread(target=_df_sync_worker, daemon=True).start()
+
+# ---------------------------------------------------------------------------
+# TRUE TOKEN STREAMING — /api/agentic/chat/stream (SSE) for every roster agent.
+# Mirrors api_conversation's flow (slash / skill / action / memory context /
+# persistence) but the LLM call streams deltas. Provider chunk parsing:
+# openai-compatible (delta.content), anthropic (content_block_delta.text),
+# ollama (ndjson response). Instant paths (slash/action) yield once.
+# ---------------------------------------------------------------------------
+def _sse_line_text(line, kind):
+    """Extract the text delta from one SSE/ndjson line."""
+    if kind == "ollama":
+        try:
+            return json.loads(line).get("response") or ""
+        except Exception:
+            return ""
+    if not line.startswith("data:"):
+        return ""
+    data = line[5:].strip()
+    if data == "[DONE]":
+        return ""
+    try:
+        d = json.loads(data)
+    except Exception:
+        return ""
+    if kind == "anthropic":
+        if d.get("type") == "content_block_delta":
+            return (d.get("delta") or {}).get("text") or ""
+        return ""
+    choices = d.get("choices") or []
+    if choices:
+        return (choices[0].get("delta") or {}).get("content") or ""
+    return ""
+
+def _sse_text(url, headers, payload, kind="openai"):
+    """Generator: POST stream:true; yield text deltas as they arrive."""
+    hdrs = {"Content-Type": "application/json"}
+    hdrs.update(headers)
+    req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=hdrs, method="POST")
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        buf = b""
+        while True:
+            chunk = resp.read(4096)
+            if not chunk:
+                break
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                line = line.decode("utf-8", "replace").strip()
+                if not line:
+                    continue
+                if kind != "ollama" and line == "data: [DONE]":
+                    return
+                tok = _sse_line_text(line, kind)
+                if tok:
+                    yield tok
+        if buf:  # final line without trailing newline (ollama ndjson)
+            tok = _sse_line_text(buf.decode("utf-8", "replace").strip(), kind)
+            if tok:
+                yield tok
+
+def _call_llm_stream(user_msg, system_prompt=None, agent="hermes", timeout=120):
+    """Generator yielding text deltas — mirrors _call_llm_with's provider
+    dispatch with stream: true and the same fallback order."""
+    cfg = _get_llm_config()
+    provider = cfg.get("provider", "deepseek").lower()
+    model = cfg.get("model") or "deepseek-chat"
+    pkeys = cfg.get("provider_keys") or {}
+    api_key = ((pkeys.get(provider) or cfg.get("api_key")) or "").strip()
+    api_base = (cfg.get("api_base") or "").strip()
+    temp = cfg.get("temperature", 0.7)
+    sys_prompt = system_prompt or cfg.get("system_prompt") or _get_agent_prompt(agent)
+
+    def openai_backend():
+        base = api_base or "https://api.deepseek.com"
+        url = base.rstrip("/")
+        if not url.endswith("/chat/completions"):
+            url = url + ("/v1/chat/completions" if "/v1" not in url else "/chat/completions")
+        payload = {"model": model,
+                   "messages": [{"role": "system", "content": sys_prompt},
+                                {"role": "user", "content": user_msg}],
+                   "temperature": temp, "stream": True}
+        for tok in _sse_text(url, {"Authorization": "Bearer " + api_key}, payload, kind="openai"):
+            yield tok
+
+    def anthropic_backend():
+        payload = {"model": model or "claude-3-5-sonnet-20241022", "system": sys_prompt,
+                   "max_tokens": cfg.get("max_tokens", 2048), "temperature": temp,
+                   "messages": [{"role": "user", "content": user_msg}], "stream": True}
+        for tok in _sse_text("https://api.anthropic.com/v1/messages",
+                             {"x-api-key": api_key, "anthropic-version": "2023-06-01"},
+                             payload, kind="anthropic"):
+            yield tok
+
+    def ollama_backend(model_name=None):
+        base = api_base or os.environ.get("OLLAMA_API_BASE", "http://host.docker.internal:11434")
+        payload = {"model": model_name or model or "llama3",
+                   "prompt": f"System Directive: {sys_prompt}\n\nUser: {user_msg}\n\nAgent:",
+                   "stream": True, "options": {"temperature": temp}}
+        for tok in _sse_text(f"{base.rstrip('/')}/api/generate", {}, payload, kind="ollama"):
+            yield tok
+
+    tried = False
+    if provider in ("deepseek", "openai", "litellm", "grok") and api_key:
+        tried = True
+        try:
+            for t in openai_backend():
+                yield t
+            return
+        except Exception:
+            pass
+    if provider == "anthropic" and api_key:
+        tried = True
+        try:
+            for t in anthropic_backend():
+                yield t
+            return
+        except Exception:
+            pass
+    if provider in ("ollama", "local"):
+        tried = True
+        try:
+            for t in ollama_backend():
+                yield t
+            return
+        except Exception:
+            pass
+    # Keyless fallback: local Ollama with model discovery (mirrors _call_llm_with)
+    try:
+        base = os.environ.get("OLLAMA_API_BASE", "http://host.docker.internal:11434")
+        tags, status = _http(f"{base.rstrip('/')}/api/tags", timeout=3)
+        model_name = None
+        if status == 200 and isinstance(tags, dict):
+            names = [m.get("name") for m in (tags.get("models") or [])]
+            for pref in ("qwen2.5:0.5b", "qwen2.5:1.5b", "llama3.2:1b", "llama3:latest", "phi3:mini", "tinyllama"):
+                if pref in names:
+                    model_name = pref
+                    break
+            if not model_name and names:
+                model_name = names[0]
+        if model_name:
+            for t in ollama_backend(model_name):
+                yield t
+            return
+    except Exception:
+        pass
+    raise RuntimeError("All LLM backends failed to stream for agent '" + agent +
+                       "'. Configure one at /api/agentic/config (provider + key).")
+
+@agentic_bp.route("/api/agentic/chat/stream", methods=["POST", "OPTIONS"])
+def api_chat_stream():
+    """SSE token streaming for ANY roster agent chat (hermes, claude, codex,
+    deerflow, crews...). Body: {agent, prompt, thread_id? | session_id?}.
+    Mirrors api_conversation: slash commands, skills, memory context, and
+    persistence — but the LLM reply trickles in as data: {delta} events."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    user_msg = (data.get("prompt") or "").strip()
+    agent_id = (data.get("agent") or "hermes").lower()
+    session_id = (data.get("session_id") or "").strip()
+    thread_id = (data.get("thread_id") or "main").strip()
+    if not user_msg:
+        return jsonify({"error": "Prompt cannot be empty"}), 400
+    agent_name = "Hermes Agent" if agent_id == "hermes" else f"{agent_id.capitalize()} Agent"
+
+    def _ev(obj):
+        return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
+
+    def generate():
+        reply = ""
+        try:
+            slash_reply = _handle_slash_command(user_msg, agent_id)
+            if slash_reply is not None:
+                reply = slash_reply
+                yield _ev({"delta": reply})
+            else:
+                ctx = _memory_context(user_msg)
+                clean_msg, skill_row = _maybe_extract_skill(user_msg)
+                skill_sys = None
+                action_reply = None
+                if skill_row:
+                    action_reply = _run_skill_action(skill_row, clean_msg)
+                    if action_reply is not None:
+                        reply = action_reply
+                        yield _ev({"delta": reply})
+                    else:
+                        skill_sys = (f"You are applying the skill '{skill_row['name']}'. Follow its "
+                                     f"instructions EXACTLY. Output the result, no preamble.\n\n"
+                                     f"===== SKILL =====\n{_load_skill_content(skill_row)}")
+                        conn = _db()
+                        conn.execute("UPDATE skills SET uses=uses+1 WHERE id=?", (skill_row["id"],))
+                        conn.commit()
+                        conn.close()
+                        _audit("store", "skill.chat", f"@{skill_row['name']} applied in {agent_id} chat")
+                if action_reply is None:
+                    for tok in _call_llm_stream(clean_msg + (("\n\n" + ctx) if ctx else ""),
+                                                agent=agent_id, system_prompt=skill_sys):
+                        reply += tok
+                        yield _ev({"delta": tok})
+        except Exception as e:
+            err = f"⚠️ {agent_name} could not reach any LLM backend. Configure one at `/api/agentic/config`. Detail: {str(e)[:200]}"
+            reply = err
+            yield _ev({"delta": err})
+        # Persist the exchange (same stores as the non-streaming route)
+        try:
+            now_ts = datetime.now().strftime("%H:%M LOCAL")
+            if session_id:
+                sess = _get_session(session_id)
+                if not sess:
+                    _save_session(session_id, "Hermes Session", [])
+                    sess = _get_session(session_id)
+                sess["messages"].append({"sender": "User", "role": "user", "timestamp": now_ts, "text": user_msg})
+                sess["messages"].append({"sender": agent_name, "role": "agent", "timestamp": now_ts, "text": reply})
+                _save_session(session_id, sess["title"], sess["messages"])
+            else:
+                messages = _get_conversation(agent_id, thread_id)
+                messages.append({"sender": "User", "role": "user", "timestamp": now_ts, "text": user_msg})
+                messages.append({"sender": agent_name, "role": "agent", "timestamp": now_ts, "text": reply})
+                _save_conversation(agent_id, messages, thread_id)
+            conn = _db()
+            conn.execute("INSERT INTO memory (ts, agent, tag, content) VALUES (?,?,?,?)",
+                         (now_ts, agent_name, "Conversation",
+                          f"User: {user_msg[:60]} | Reply: {reply[:60]}"))
+            conn.commit()
+            conn.close()
+            threading.Thread(target=_distill_facts, args=(user_msg, reply, agent_name), daemon=True).start()
+        except Exception:
+            pass
+        yield "data: [DONE]\n\n"
+
+    return Response(generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
