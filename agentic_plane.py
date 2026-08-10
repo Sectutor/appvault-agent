@@ -9205,8 +9205,12 @@ def api_visual_generate():
              "Output ONLY the HTML fragment — no markdown fences, no preamble.\n\n"
              + _VISUAL_TYPE_PROMPTS.get(vtype, _VISUAL_TYPE_PROMPTS["custom"]))
     try:
-        html = _call_llm(f"{ctx}\n\nVisual request: {prompt}\n\nOutput ONLY the HTML.",
-                         system_prompt=sys_p, agent="visual", timeout=120)
+        overrides = {}
+        if (_get_llm_config().get("provider") or "").lower() == "deepseek":
+            overrides["model"] = "deepseek-chat"  # fast model — visuals must not take minutes
+        html = _call_llm_with(overrides,
+                              f"{ctx}\n\nVisual request: {prompt}\n\nOutput ONLY the HTML.",
+                              system_prompt=sys_p, agent="visual", timeout=120)
     except Exception as e:
         return jsonify({"status": "error", "error": f"generation failed: {str(e)[:200]}"}), 502
     html = (html or "").strip()
