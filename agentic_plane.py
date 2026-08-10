@@ -8851,19 +8851,74 @@ def api_pipeline_brief():
     _pipeline_ensure()
     data = request.get_json() or {}
     signal = (data.get("signal") or "").strip()
-    source_key, signal_label = None, ""
+    source_key = (data.get("signal_key") or "").strip() or None
+    signal_label = ""
     if not signal:
         signal, source_key, signal_label = _pipeline_next_signal()
         if not signal:
             return jsonify({"error": "no fresh signal — every radar report and recent sweep story has been used. Try again after the next radar sweep (or pass a signal explicitly)."}), 400
     else:
-        source_key = "manual:" + signal[:80]
         signal_label = signal[:80]
+        source_key = source_key or ("manual:" + signal[:80])
     wid, brief = _pipeline_brief_from_signal(signal, data.get("source") or "manual")
     if wid and source_key:
         _pipeline_mark_consumed(source_key, signal_label)
     return jsonify({"status": "ok", "wid": wid, "brief": brief, "signal": signal[:300],
                     "signal_label": signal_label})
+
+@agentic_bp.route("/api/agentic/pipeline/stories", methods=["GET", "OPTIONS"])
+def api_pipeline_stories():
+    """Live news sweep right now — the 'Top Stories' tab."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    stories = []
+    try:
+        for s in _sweep_feeds(10):
+            stories.append({"title": s.get("title", ""), "score": s.get("score", 0),
+                            "source": s.get("source", ""), "link": s.get("link", ""),
+                            "summary": (s.get("summary") or "")[:220]})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)[:200]}), 500
+    return jsonify({"status": "ok", "stories": stories,
+                    "fetched": datetime.now().strftime("%H:%M:%S")})
+
+@agentic_bp.route("/api/agentic/pipeline/radar", methods=["GET", "OPTIONS"])
+def api_pipeline_radar():
+    """Radar report history — vault 03_Signals/Signal_sig-*.md, newest first."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    reports = []
+    try:
+        sig_dir = os.path.join(_vault_path(), "03_Signals")
+        if os.path.isdir(sig_dir):
+            files = sorted(n for n in os.listdir(sig_dir)
+                           if n.startswith("Signal_sig-") and n.endswith(".md"))
+            for name in reversed(files[-40:]):  # newest 40 reports
+                p = os.path.join(sig_dir, name)
+                ts, query, titles, content = "", "", [], ""
+                try:
+                    with open(p, encoding="utf-8") as f:
+                        content = f.read()
+                    lines = content.splitlines()
+                    for l in lines[:6]:
+                        if "Timestamp" in l and "**" in l:
+                            ts = l.split("**", 2)[-1].strip().lstrip(":").strip()
+                        if "Query Prompt" in l and "`" in l:
+                            query = l.split("`")[1]
+                    for l in lines:
+                        t = l.strip()
+                        if t[:3] in ("1. ", "2. ", "3. ", "4. ", "5. ", "6. ", "7. ", "8. ", "9. ", "10.") and "**" in t:
+                            titles.append(t.split("**")[1].strip())
+                            if len(titles) >= 5:
+                                break
+                except Exception:
+                    pass
+                reports.append({"file": name, "ts": ts, "query": query,
+                                "titles": titles, "used": _pipeline_signal_consumed("file:" + name),
+                                "content": content[:3000]})
+    except Exception:
+        pass
+    return jsonify({"status": "ok", "reports": reports})
 
 @agentic_bp.route("/api/agentic/pipeline/<wid>/<action>", methods=["POST", "OPTIONS"])
 def api_pipeline_action(wid, action):
