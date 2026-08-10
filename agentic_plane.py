@@ -8896,8 +8896,11 @@ def _social_router_cfg():
 
 def _social_router_send(post):
     """Send an approved post to the configured scheduling service.
+    provider=ocoya -> native Ocoya REST API; otherwise a generic webhook.
     Returns (ok, detail)."""
     cfg = _social_router_cfg()
+    if (cfg.get("provider") or "webhook").lower() == "ocoya":
+        return _ocoya_send(post, cfg)
     url = (cfg.get("url") or "").strip()
     if not url:
         return False, "no router configured — set the webhook in the 📱 Social tab"
@@ -8922,6 +8925,71 @@ def _social_router_send(post):
         return True, f"HTTP {status}"
     return False, f"HTTP {status}: {str(data)[:200]}"
 
+def _ocoya_send(post, cfg):
+    """Native Ocoya REST API — POST /post?workspaceId=… {caption, mediaUrls?,
+    socialProfileIds?, scheduledAt?}. Auth: X-API-Key. (docs.ocoya.com —
+    verified 2026-08-10: base https://app.ocoya.com/api/_public/v1.)"""
+    api_key = (cfg.get("api_key") or "").strip()
+    ws = (cfg.get("workspace_id") or "").strip()
+    if not api_key or not ws:
+        return False, "Ocoya needs an API key + workspace ID (set them in the 📱 Social tab)"
+    platform = post.get("category") or ""
+    prof = (cfg.get("profile_ids") or {}).get(platform) or ""
+    payload = {"caption": post.get("content") or ""}
+    img = post.get("image_url") or ""
+    if img.startswith("http"):  # Ocoya must be able to fetch it — local vault URLs won't work
+        payload["mediaUrls"] = [img]
+    if prof:
+        payload["socialProfileIds"] = [prof]
+    if (cfg.get("schedule_mode") or "draft") == "offset":
+        try:
+            mins = max(1, int(cfg.get("schedule_offset_minutes", 60)))
+            payload["scheduledAt"] = (datetime.now() + timedelta(minutes=mins)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except Exception:
+            pass
+    url = "https://app.ocoya.com/api/_public/v1/post?workspaceId=" + urllib.parse.quote(ws)
+    try:
+        data, status = _http(url, method="POST",
+                             headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+                             json_data=payload, timeout=30)
+    except Exception as e:
+        return False, f"ocoya call failed: {str(e)[:200]}"
+    if status in (200, 201, 202, 204):
+        pid = ""
+        if isinstance(data, dict):
+            pid = str(data.get("id") or data.get("postId") or data.get("data", {}).get("id") or "")
+        return True, ("created " + pid).strip() if pid else "created"
+    return False, f"Ocoya HTTP {status}: {str(data)[:200]}"
+
+def _ocoya_check(cfg):
+    """Validate the key against GET /me, and (when workspace set) list
+    social profiles so the user can map platforms. Returns (ok, detail)."""
+    api_key = (cfg.get("api_key") or "").strip()
+    if not api_key:
+        return False, "no API key set"
+    try:
+        data, status = _http("https://app.ocoya.com/api/_public/v1/me",
+                             headers={"X-API-Key": api_key}, timeout=20)
+    except Exception as e:
+        return False, f"ocoya unreachable: {str(e)[:150]}"
+    if status != 200:
+        return False, f"Ocoya auth HTTP {status}: {str(data)[:150]}"
+    out = "Ocoya auth OK"
+    ws = (cfg.get("workspace_id") or "").strip()
+    if ws:
+        try:
+            pdata, pstatus = _http(
+                "https://app.ocoya.com/api/_public/v1/social-profiles?workspaceId=" + urllib.parse.quote(ws),
+                headers={"X-API-Key": api_key}, timeout=20)
+            if pstatus == 200 and isinstance(pdata, list) and pdata:
+                names = [f"{p.get('platform') or p.get('name') or '?'}:{p.get('id')}" for p in pdata[:12]]
+                out += " | profiles: " + ", ".join(names)
+            else:
+                out += f" | profiles HTTP {pstatus}"
+        except Exception as e:
+            out += f" | profiles error: {str(e)[:100]}"
+    return True, out
+
 def _social_auto_route(wid):
     """auto_route: try scheduling an approved post; mark scheduled on success."""
     try:
@@ -8942,20 +9010,26 @@ def api_social_router_config():
             _cfg_set("social_router", {})
             return jsonify({"status": "ok", "config": {}})
         cfg = {}
-        for k in ("provider", "url", "method", "auth_header", "auto_route"):
-            if k in data:
+        for k in ("provider", "url", "method", "auth_header", "auto_route",
+                  "api_key", "workspace_id", "profile_ids", "schedule_mode",
+                  "schedule_offset_minutes"):
+            if k in data and data[k] is not None:
                 cfg[k] = data[k]
         _cfg_set("social_router", cfg)
         if data.get("test"):
-            ok, detail = _social_router_send({"title": "AppVault router test",
-                                              "category": "test", "content": "Pipeline router test — ignore.",
-                                              "tags": ""})
+            if (cfg.get("provider") or "webhook").lower() == "ocoya":
+                ok, detail = _ocoya_check(cfg)
+            else:
+                ok, detail = _social_router_send({"title": "AppVault router test",
+                                                  "category": "test", "content": "Pipeline router test — ignore.",
+                                                  "tags": ""})
             return jsonify({"status": "ok" if ok else "error", "config": _social_router_cfg(),
                             "test": detail})
         return jsonify({"status": "ok", "config": _social_router_cfg()})
     cfg = dict(_social_router_cfg())
-    if cfg.get("auth_header"):
-        cfg["auth_header"] = "•••••• (set)"
+    for k in ("api_key", "auth_header"):
+        if cfg.get(k):
+            cfg[k] = "•••••• (set)"
     return jsonify({"status": "ok", "config": cfg})
 
 @agentic_bp.route("/api/agentic/pipeline/social/<wid>/schedule", methods=["POST", "OPTIONS"])
