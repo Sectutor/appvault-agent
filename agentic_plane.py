@@ -8855,7 +8855,9 @@ def api_pipeline_auto():
 # ---------------------------------------------------------------------------
 # HELP — the plain-English guide, served from the vault
 # (GRC-Brain/AGENTIC_OS_HELP.md, visible to the agent at /data/second-brain).
-# Editing the vault file updates the in-app Help page.
+# Every install ships the BUILT-IN default below; a vault file (when present)
+# overrides it — so customers get the guide out of the box and power users
+# can customize it. Editing the vault file updates the in-app Help page.
 # ---------------------------------------------------------------------------
 _HELP_CANDIDATES = (
     "/data/second-brain/GRC-Brain/AGENTIC_OS_HELP.md",
@@ -8863,21 +8865,109 @@ _HELP_CANDIDATES = (
     "/data/vault/GRC-Brain/AGENTIC_OS_HELP.md",
 )
 
+_HELP_DEFAULT = """# Agentic OS — Plain-English Help
+
+## What this is
+Agentic OS is your always-on assistant. You press a button, it plans, writes and polishes,
+**you approve**, it's live. Everything else is automatic.
+
+---
+
+## Your daily workflow (2 clicks)
+1. Open **Content Pipeline** (left sidebar → Pipeline → Content Pipeline)
+2. Click **⚡ New Brief from Signal**
+3. Walk away ~3 minutes — it plans, writes and polishes on its own
+4. When a card says **✅ ready for approval**: read it → click **Approve** (or **Reject**)
+5. If WordPress is set up (below), Approve = published.
+
+## How it works (the factory line)
+| Step | Who does it | Your part |
+|---|---|---|
+| 1. Watch | radar watches the news for a story worth covering | — |
+| 2. Plan | strategist writes a brief: angle, keyword, outline, CTA | — |
+| 3. Write | writer turns the brief into a draft (no freelancing) | — |
+| 4. Polish | editor re-writes it naturally (a different AI brain + anti-AI-tell rules) | — |
+| 5. Approve | **you** read it and click ✅ / ❌ | ← the only human step |
+
+The pipeline stops at step 5 on purpose. Nothing publishes without you.
+
+---
+
+## One-time setup (do this once, then forget it)
+
+### 1. AI brain (the writer's brain)
+One provider + API key powers plan/write/polish. Set it in **⚙️ Configure**
+(sidebar → System → Configure): pick your provider, paste your API key, save.
+
+### 2. WordPress (the outbox)
+Without this, approved articles stay "approved" instead of going live.
+- Where: **🛡️ Gov → WordPress Publisher**
+- What: site URL (e.g. `https://yourblog.com`), a username, and an
+  **Application Password** (created in WordPress → Users → your profile →
+  Application Passwords — this is NOT your login password)
+- Do it once; every future approval publishes automatically.
+
+### 3. DeerFlow (optional power tool)
+A bonus "super researcher" that can research and code for minutes-to-hours tasks.
+**It is not part of the content pipeline** — the pipeline never uses it.
+- Launch: roster → **DeerFlow card → ⚡ Launch** (first time ~10 min, then 🚀 Open)
+- Login: `admin@appvault.io` (password shown in its status screen — change it
+  inside DeerFlow's own settings)
+- Needs its own AI key only if you run tasks inside it.
+
+---
+
+## Where things live
+- **The page you use**: Agentic OS (the browser tab). Everything you'll ever click is here.
+- **Its brain**: a database + (optionally) your vault sync — fully automatic, never touch it.
+- **DeerFlow's folder**: inside your AppVault data folder — only matters if you use DeerFlow.
+
+---
+
+## The left panel, page by page
+| Page | What it's for |
+|---|---|
+| **Apps** | Installed desktop apps & launcher |
+| **Agentic OS** | Chat with the agents + the roster (DeerFlow, Ollama, LiteLLM…) |
+| **Missions** | Longer goals turned into plans with tasks |
+| **Identity** | Your profiles and "souls" (voice/personality) |
+| **Goals** | Objective tracking |
+| **Artifacts** | Generated outputs (SEO, V posts…) |
+| **Memory** | The shared brain — facts, signals, conversations |
+| **Completed** | The work ledger — everything finished |
+| **Crews** | Run pre-built agent teams |
+| **Content Pipeline** | ⭐ your daily screen — briefs → approval queue |
+| **Gov** | WordPress publisher, policies, security |
+| **Store / Installed / Manage** | Browse, install and manage apps |
+| **Configure** | AI brain (provider/key), souls, skills |
+| **Health** | Status of every service |
+| **Help** | This page |
+
+---
+
+## Quick fixes
+- **Article stuck at "approved"** → WordPress isn't set up yet. See One-time setup #2.
+- **Chat says "no LLM backend"** → ⚙️ Configure → set provider + API key.
+- **DeerFlow shows offline** → roster → DeerFlow → ⚡ Launch (be patient, first run builds).
+- **App won't launch** → Health page shows what's down; restart from Manage.
+- **You want a different polishing brain** → the editor model is configurable.
+"""
+
 @agentic_bp.route("/api/agentic/help", methods=["GET", "OPTIONS"])
 def api_help():
     if request.method == "OPTIONS":
         return jsonify({"status": "ok"})
-    text = ""
+    text, source = "", "builtin"
     for p in _HELP_CANDIDATES:
         try:
             if os.path.exists(p):
                 with open(p, encoding="utf-8") as f:
                     text = f.read()
+                source = "vault"
                 break
         except Exception:
             continue
     if not text:
-        text = ("# Agentic OS Help\n\n(The help file is missing — restore it from "
-                "your vault: `GRC-Brain/AGENTIC_OS_HELP.md`.)")
-    return jsonify({"status": "ok", "markdown": text,
+        text = _HELP_DEFAULT
+    return jsonify({"status": "ok", "markdown": text, "source": source,
                     "updated": datetime.now().strftime("%Y-%m-%d %H:%M")})
