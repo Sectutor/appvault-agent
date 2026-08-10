@@ -6427,7 +6427,8 @@ def api_work_item(wid):
         for col in ("title", "content", "category", "tags", "image_url", "url"):
             if col in data and data[col] is not None:
                 sets.append(f"{col}=?")
-                args.append(str(data[col])[:6000] if col == "content" else str(data[col])[:500])
+                # content: articles can hold AI visuals (10k+ HTML) — no hard cap
+                args.append(str(data[col])[:100000] if col == "content" else str(data[col])[:500])
         if not sets:
             conn.close()
             return jsonify({"error": "nothing to update"}), 400
