@@ -731,6 +731,23 @@ KEYWORDS = {
     "wordpress": 3, "autonomous": 3, "reasoning": 2, "open source": 2, "open-source": 2,
 }
 
+def _active_feeds():
+    """Feeds to sweep: config override (pipeline_sources.feeds, enabled only)
+    when present, else the built-in defaults."""
+    cfg = _cfg_get("pipeline_sources")
+    if isinstance(cfg, dict) and isinstance(cfg.get("feeds"), list) and cfg["feeds"]:
+        return [(f.get("name") or "Feed", f.get("url") or "") for f in cfg["feeds"]
+                if f.get("enabled", True) and (f.get("url") or "").strip()]
+    return list(FEEDS)
+
+def _active_keywords():
+    """Scoring keywords: config override (pipeline_sources.keywords) when
+    present, else the built-in defaults."""
+    cfg = _cfg_get("pipeline_sources")
+    if isinstance(cfg, dict) and isinstance(cfg.get("keywords"), dict) and cfg["keywords"]:
+        return cfg["keywords"]
+    return dict(KEYWORDS)
+
 def _fetch_feed(url, timeout=8):
     req = urllib.request.Request(url, headers={"User-Agent": "AppVault-Oracle/1.0"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -753,14 +770,14 @@ def _parse_rss(data):
 def _score(title, summary=""):
     text = f"{title} {summary}".lower()
     score = 0
-    for kw, w in KEYWORDS.items():
+    for kw, w in _active_keywords().items():
         if kw in text:
             score += w
     return min(100, score * 7 + (10 if any(c.isdigit() for c in title) else 0))
 
 def _sweep_feeds(limit=5):
     stories = []
-    for name, url in FEEDS:
+    for name, url in _active_feeds():
         try:
             items = _parse_rss(_fetch_feed(url))
             for it in items:
@@ -8919,6 +8936,52 @@ def api_pipeline_radar():
     except Exception:
         pass
     return jsonify({"status": "ok", "reports": reports})
+
+def _pipeline_sources_payload():
+    cfg = _cfg_get("pipeline_sources")
+    using_cfg = isinstance(cfg, dict) and isinstance(cfg.get("feeds"), list) and bool(cfg["feeds"])
+    if using_cfg:
+        feeds = cfg["feeds"]
+    else:
+        feeds = [{"name": n, "url": u, "enabled": True} for n, u in FEEDS]
+    if isinstance(cfg, dict) and isinstance(cfg.get("keywords"), dict) and cfg["keywords"]:
+        keywords = cfg["keywords"]
+    else:
+        keywords = dict(KEYWORDS)
+    return {"feeds": feeds, "keywords": keywords, "using_config": using_cfg}
+
+@agentic_bp.route("/api/agentic/pipeline/sources", methods=["GET", "POST", "OPTIONS"])
+def api_pipeline_sources():
+    """Edit what the radar tracks — feeds (name/url/enabled) + scoring keywords.
+    Saved to config; _active_feeds()/_active_keywords() feed every sweep."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "POST":
+        data = request.get_json() or {}
+        if data.get("reset"):
+            _cfg_set("pipeline_sources", {})
+            return jsonify({"status": "ok", "sources": _pipeline_sources_payload()})
+        cfg = {}
+        if isinstance(data.get("feeds"), list):
+            feeds = []
+            for f in data["feeds"][:40]:
+                if isinstance(f, dict) and (f.get("name") or "").strip() and (f.get("url") or "").strip():
+                    feeds.append({"name": f["name"].strip()[:60],
+                                  "url": f["url"].strip()[:300],
+                                  "enabled": bool(f.get("enabled", True))})
+            cfg["feeds"] = feeds
+        if isinstance(data.get("keywords"), dict):
+            kw = {}
+            for k, v in data["keywords"].items():
+                if k.strip():
+                    try:
+                        kw[k.strip()[:40]] = max(1, min(10, int(v)))
+                    except Exception:
+                        kw[k.strip()[:40]] = 3
+            cfg["keywords"] = kw
+        _cfg_set("pipeline_sources", cfg)
+        return jsonify({"status": "ok", "sources": _pipeline_sources_payload()})
+    return jsonify({"status": "ok", "sources": _pipeline_sources_payload()})
 
 @agentic_bp.route("/api/agentic/pipeline/<wid>/<action>", methods=["POST", "OPTIONS"])
 def api_pipeline_action(wid, action):
