@@ -5195,6 +5195,19 @@ def _maybe_extract_skill(msg):
 # =============================================================================
 import base64
 
+def _wp_config_for(project="appvault"):
+    """Project-scoped WP config (projects.config wp_tool) with global fallback."""
+    raw = _project_cfg(project, "wp_tool")
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            return json.loads(raw)
+        except Exception:
+            return {}
+    return {}
+
+
 def _wp_config():
     raw = _cfg_get("wp_tool") or ""
     try:
@@ -5213,14 +5226,61 @@ def _wp_save_config(patch):
     return cfg
 
 
-def _wp_auth_headers():
-    cfg = _wp_config()
+def _wp_auth_headers(cfg=None):
+    cfg = cfg if cfg is not None else _wp_config()
     user = (cfg.get("username") or "").strip()
     pw = (cfg.get("app_password") or "").strip()
     if not user or not pw:
         return None
     token = base64.b64encode(f"{user}:{pw}".encode("utf-8")).decode("ascii")
     return {"Authorization": f"Basic {token}"}
+
+
+def _wp_upload_media(site, hdrs, image_path):
+    """Upload a local image to the WP media library -> public URL (source_url)."""
+    try:
+        import urllib.request as _ur
+        if not site or not hdrs or not image_path or not os.path.exists(image_path):
+            return None
+        fname = os.path.basename(image_path)
+        mime = "image/png" if fname.lower().endswith(".png") else "image/jpeg"
+        with open(image_path, "rb") as f:
+            raw = f.read()
+        req = _ur.Request(f"{site}/wp-json/wp/v2/media", data=raw, method="POST")
+        req.add_header("Authorization", hdrs.get("Authorization", ""))
+        req.add_header("Content-Type", mime)
+        req.add_header("Content-Disposition", f'attachment; filename="{fname}"')
+        with _ur.urlopen(req, timeout=60) as resp:
+            d = json.loads(resp.read().decode("utf-8", "replace"))
+        url = (d or {}).get("source_url") or ""
+        mid = (d or {}).get("id")
+        return {"url": url, "id": mid} if url else None
+    except Exception:
+        return None
+
+
+def _public_media_url(image_path, project="appvault"):
+    """Resolve a (possibly local vault) image path to a URL Ocoya can fetch.
+    Order: already-http -> project media_base_url -> live WP media upload ->
+    local agent route (note: only reachable on your own network)."""
+    if not image_path:
+        return "", ""
+    if str(image_path).startswith(("http://", "https://")):
+        return str(image_path), ""
+    fname = os.path.basename(str(image_path))
+    cfg = _social_router_cfg(project)
+    base = (cfg.get("media_base_url") or "").strip().rstrip("/")
+    if base:
+        return f"{base}/{fname}", ""
+    wp = _wp_config_for(project)
+    site = (wp.get("site_url") or "").strip().rstrip("/")
+    hdrs = _wp_auth_headers(wp)
+    if site and hdrs:
+        up = _wp_upload_media(site, hdrs, str(image_path))
+        if up and up.get("url"):
+            return up["url"], ""
+    return (f"http://localhost:8086/api/agentic/media/file/{fname}",
+            "image URL is local — set a Media base URL in 📡 Social Router (or configure WordPress) so Ocoya can fetch it")
 
 
 def _wp_publish(title, content, status="publish", project=None):
@@ -8798,9 +8858,34 @@ def _pipeline_publish(wid):
     if not ok:
         return None, res
     it = _pipeline_update(wid, status="published", url=(res.get("link") or "") if isinstance(res, dict) else "")
+    # upload the cover to WP media -> public URL (also makes Ocoya scheduling work)
+    try:
+        img = item.get("image_url") or ""
+        if img and not img.startswith(("http://", "https://")) and isinstance(res, dict):
+            project = item.get("project") or "appvault"
+            wp = _wp_config_for(project)
+            site = (wp.get("site_url") or "").strip().rstrip("/")
+            hdrs = _wp_auth_headers(wp)
+            if site and hdrs:
+                up = _wp_upload_media(site, hdrs, img)
+                if up and up.get("url"):
+                    _pipeline_update(wid, image_url=up["url"])
+                    if up.get("id") and res.get("id"):
+                        try:
+                            import urllib.request as _ur
+                            req = _ur.Request(f"{site}/wp-json/wp/v2/posts/{res['id']}",
+                                              data=json.dumps({"featured_media": up["id"]}).encode(),
+                                              method="POST",
+                                              headers={"Authorization": hdrs.get("Authorization", ""),
+                                                       "Content-Type": "application/json"})
+                            _ur.urlopen(req, timeout=30).read()
+                        except Exception:
+                            pass
+    except Exception:
+        pass
     _bus_publish("pipeline.published", {"wid": wid, "title": item.get("title"),
                                         "url": (res.get("link") or "") if isinstance(res, dict) else ""})
-    return it, None
+    return it, res
 
 _PIPELINE_PLATFORMS = ("x", "linkedin", "facebook", "instagram")
 
@@ -8906,6 +8991,11 @@ def _social_router_send(post):
     Returns (ok, detail)."""
     project = post.get("project") or "appvault"
     cfg = _social_router_cfg(project)
+    if post.get("image_url"):
+        pub, note = _public_media_url(post.get("image_url"), project)
+        post["image_url"] = pub
+        if note:
+            post["_media_note"] = note
     if (cfg.get("provider") or "webhook").lower() == "ocoya":
         return _ocoya_send(post, cfg)
     url = (cfg.get("url") or "").strip()
@@ -9024,7 +9114,7 @@ def api_social_router_config():
         cfg = {}
         for k in ("provider", "url", "method", "auth_header", "auto_route",
                   "api_key", "workspace_id", "profile_ids", "schedule_mode",
-                  "schedule_offset_minutes"):
+                  "schedule_offset_minutes", "media_base_url"):
             if k in data and data[k] is not None:
                 cfg[k] = data[k]
         _project_save_cfg(project, {"social_router": cfg})
@@ -9709,12 +9799,44 @@ def api_pipeline_brainstorm():
                        title=f"💡 Brainstorm — {signal_label[:60]}",
                        content=json.dumps(ideas, ensure_ascii=False),
                        source="pipeline:strategist", status="brainstorm",
-                       tags=f"brainstorm,project:{project}", project=project)
+                       tags=f"brainstorm,project:{project}", project=project,
+                       url=f"signal:{signal[:500]}")
     if wid and source_key:
         _pipeline_mark_consumed(source_key, signal_label)
     _bus_publish("pipeline.brainstorm.ready", {"wid": wid, "project": project, "ideas": len(ideas)})
     return jsonify({"status": "ok", "wid": wid, "ideas": ideas,
                     "signal": signal[:200], "signal_label": signal_label, "project": project})
+
+@agentic_bp.route("/api/agentic/pipeline/<wid>/regenerate", methods=["POST", "OPTIONS"])
+def api_pipeline_regenerate(wid):
+    """🎲 Try again: 3 fresh ideas from the same stored signal."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    item = _pipeline_get(wid)
+    if not item:
+        return jsonify({"error": "not found"}), 404
+    if item.get("status") != "brainstorm":
+        return jsonify({"error": "not a brainstorm item"}), 400
+    signal = (item.get("url") or "").strip()
+    if signal.startswith("signal:"):
+        signal = signal[7:]
+    if not signal:
+        return jsonify({"error": "no stored signal on this item"}), 400
+    try:
+        ideas_text = _call_llm(f"Signal: {signal[:1500]}\n\nOutput the 3-idea JSON array now.",
+                               system_prompt=_BRAINSTORM_PROMPT, agent="strategist", timeout=90)
+    except Exception as e:
+        return jsonify({"status": "error", "error": f"regenerate failed: {str(e)[:150]}"}), 502
+    ideas = _json_array_extract(ideas_text)
+    if not ideas:
+        return jsonify({"status": "error", "error": "could not parse the idea list"}), 502
+    ideas = [i for i in ideas if isinstance(i, dict)][:3]
+    if not ideas:
+        return jsonify({"status": "error", "error": "no usable ideas"}), 502
+    _pipeline_update(wid, content=json.dumps(ideas, ensure_ascii=False),
+                     title=f"💡 Brainstorm — {signal[:60]}",
+                     tags=(item.get("tags") or "").replace("regenerated", "").strip() + ",regenerated")
+    return jsonify({"status": "ok", "item": _pipeline_get(wid), "ideas": ideas})
 
 @agentic_bp.route("/api/agentic/pipeline/<wid>/pick", methods=["POST", "OPTIONS"])
 def api_pipeline_pick(wid):
