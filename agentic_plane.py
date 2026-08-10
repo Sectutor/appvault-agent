@@ -8773,6 +8773,64 @@ def _pipeline_ensure():
         _PIPELINE_FLAG[0] = True
         threading.Thread(target=_pipeline_worker, daemon=True).start()
 
+def _pipeline_signal_consumed(key):
+    try:
+        conn = _db()
+        conn.execute("CREATE TABLE IF NOT EXISTS pipeline_signals (sig_id TEXT PRIMARY KEY, title TEXT, used_at TEXT)")
+        row = conn.execute("SELECT 1 FROM pipeline_signals WHERE sig_id=?", (key,)).fetchone()
+        conn.close()
+        return bool(row)
+    except Exception:
+        return False
+
+def _pipeline_mark_consumed(key, title=""):
+    try:
+        conn = _db()
+        conn.execute("CREATE TABLE IF NOT EXISTS pipeline_signals (sig_id TEXT PRIMARY KEY, title TEXT, used_at TEXT)")
+        conn.execute("INSERT OR IGNORE INTO pipeline_signals (sig_id, title, used_at) VALUES (?,?,?)",
+                     (key, (title or "")[:200], datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def _pipeline_next_signal():
+    """Next UNCONSUMED signal — variety by construction:
+    1) fresh sweep, first story whose title isn't used (diverse topics),
+    2) then radar report files (vault 03_Signals/Signal_sig-*.md) newest-first
+       that haven't been used,
+    3) else None (wait for the next sweep/radar run)."""
+    try:
+        for story in _sweep_feeds(6):
+            title = (story.get("title") or "").strip()
+            if not title:
+                continue
+            key = "title:" + re.sub(r"\s+", " ", title.lower())[:120]
+            if _pipeline_signal_consumed(key):
+                continue
+            return (title + " — " + (story.get("summary") or ""))[:3000], key, title
+    except Exception:
+        pass
+    try:
+        sig_dir = os.path.join(_vault_path(), "03_Signals")
+        if os.path.isdir(sig_dir):
+            files = sorted(n for n in os.listdir(sig_dir)
+                           if n.startswith("Signal_sig-") and n.endswith(".md"))
+            for name in reversed(files):  # newest first
+                key = "file:" + name
+                if _pipeline_signal_consumed(key):
+                    continue
+                try:
+                    with open(os.path.join(sig_dir, name), encoding="utf-8") as f:
+                        text = f.read()
+                except Exception:
+                    continue
+                if text.strip():
+                    return text[:3000], key, name
+    except Exception:
+        pass
+    return None, None, None
+
 @agentic_bp.route("/api/agentic/pipeline", methods=["GET", "OPTIONS"])
 def api_pipeline_list():
     if request.method == "OPTIONS":
@@ -8793,27 +8851,19 @@ def api_pipeline_brief():
     _pipeline_ensure()
     data = request.get_json() or {}
     signal = (data.get("signal") or "").strip()
+    source_key, signal_label = None, ""
     if not signal:
-        try:
-            conn = _db()
-            row = conn.execute("SELECT content FROM memory WHERE tag IN ('Signal','Radar') "
-                               "ORDER BY id DESC LIMIT 1").fetchone()
-            conn.close()
-            if row:
-                signal = row["content"]
-        except Exception:
-            pass
-    if not signal:
-        try:
-            top = _sweep_feeds(1)
-            if top:
-                signal = top[0]["title"] + " — " + (top[0].get("summary") or "")
-        except Exception:
-            pass
-    if not signal:
-        return jsonify({"error": "no signal available (memory has no Signal/Radar rows and RSS sweep failed)"}), 400
+        signal, source_key, signal_label = _pipeline_next_signal()
+        if not signal:
+            return jsonify({"error": "no fresh signal — every radar report and recent sweep story has been used. Try again after the next radar sweep (or pass a signal explicitly)."}), 400
+    else:
+        source_key = "manual:" + signal[:80]
+        signal_label = signal[:80]
     wid, brief = _pipeline_brief_from_signal(signal, data.get("source") or "manual")
-    return jsonify({"status": "ok", "wid": wid, "brief": brief, "signal": signal[:300]})
+    if wid and source_key:
+        _pipeline_mark_consumed(source_key, signal_label)
+    return jsonify({"status": "ok", "wid": wid, "brief": brief, "signal": signal[:300],
+                    "signal_label": signal_label})
 
 @agentic_bp.route("/api/agentic/pipeline/<wid>/<action>", methods=["POST", "OPTIONS"])
 def api_pipeline_action(wid, action):
