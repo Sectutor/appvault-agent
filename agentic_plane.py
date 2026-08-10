@@ -731,19 +731,19 @@ KEYWORDS = {
     "wordpress": 3, "autonomous": 3, "reasoning": 2, "open source": 2, "open-source": 2,
 }
 
-def _active_feeds():
-    """Feeds to sweep: config override (pipeline_sources.feeds, enabled only)
-    when present, else the built-in defaults."""
-    cfg = _cfg_get("pipeline_sources")
+def _active_feeds(project="appvault"):
+    """Feeds to sweep: project config override (pipeline_sources.feeds,
+    enabled only) when present, else the built-in defaults."""
+    cfg = _project_cfg(project, "pipeline_sources")
     if isinstance(cfg, dict) and isinstance(cfg.get("feeds"), list) and cfg["feeds"]:
         return [(f.get("name") or "Feed", f.get("url") or "") for f in cfg["feeds"]
                 if f.get("enabled", True) and (f.get("url") or "").strip()]
     return list(FEEDS)
 
-def _active_keywords():
-    """Scoring keywords: config override (pipeline_sources.keywords) when
-    present, else the built-in defaults."""
-    cfg = _cfg_get("pipeline_sources")
+def _active_keywords(project="appvault"):
+    """Scoring keywords: project config override (pipeline_sources.keywords)
+    when present, else the built-in defaults."""
+    cfg = _project_cfg(project, "pipeline_sources")
     if isinstance(cfg, dict) and isinstance(cfg.get("keywords"), dict) and cfg["keywords"]:
         return cfg["keywords"]
     return dict(KEYWORDS)
@@ -775,9 +775,9 @@ def _score(title, summary=""):
             score += w
     return min(100, score * 7 + (10 if any(c.isdigit() for c in title) else 0))
 
-def _sweep_feeds(limit=5):
+def _sweep_feeds(limit=5, project="appvault"):
     stories = []
-    for name, url in _active_feeds():
+    for name, url in _active_feeds(project):
         try:
             items = _parse_rss(_fetch_feed(url))
             for it in items:
@@ -5223,9 +5223,9 @@ def _wp_auth_headers():
     return {"Authorization": f"Basic {token}"}
 
 
-def _wp_publish(title, content, status="publish"):
+def _wp_publish(title, content, status="publish", project=None):
     """Create a WordPress post via the REST API. Returns (ok, result)."""
-    cfg = _wp_config()
+    cfg = _project_cfg(project or "appvault", "wp_tool") if project else _wp_config()
     site = (cfg.get("site_url") or "").strip().rstrip("/")
     if not site:
         return False, "not configured — add site URL in 🛡️ Gov → WordPress Publisher"
@@ -6341,16 +6341,16 @@ def _slash_mcp(args):
 # =============================================================================
 
 def _work_record(category="other", title="", content="", image_url="", source="manual",
-                 status="draft", url="", tags="", wid=None):
+                 status="draft", url="", tags="", wid=None, project="appvault"):
     try:
         import uuid as _uuid
         wid = wid or _uuid.uuid4().hex[:12]
         conn = _db()
         conn.execute("""INSERT OR IGNORE INTO work_items
-            (id, category, title, content, image_url, source, status, url, tags, created_at, updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?, datetime('now'), datetime('now'))""",
+            (id, category, title, content, image_url, source, status, url, tags, project, created_at, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?, datetime('now'), datetime('now'))""",
             (wid, category, title[:4000], content or "", image_url or "", source,
-             status, url or "", tags or ""))
+             status, url or "", tags or "", project))
         conn.commit(); conn.close()
         return wid
     except Exception:
@@ -8672,7 +8672,7 @@ def _pipeline_update(wid, **fields):
     conn.close()
     return dict(row) if row else None
 
-def _pipeline_brief_from_signal(signal_text, source="radar"):
+def _pipeline_brief_from_signal(signal_text, source="radar", project="appvault"):
     """Strategist: a scored signal -> structured content brief (ready_to_write)."""
     sys_p = ("You are the Content Strategist for an SEO content engine. Convert the signal into a "
              "STRICT JSON brief with EXACTLY these keys: angle (the hook), keyword_target (primary "
@@ -8692,7 +8692,8 @@ def _pipeline_brief_from_signal(signal_text, source="radar"):
     content = json.dumps(brief, indent=2, ensure_ascii=False) if brief else raw[:3000]
     wid = _work_record(category="content", title=title[:4000], content=content,
                        source="pipeline:strategist", status="ready_to_write",
-                       tags=f"brief,{str(brief.get('pillar') or 'general').lower()}")
+                       tags=f"brief,{str(brief.get('pillar') or 'general').lower()}",
+                       project=project)
     if wid:
         _bus_publish("pipeline.brief.ready", {"wid": wid, "title": title})
     return wid, brief
@@ -8792,7 +8793,8 @@ def _pipeline_publish(wid):
         return None, "not found"
     if (item.get("category") or "") != "content":
         return None, "social posts publish to their platform (n8n connector), not WordPress"
-    ok, res = _wp_publish(item.get("title") or "Post from AppVault", item.get("content") or "")
+    ok, res = _wp_publish(item.get("title") or "Post from AppVault", item.get("content") or "",
+                          project=item.get("project") or "appvault")
     if not ok:
         return None, res
     it = _pipeline_update(wid, status="published", url=(res.get("link") or "") if isinstance(res, dict) else "")
@@ -8835,7 +8837,8 @@ def _pipeline_social_posts(wid):
             continue
         _work_record(category=p, title=f"{title[:60]} — {p}", content=post[:3000],
                      source="pipeline:social", status="ready_for_approval",
-                     tags=f"social,platform:{p},article:{wid}")
+                     tags=f"social,platform:{p},article:{wid}",
+                     project=item.get("project") or "appvault")
         made += 1
     if made:
         _bus_publish("pipeline.social.ready", {"wid": wid, "title": title, "posts": made})
@@ -8891,7 +8894,9 @@ def _pipeline_socialize(wid):
 # Zapier/Make/n8n webhook, or any HTTP API). Config key "social_router":
 # {provider, url, method, auth_header ("Name: Value"), auto_route}.
 # ---------------------------------------------------------------------------
-def _social_router_cfg():
+def _social_router_cfg(project=None):
+    if project:
+        return _project_cfg(project, "social_router") or {}
     cfg = _cfg_get("social_router")
     return cfg if isinstance(cfg, dict) else {}
 
@@ -8899,7 +8904,8 @@ def _social_router_send(post):
     """Send an approved post to the configured scheduling service.
     provider=ocoya -> native Ocoya REST API; otherwise a generic webhook.
     Returns (ok, detail)."""
-    cfg = _social_router_cfg()
+    project = post.get("project") or "appvault"
+    cfg = _social_router_cfg(project)
     if (cfg.get("provider") or "webhook").lower() == "ocoya":
         return _ocoya_send(post, cfg)
     url = (cfg.get("url") or "").strip()
@@ -9003,12 +9009,17 @@ def _social_auto_route(wid):
 
 @agentic_bp.route("/api/agentic/pipeline/social/config", methods=["GET", "POST", "OPTIONS"])
 def api_social_router_config():
+    """Per-project social router (Ocoya key/workspace/profile IDs or webhook)."""
     if request.method == "OPTIONS":
         return jsonify({"status": "ok"})
+    project = _project_from(request.args, "appvault")
     if request.method == "POST":
         data = request.get_json() or {}
+        project = _project_from(data, project)
+        if not _project_get(project):
+            return jsonify({"error": "project not found"}), 404
         if data.get("reset"):
-            _cfg_set("social_router", {})
+            _project_save_cfg(project, {"social_router": {}})
             return jsonify({"status": "ok", "config": {}})
         cfg = {}
         for k in ("provider", "url", "method", "auth_header", "auto_route",
@@ -9016,22 +9027,22 @@ def api_social_router_config():
                   "schedule_offset_minutes"):
             if k in data and data[k] is not None:
                 cfg[k] = data[k]
-        _cfg_set("social_router", cfg)
+        _project_save_cfg(project, {"social_router": cfg})
         if data.get("test"):
             if (cfg.get("provider") or "webhook").lower() == "ocoya":
                 ok, detail = _ocoya_check(cfg)
             else:
                 ok, detail = _social_router_send({"title": "AppVault router test",
                                                   "category": "test", "content": "Pipeline router test — ignore.",
-                                                  "tags": ""})
-            return jsonify({"status": "ok" if ok else "error", "config": _social_router_cfg(),
-                            "test": detail})
-        return jsonify({"status": "ok", "config": _social_router_cfg()})
-    cfg = dict(_social_router_cfg())
+                                                  "tags": "", "project": project})
+            return jsonify({"status": "ok" if ok else "error",
+                            "config": _social_router_cfg(project), "test": detail})
+        return jsonify({"status": "ok", "config": _social_router_cfg(project)})
+    cfg = dict(_social_router_cfg(project))
     for k in ("api_key", "auth_header"):
         if cfg.get(k):
             cfg[k] = "•••••• (set)"
-    return jsonify({"status": "ok", "config": cfg})
+    return jsonify({"status": "ok", "config": cfg, "project": project})
 
 @agentic_bp.route("/api/agentic/pipeline/social/<wid>/schedule", methods=["POST", "OPTIONS"])
 def api_social_schedule(wid):
@@ -9307,7 +9318,85 @@ def _pipeline_worker():
 def _pipeline_ensure():
     if not _PIPELINE_FLAG[0]:
         _PIPELINE_FLAG[0] = True
+        _projects_ensure()
         threading.Thread(target=_pipeline_worker, daemon=True).start()
+
+# ---------------------------------------------------------------------------
+# PROJECTS — one content pipeline per business (AppVault, CISOvault, …).
+# Each project has its own sources (feeds/keywords), social router (Ocoya
+# profile IDs), and WordPress site. Stored in projects.config JSON with a
+# fallback to the global config keys for backward compatibility.
+# ---------------------------------------------------------------------------
+_PIPELINE_PROJECT_SEED = [
+    {"slug": "appvault", "name": "AppVault"},
+    {"slug": "cisovault", "name": "CISOvault"},
+]
+
+def _projects_ensure():
+    conn = _db()
+    try:
+        conn.execute("ALTER TABLE work_items ADD COLUMN project TEXT DEFAULT 'appvault'")
+    except Exception:
+        pass
+    conn.execute("CREATE TABLE IF NOT EXISTS projects "
+                 "(slug TEXT PRIMARY KEY, name TEXT, config TEXT, created TEXT)")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    for p in _PIPELINE_PROJECT_SEED:
+        conn.execute("INSERT OR IGNORE INTO projects (slug, name, config, created) VALUES (?,?,?,?)",
+                     (p["slug"], p["name"], "{}", now))
+    conn.commit()
+    conn.close()
+
+def _projects_list():
+    _projects_ensure()
+    conn = _db()
+    rows = conn.execute("SELECT slug, name, created FROM projects ORDER BY created").fetchall()
+    conn.close()
+    return [{"slug": r["slug"], "name": r["name"], "created": r["created"]} for r in rows]
+
+def _project_get(slug):
+    _projects_ensure()
+    conn = _db()
+    row = conn.execute("SELECT * FROM projects WHERE slug=?", (slug,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def _project_cfg(slug, key=None):
+    """Per-project config JSON; falls back to the global config key."""
+    p = _project_get(slug)
+    cfg = {}
+    if p and p.get("config"):
+        try:
+            cfg = json.loads(p["config"])
+        except Exception:
+            cfg = {}
+    if key is None:
+        return cfg
+    if key in cfg and cfg[key] is not None:
+        return cfg[key]
+    return _cfg_get(key)
+
+def _project_save_cfg(slug, cfg):
+    p = _project_get(slug)
+    base = {}
+    if p and p.get("config"):
+        try:
+            base = json.loads(p["config"])
+        except Exception:
+            base = {}
+    base.update(cfg or {})
+    conn = _db()
+    conn.execute("UPDATE projects SET config=? WHERE slug=?", (json.dumps(base), slug))
+    conn.commit()
+    conn.close()
+
+def _project_from(data_or_args, default="appvault"):
+    v = ""
+    try:
+        v = (data_or_args.get("project") or "").strip()
+    except Exception:
+        pass
+    return v or default
 
 def _pipeline_signal_consumed(key):
     try:
@@ -9372,13 +9461,83 @@ def api_pipeline_list():
     if request.method == "OPTIONS":
         return jsonify({"status": "ok"})
     _pipeline_ensure()
+    project = (request.args.get("project") or "appvault").strip()
     conn = _db()
     rows = conn.execute(
-        "SELECT * FROM work_items WHERE source LIKE 'pipeline%' "
-        "OR status IN ('ready_to_write','needs_refinement','ready_for_approval','approved','rejected') "
-        "ORDER BY updated_at DESC LIMIT 60").fetchall()
+        "SELECT * FROM work_items WHERE (source LIKE 'pipeline%' "
+        "OR status IN ('ready_to_write','needs_refinement','ready_for_approval','approved','rejected')) "
+        "AND project=? ORDER BY updated_at DESC LIMIT 60", (project,)).fetchall()
     conn.close()
-    return jsonify({"status": "ok", "items": [dict(r) for r in rows], "config": _pipeline_cfg()})
+    return jsonify({"status": "ok", "items": [dict(r) for r in rows],
+                    "config": _pipeline_cfg(), "project": project})
+
+@agentic_bp.route("/api/agentic/pipeline/projects", methods=["GET", "POST", "OPTIONS"])
+def api_pipeline_projects():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    _pipeline_ensure()
+    if request.method == "POST":
+        data = request.get_json() or {}
+        slug = (data.get("slug") or "").strip().lower().replace(" ", "-")
+        name = (data.get("name") or slug or "Project").strip()
+        if not slug or len(slug) > 40 or not all(c.isalnum() or c == "-" for c in slug):
+            return jsonify({"error": "slug must be letters, numbers and dashes"}), 400
+        conn = _db()
+        try:
+            conn.execute("INSERT INTO projects (slug, name, config, created) VALUES (?,?,?,?)",
+                         (slug, name, "{}", datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            conn.close()
+            return jsonify({"error": f"project exists or invalid: {str(e)[:120]}"}), 400
+        return jsonify({"status": "ok", "projects": _projects_list()})
+    return jsonify({"status": "ok", "projects": _projects_list()})
+
+@agentic_bp.route("/api/agentic/pipeline/projects/<slug>/config", methods=["GET", "PUT", "OPTIONS"])
+def api_pipeline_project_config(slug):
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if not _project_get(slug):
+        return jsonify({"error": "project not found"}), 404
+    if request.method == "PUT":
+        data = request.get_json() or {}
+        allowed = {k: data[k] for k in ("pipeline_sources", "social_router", "wp_tool")
+                   if k in data and data[k] is not None}
+        _project_save_cfg(slug, allowed)
+        return jsonify({"status": "ok", "config": _project_cfg(slug)})
+    cfg = _project_cfg(slug)
+    for k in ("social_router", "wp_tool"):
+        c = cfg.get(k)
+        if isinstance(c, dict):
+            for sk in ("api_key", "auth_header", "password", "application_password", "username"):
+                if c.get(sk):
+                    c[sk] = "•••••• (set)"
+    return jsonify({"status": "ok", "config": cfg})
+
+def _json_array_extract(text):
+    """Pull the first JSON array out of an LLM response (tolerates fences/preamble)."""
+    if not text:
+        return None
+    t = text.strip()
+    if t.startswith("```"):
+        t = re.sub(r"^```[a-z]*\n?", "", t)
+        t = re.sub(r"\n?```$", "", t)
+    start = t.find("[")
+    if start == -1:
+        return None
+    depth = 0
+    for i in range(start, len(t)):
+        if t[i] == "[":
+            depth += 1
+        elif t[i] == "]":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(t[start:i + 1])
+                except Exception:
+                    return None
+    return None
 
 @agentic_bp.route("/api/agentic/pipeline/brief", methods=["POST", "OPTIONS"])
 def api_pipeline_brief():
@@ -9396,27 +9555,31 @@ def api_pipeline_brief():
     else:
         signal_label = signal[:80]
         source_key = source_key or ("manual:" + signal[:80])
-    wid, brief = _pipeline_brief_from_signal(signal, data.get("source") or "manual")
+    project = _project_from(data, "appvault")
+    wid, brief = _pipeline_brief_from_signal(signal, data.get("source") or "manual",
+                                             project=project)
     if wid and source_key:
         _pipeline_mark_consumed(source_key, signal_label)
+        _pipeline_update(wid, project=project)
     return jsonify({"status": "ok", "wid": wid, "brief": brief, "signal": signal[:300],
-                    "signal_label": signal_label})
+                    "signal_label": signal_label, "project": project})
 
 @agentic_bp.route("/api/agentic/pipeline/stories", methods=["GET", "OPTIONS"])
 def api_pipeline_stories():
-    """Live news sweep right now — the 'Top Stories' tab."""
+    """Live news sweep right now — the 'Top Stories' tab (project-scoped feeds)."""
     if request.method == "OPTIONS":
         return jsonify({"status": "ok"})
+    project = (request.args.get("project") or "appvault").strip()
     stories = []
     try:
-        for s in _sweep_feeds(10):
+        for s in _sweep_feeds(10, project):
             stories.append({"title": s.get("title", ""), "score": s.get("score", 0),
                             "source": s.get("source", ""), "link": s.get("link", ""),
                             "summary": (s.get("summary") or "")[:220]})
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)[:200]}), 500
     return jsonify({"status": "ok", "stories": stories,
-                    "fetched": datetime.now().strftime("%H:%M:%S")})
+                    "fetched": datetime.now().strftime("%H:%M:%S"), "project": project})
 
 @agentic_bp.route("/api/agentic/pipeline/radar", methods=["GET", "OPTIONS"])
 def api_pipeline_radar():
@@ -9456,8 +9619,8 @@ def api_pipeline_radar():
         pass
     return jsonify({"status": "ok", "reports": reports})
 
-def _pipeline_sources_payload():
-    cfg = _cfg_get("pipeline_sources")
+def _pipeline_sources_payload(project="appvault"):
+    cfg = _project_cfg(project, "pipeline_sources")
     using_cfg = isinstance(cfg, dict) and isinstance(cfg.get("feeds"), list) and bool(cfg["feeds"])
     if using_cfg:
         feeds = cfg["feeds"]
@@ -9471,15 +9634,18 @@ def _pipeline_sources_payload():
 
 @agentic_bp.route("/api/agentic/pipeline/sources", methods=["GET", "POST", "OPTIONS"])
 def api_pipeline_sources():
-    """Edit what the radar tracks — feeds (name/url/enabled) + scoring keywords.
-    Saved to config; _active_feeds()/_active_keywords() feed every sweep."""
+    """Edit what THIS PROJECT's radar tracks — feeds + scoring keywords."""
     if request.method == "OPTIONS":
         return jsonify({"status": "ok"})
+    project = _project_from(request.args, "appvault")
     if request.method == "POST":
         data = request.get_json() or {}
+        project = _project_from(data, project)
+        if not _project_get(project):
+            return jsonify({"error": "project not found"}), 404
         if data.get("reset"):
-            _cfg_set("pipeline_sources", {})
-            return jsonify({"status": "ok", "sources": _pipeline_sources_payload()})
+            _project_save_cfg(project, {"pipeline_sources": {}})
+            return jsonify({"status": "ok", "sources": _pipeline_sources_payload(project)})
         cfg = {}
         if isinstance(data.get("feeds"), list):
             feeds = []
@@ -9498,9 +9664,95 @@ def api_pipeline_sources():
                     except Exception:
                         kw[k.strip()[:40]] = 3
             cfg["keywords"] = kw
-        _cfg_set("pipeline_sources", cfg)
-        return jsonify({"status": "ok", "sources": _pipeline_sources_payload()})
-    return jsonify({"status": "ok", "sources": _pipeline_sources_payload()})
+        _project_save_cfg(project, {"pipeline_sources": cfg})
+        return jsonify({"status": "ok", "sources": _pipeline_sources_payload(project)})
+    return jsonify({"status": "ok", "sources": _pipeline_sources_payload(project), "project": project})
+
+_BRAINSTORM_PROMPT = ("You are the Content Strategist for a business blog. From the signal, propose "
+                      "THREE distinct content ideas that fit the business. Return a JSON array of "
+                      "exactly 3 objects, each with keys: title (SEO-friendly headline, max 12 words), "
+                      "angle (one-sentence hook), why (one sentence on why this works for the business). "
+                      "Output ONLY the JSON array — no markdown fences, no preamble.")
+
+@agentic_bp.route("/api/agentic/pipeline/brainstorm", methods=["POST", "OPTIONS"])
+def api_pipeline_brainstorm():
+    """Brainstorm FIRST: strategist proposes 3 content ideas from a signal;
+    the item waits at status 'brainstorm' for a human to pick one."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    project = _project_from(data, "appvault")
+    _projects_ensure()
+    if not _project_get(project):
+        return jsonify({"error": "project not found"}), 404
+    signal = (data.get("signal") or "").strip()
+    source_key, signal_label = None, ""
+    if not signal:
+        signal, source_key, signal_label = _pipeline_next_signal()
+        if not signal:
+            return jsonify({"error": "no fresh signal — every radar report and recent sweep story has been used. Try again after the next radar sweep."}), 400
+    else:
+        signal_label = signal[:80]
+        source_key = source_key or ("manual:" + signal[:80])
+    try:
+        ideas_text = _call_llm(f"Signal: {signal[:1500]}\n\nOutput the 3-idea JSON array now.",
+                               system_prompt=_BRAINSTORM_PROMPT, agent="strategist", timeout=90)
+    except Exception as e:
+        return jsonify({"status": "error", "error": f"brainstorm failed: {str(e)[:150]}"}), 502
+    ideas = _json_array_extract(ideas_text)
+    if not ideas:
+        return jsonify({"status": "error", "error": "could not parse the idea list from the LLM"}), 502
+    ideas = [i for i in ideas if isinstance(i, dict)][:3]
+    if not ideas:
+        return jsonify({"status": "error", "error": "ideas had no usable objects"}), 502
+    wid = _work_record(category="content",
+                       title=f"💡 Brainstorm — {signal_label[:60]}",
+                       content=json.dumps(ideas, ensure_ascii=False),
+                       source="pipeline:strategist", status="brainstorm",
+                       tags=f"brainstorm,project:{project}", project=project)
+    if wid and source_key:
+        _pipeline_mark_consumed(source_key, signal_label)
+    _bus_publish("pipeline.brainstorm.ready", {"wid": wid, "project": project, "ideas": len(ideas)})
+    return jsonify({"status": "ok", "wid": wid, "ideas": ideas,
+                    "signal": signal[:200], "signal_label": signal_label, "project": project})
+
+@agentic_bp.route("/api/agentic/pipeline/<wid>/pick", methods=["POST", "OPTIONS"])
+def api_pipeline_pick(wid):
+    """Human picks one brainstorm idea -> brief from that idea -> auto-run continues."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    item = _pipeline_get(wid)
+    if not item:
+        return jsonify({"error": "not found"}), 404
+    if item.get("status") != "brainstorm":
+        return jsonify({"error": "not a brainstorm item"}), 400
+    data = request.get_json() or {}
+    try:
+        idx = int(data.get("idea", 0))
+    except Exception:
+        idx = 0
+    try:
+        ideas = json.loads(item.get("content") or "[]")
+    except Exception:
+        ideas = []
+    if idx < 0 or idx >= len(ideas):
+        return jsonify({"error": "idea index out of range"}), 400
+    idea = ideas[idx]
+    brief_text = f"Title: {idea.get('title', '')}\nAngle: {idea.get('angle', '')}\nWhy: {idea.get('why', '')}"
+    project = item.get("project") or "appvault"
+    wid2, brief = _pipeline_brief_from_signal(brief_text, source="brainstorm", project=project)
+    if not wid2:
+        return jsonify({"error": "brief generation failed"}), 502
+    conn = _db()
+    conn.execute("DELETE FROM work_items WHERE id=?", (wid2,))
+    conn.commit()
+    conn.close()
+    _pipeline_update(wid, title=(idea.get("title") or "Brief")[:4000],
+                     content=json.dumps(brief, ensure_ascii=False) if isinstance(brief, dict) else str(brief or ""),
+                     status="ready_to_write",
+                     tags=(item.get("tags") or "") + ",brief,brainstorm-picked")
+    _bus_publish("pipeline.brief.ready", {"wid": wid, "title": idea.get("title")})
+    return jsonify({"status": "ok", "item": _pipeline_get(wid), "idea": idea})
 
 @agentic_bp.route("/api/agentic/pipeline/<wid>/<action>", methods=["POST", "OPTIONS"])
 def api_pipeline_action(wid, action):
