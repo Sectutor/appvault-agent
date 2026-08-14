@@ -1602,6 +1602,23 @@ def _do_install_stack(app_id):
             _new = _re.sub(r'OPENSHIP_PUBLIC_URL:\s*"[^"]*"', f'OPENSHIP_PUBLIC_URL: "{base}"', _new)
             _new = _re.sub(r"OPENSHIP_PUBLIC_URL:\s*'[^']*'", f"OPENSHIP_PUBLIC_URL: '{base}'", _new)
             _new = _re.sub(r'OPENSHIP_PUBLIC_URL\s*=\s*\S+', f'OPENSHIP_PUBLIC_URL={base}', _new)
+            # Buzz: the relay seeds its deployment community from RELAY_URL at
+            # startup and fail-closes any host not in the communities table —
+            # an unmapped host answers "no community is configured for this
+            # host" on EVERY route. The seeded host must equal the host users
+            # actually reach the relay at, so rewrite RELAY_URL per client:
+            #   proxy mode  -> ws://<public host>:<https-port> (launch URL)
+            #   direct mode -> ws://localhost:<stable host port> (live port)
+            try:
+                _stable_port = _stable_host_port(
+                    f"app-{app_id}", app_id, str(app_def.get("container_port", "") or ""))
+                _relay_url = f"ws://{public_base_host()}:{hp}" if (PUBLIC_URL and "://" in PUBLIC_URL) \
+                    else f"ws://localhost:{_stable_port}"
+                _new = _re.sub(r'RELAY_URL:\s*"[^"]*"', f'RELAY_URL: "{_relay_url}"', _new)
+                _new = _re.sub(r"RELAY_URL:\s*'[^']*'", f"RELAY_URL: '{_relay_url}'", _new)
+                _new = _re.sub(r'RELAY_URL\s*=\s*\S+', f'RELAY_URL={_relay_url}', _new)
+            except Exception as _e:
+                print(f"[agent] RELAY_URL injection skipped for {app_id}: {_e}")
             if _new != _content:
                 with open(compose_path, "w", encoding="utf-8") as _f:
                     _f.write(_new)
