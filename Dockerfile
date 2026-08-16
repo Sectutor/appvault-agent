@@ -27,4 +27,6 @@ COPY templates/ ./templates/
 
 EXPOSE 8086 8087
 
-CMD ["python3", "agent.py"]
+# Production WSGI server (1 worker + threads: the agent keeps all state in
+# process-global dicts, so multiple workers would split-brain it).
+CMD ["gunicorn", "--bind", "0.0.0.0:8086", "--workers", "1", "--threads", "16",      "--timeout", "300", "--graceful-timeout", "30", "--access-logfile", "-", "agent:app"]

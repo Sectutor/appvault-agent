@@ -70,7 +70,7 @@ def certify(app):
     cname = f"cert-{app_id}"
     image = app.get("image")
     cport = app.get("container_port", "80")
-    web_path = app.get("web_path") or "/"
+    web_path = app.get("health_path") or app.get("web_path") or "/"
     result = {"app_id": app_id, "image": image, "certified": False,
               "checks": {}, "verified_url": "", "http_status": 0, "notes": []}
 

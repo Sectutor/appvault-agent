@@ -69,21 +69,40 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"), static_folder=os.path.join(BASE_DIR, "static"))
 APP_VERSION = "1.0.0"
 
-# â”€â”€ CORS: allow Heimdall (8085) and any other origin â”€â”€
+# -- CORS: only the store UI origin (and explicitly allow-listed origins) --
+AGENT_CORS_ORIGINS = {o.strip() for o in os.getenv("AGENT_CORS_ORIGINS", "").split(",") if o.strip()}
+UI_ORIGIN_PORT = int(os.getenv("UI_PORT", "8085"))
+
+def _origin_allowed(origin):
+    if not origin:
+        return False
+    if origin in AGENT_CORS_ORIGINS:
+        return True
+    # The store UI (heimdall) on any host - localhost, LAN IP, or VPS domain -
+    # but served on the UI port. Random websites never match this.
+    try:
+        from urllib.parse import urlparse
+        p = urlparse(origin)
+        return p.scheme in ("http", "https") and p.port == UI_ORIGIN_PORT
+    except Exception:
+        return False
+
 @app.after_request
 def add_cors_headers(response):
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Agent-Id, X-Api-Key"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    origin = request.headers.get("Origin", "")
+    if _origin_allowed(origin):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Agent-Id, X-Api-Key"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
     return response
 
-# -- Auth guard: require X-Api-Key on /api/* when API_KEY is set --
 # -- Auth guard --
-# Read-only catalog/status endpoints (GET) are PUBLIC so a fresh install shows free apps
-# without a pre-provisioned API key. Mutating/admin actions (install/uninstall/restart)
-# still require a valid X-Api-Key.
+# Read-only catalog/status endpoints (GET) are PUBLIC so a fresh install shows free
+# apps without a pre-provisioned API key. Everything else (including install/
+# uninstall/restart/stop/exec/agentic) requires a valid X-Api-Key when API_KEY is set.
 PUBLIC_READ_PREFIXES = ("/api/catalog", "/api/health", "/api/info", "/api/agent/status", "/api/stats",
-                        "/api/apps/health", "/api/education/", "/api/icon/", "/api/ping/", "/api/security", "/api/monitoring", "/api/agentic")
+                        "/api/apps/health", "/api/education/", "/api/icon/", "/api/ping/")
 
 @app.before_request
 def require_api_key():
@@ -93,19 +112,17 @@ def require_api_key():
         return None
     path = request.path
     if path.startswith("/api/"):
-        # Self-service actions on the user's own agent/local install are public:
-        # license, security, and app install/uninstall/restart. Install is a local user
-        # action on a private install; the agent API key is for central control jobs.
-        if path.startswith(("/api/license", "/api/security", "/api/install",
-                            "/api/uninstall", "/api/restart", "/api/stop", "/api/agentic")):
-            return None
         is_public_read = request.method == "GET" and path.startswith(PUBLIC_READ_PREFIXES)
-        requires_key = not is_public_read
-        if requires_key:
+        if not is_public_read:
+            import hmac as _hmac
             key = request.headers.get("X-Api-Key", "")
-            if key != API_KEY:
+            if not _hmac.compare_digest(key, API_KEY):
                 return jsonify({"error": "Unauthorized", "message": "Valid X-Api-Key header required"}), 401
     return None
+
+if not API_KEY:
+    print("[agent] WARNING: API_KEY is not set - the agent API is UNAUTHENTICATED. "
+          "Set API_KEY in the environment (the store UI accepts it via ?setup=KEY).", flush=True)
 
 
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -156,11 +173,13 @@ def docker_info():
 
 def container_exists(name: str) -> bool:
     ok, out = _docker("ps", "-a", "--filter", f"name={name}", "--format", "{{.Names}}", capture=True)
-    return name in out
+    # docker's name= filter is a SUBSTRING match - require an exact line so
+    # app-foo is not confused with app-foo2 (wrong uninstall/restart target).
+    return ok and any(n.strip() == name for n in out.splitlines())
 
 def container_running(name: str) -> bool:
     ok, out = _docker("ps", "--filter", f"name={name}", "--filter", "status=running", "--format", "{{.Names}}", capture=True)
-    return name in out
+    return ok and any(n.strip() == name for n in out.splitlines())
 
 def container_status(name: str) -> str:
     ok, out = _docker("ps", "-a", "--filter", f"name={name}", "--format", "{{.Status}}", capture=True)
@@ -208,11 +227,14 @@ def load_catalog_cache():
     return _merge_mcp_manifests(catalog)
 
 def save_catalog_cache(catalog):
-    with open(CATALOG_CACHE_PATH, "w") as f:
+    tmp = CATALOG_CACHE_PATH + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(catalog, f, indent=2)
+    os.replace(tmp, CATALOG_CACHE_PATH)  # atomic: a crash can't truncate the cache
     # Also save version separately for quick checks
-    with open(CATALOG_VERSION_FILE, "w") as f:
+    with open(CATALOG_VERSION_FILE + ".tmp", "w") as f:
         f.write(str(catalog.get("version", 0)))
+    os.replace(CATALOG_VERSION_FILE + ".tmp", CATALOG_VERSION_FILE)
 
 def get_cached_version():
     try:
@@ -227,18 +249,24 @@ catalog_cache = load_catalog_cache()
 # AGENT STATE
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
+_STATE_LOCK = threading.RLock()
+
 def load_agent_state():
     if os.path.exists(AGENT_STATE_PATH):
         try:
             with open(AGENT_STATE_PATH) as f:
                 return json.load(f)
-        except:
-            pass
+        except Exception as _e:
+            print(f"[agent] WARNING: {AGENT_STATE_PATH} is corrupt ({_e}) - "
+                  "starting fresh; identity/ports/license may be re-provisioned")
     return {"agent_id": AGENT_ID, "api_key": API_KEY}
 
 def save_agent_state(state):
-    with open(AGENT_STATE_PATH, "w") as f:
-        json.dump(state, f)
+    with _STATE_LOCK:
+        tmp = AGENT_STATE_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(state, f)
+        os.replace(tmp, AGENT_STATE_PATH)  # atomic: never lose agent identity mid-write
 
 agent_state = load_agent_state()
 # Prefer a persisted license key; fall back to env (initial provisioning)
@@ -273,10 +301,13 @@ def central_request(method, path, data=None, params=None):
     else:
         body = None
     
-    # Create SSL context that allows self-signed certificates
+    # TLS verification ON by default. Set CENTRAL_TLS_VERIFY=0 only for a
+    # self-signed central you control - an unverified channel lets a MITM
+    # feed the agent malicious images/compose files (remote code execution).
     ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+    if os.getenv("CENTRAL_TLS_VERIFY", "1").strip().lower() in ("0", "false", "no"):
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
 
     try:
         with urllib.request.urlopen(req, data=body, timeout=10, context=ctx) as resp:
@@ -303,31 +334,61 @@ def register_with_central():
     
     if result:
         # Save the credentials
-        agent_state["agent_id"] = result["agent_id"]
-        agent_state["api_key"] = result["api_key"]
-        save_agent_state(agent_state)
+        with _STATE_LOCK:
+            agent_state["agent_id"] = result["agent_id"]
+            agent_state["api_key"] = result["api_key"]
+            save_agent_state(agent_state)
         print(f"[agent] Registered with central as '{result['agent_id'][:12]}...'")
         return True
     else:
         print("[agent] Registration failed â€” will retry")
         return False
 
+_job_threads = []
+_inflight_jobs = set()
+_inflight_jobs_lock = threading.Lock()
+JOB_THREAD_CAP = 2  # concurrent central jobs; more would starve the host
+
+def _run_job_tracked(job):
+    job_id = job["id"]
+    try:
+        print(f"[agent] Executing job #{job_id}: {job['action']} {job['app_id']}")
+        execute_job(job)
+    finally:
+        with _inflight_jobs_lock:
+            _inflight_jobs.discard(job_id)
+
 def poll_jobs():
-    """Check for pending jobs from central server."""
+    """Check for pending jobs from central server.
+
+    Jobs run in worker threads (bounded) so a 10-minute install cannot block
+    heartbeats/catalog sync on the phone-home loop. In-flight ids are tracked
+    because central keeps a job 'pending' until we report - without the guard
+    every poll would re-dispatch the same job."""
+    global _job_threads
     effective_id = agent_state.get("agent_id", "")
     effective_key = agent_state.get("api_key", "")
     if not effective_id or not effective_key:
         return
-    
+
     result = central_request("GET", "/api/agent/jobs", params={
         "agent_id": effective_id,
         "api_key": effective_key
     })
-    
+
     if result and result.get("jobs"):
+        _job_threads = [t for t in _job_threads if t.is_alive()]
         for job in result["jobs"]:
-            print(f"[agent] Executing job #{job['id']}: {job['action']} {job['app_id']}")
-            execute_job(job)
+            if job["id"] in _inflight_jobs:
+                continue
+            if len(_job_threads) >= JOB_THREAD_CAP:
+                print("[agent] Job backlog: max concurrent jobs reached; re-trying next poll")
+                break
+            with _inflight_jobs_lock:
+                _inflight_jobs.add(job["id"])
+            t = threading.Thread(target=_run_job_tracked, args=(job,), daemon=True)
+            t.start()
+            _job_threads.append(t)
 
 def sync_catalog(force=False):
     """Check if catalog has been updated and sync if needed. force=True always re-fetches."""
@@ -460,7 +521,14 @@ def _refresh_bulk_container_state():
 
         if app_id:
             _PORT_CACHE[("st", app_id)] = (now, status_val)
-            _PORT_CACHE[("cn", app_id)] = (now, cname)
+            # Several containers can carry the same app label (stack front +
+            # private backends). Prefer one that actually publishes a host
+            # port: the portless one would make host-port lookups fall back
+            # to the (wrong) catalog container_port.
+            cur = _PORT_CACHE.get(("cn", app_id))
+            publishes_port = ("->" in ports_str)
+            if cur is None or publishes_port or (time.time() - cur[0]) >= _BULK_CACHE_TTL:
+                _PORT_CACHE[("cn", app_id)] = (now, cname)
             if image:
                 _PORT_CACHE[("img", app_id)] = (now, image)
 
@@ -515,7 +583,15 @@ def _app_container_name(app_id):
     ok, out = _docker("ps", "-a", "--filter", f"label=appvault.app={app_id}",
                       "--format", "{{.Names}}", capture=True)
     if ok and out and out.strip():
-        resolved = out.strip().splitlines()[0].strip()
+        candidates = [l.strip() for l in out.strip().splitlines() if l.strip()]
+        resolved = candidates[0]
+        # Prefer the container that actually publishes a host port (stack apps
+        # have several labeled containers: web front + private backends).
+        for cand in candidates:
+            pok, pout = _docker("port", cand, capture=True, timeout=15)
+            if pok and pout and "->" in pout:
+                resolved = cand
+                break
         _PORT_CACHE[("cn", app_id)] = (time.time(), resolved)
         return resolved
     _PORT_CACHE[("cn", app_id)] = (time.time(), cname)
@@ -548,7 +624,21 @@ def _get_container_port_host_uncached(container_name, container_port):
 
 import socket
 def _find_free_port():
-    """Find a random free port on the host."""
+    """Find a free host port in the safe AppVault range (33000-39999).
+
+    Never ask the OS for an ephemeral port (49152+): that range collides with
+    Windows/Hyper-V reserved chunks and other services, and flaky binds there
+    left apps unreachable (the anythingllm dropped-port-forward incident)."""
+    import random
+    for _ in range(200):
+        candidate = random.randrange(33000, 40000)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(('', candidate))
+                return candidate
+            except OSError:
+                continue
+    # last resort: legacy OS-assigned port
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(('', 0))
         return s.getsockname()[1]
@@ -570,14 +660,22 @@ def _stable_host_port(container_name, app_id, container_port):
     # deterministic port from app_id hash, in a safe range
     h = int(hashlib.sha256(app_id.encode()).hexdigest(), 16)
     stable = 30000 + (h % 9000)  # 30000-38999
+    # Two app_ids can hash to the same port (birthday bound at ~112 apps) which
+    # makes the second docker run fail to bind. Skip ports other apps own.
+    taken = {str(p) for aid, p in (agent_state.get("app_ports") or {}).items() if aid != app_id}
+    while str(stable) in taken:
+        stable += 1
+        if stable > 38999:
+            stable = 30000
     return str(stable)
 
 def _record_host_port(app_id, host_port):
     """Persist the host port assigned to an app so updates/restarts reuse it."""
     try:
-        ports = agent_state.setdefault("app_ports", {})
-        ports[app_id] = str(host_port)
-        save_agent_state(agent_state)
+        with _STATE_LOCK:
+            ports = agent_state.setdefault("app_ports", {})
+            ports[app_id] = str(host_port)
+            save_agent_state(agent_state)
     except Exception as e:
         print(f"[agent] record host port warning: {e}")
 
@@ -676,12 +774,6 @@ def _app_https_ports():
         result[aid] = h
     return result
 
-
-
-    """Deterministic HTTPS proxy port for an app (20000-28999), used for per-app HTTPS."""
-    import hashlib
-    h = int(hashlib.sha256(("https:" + app_id).encode()).hexdigest(), 16)
-    return 20000 + (h % 9000)
 
 
 def _sync_caddy_apps():
@@ -913,14 +1005,29 @@ def _provision_database(app_id, app_def, env_map=None):
 
 
 
+import re as _re_sql
+_SAFE_IDENT = _re_sql.compile(r"^[A-Za-z0-9_]+$")
+
+def _sql_ident_ok(value) -> bool:
+    """Catalog-derived identifiers must be plain word chars before hitting SQL."""
+    return isinstance(value, str) and bool(_SAFE_IDENT.match(value))
+
+def _sql_literal(value) -> str:
+    """Escape a value for a single-quoted SQL string literal."""
+    return str(value).replace("'", "''")
+
 def _create_mariadb_db(cname, db_name, db_user, db_pass):
     """Create/ensure the app's database and user in central MariaDB (idempotent, password reset)."""
-    if not db_name:
+    if not db_name or not _sql_ident_ok(db_name):
+        print(f"[agent] MariaDB: rejected unsafe db name {db_name!r}")
         return
+    if db_user and not _sql_ident_ok(db_user):
+        print(f"[agent] MariaDB: rejected unsafe user name {db_user!r}")
+        db_user = None
     root_pass = os.environ.get("MARIADB_ROOT_PASSWORD", "appvault_root_secret")
     if db_user and db_pass:
         _docker("exec", cname, "mariadb", "-uroot", f"-p{root_pass}", "-e",
-                f"CREATE USER IF NOT EXISTS '{db_user}'@'%' IDENTIFIED BY '{db_pass}'; ALTER USER '{db_user}'@'%' IDENTIFIED BY '{db_pass}';",
+                f"CREATE USER IF NOT EXISTS '{db_user}'@'%' IDENTIFIED BY '{_sql_literal(db_pass)}'; ALTER USER '{db_user}'@'%' IDENTIFIED BY '{_sql_literal(db_pass)}';",
                 timeout=10)
     _docker("exec", cname, "mariadb", "-uroot", f"-p{root_pass}", "-e",
             f"CREATE DATABASE IF NOT EXISTS `{db_name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;",
@@ -939,14 +1046,18 @@ def _create_postgres_db(cname, db_name, db_user, db_pass):
     Idempotent: resets the user's password to match the app's current env each time,
     so reinstalls (which may generate a fresh secret) always authenticate.
     """
-    if not db_name:
+    if not db_name or not _sql_ident_ok(db_name):
+        print(f"[agent] PostgreSQL: rejected unsafe db name {db_name!r}")
         return
+    if db_user and not _sql_ident_ok(db_user):
+        print(f"[agent] PostgreSQL: rejected unsafe user name {db_user!r}")
+        db_user = None
     ok, out = _docker("exec", cname, "psql", "-U", "postgres", "-c",
                       f"SELECT 1 FROM pg_database WHERE datname='{db_name}'", capture=True, timeout=10)
     db_exists = ok and "(1 row)" in out
     if db_user and db_pass:
         _docker("exec", cname, "psql", "-U", "postgres", "-c",
-                f"DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='{db_user}') THEN CREATE ROLE {db_user} LOGIN PASSWORD '{db_pass}'; ELSE ALTER ROLE {db_user} WITH PASSWORD '{db_pass}'; END IF; END $$;",
+                f"DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='{db_user}') THEN CREATE ROLE {db_user} LOGIN PASSWORD '{_sql_literal(db_pass)}'; ELSE ALTER ROLE {db_user} WITH PASSWORD '{_sql_literal(db_pass)}'; END IF; END $$;",
                 timeout=10)
     if not db_exists:
         _docker("exec", cname, "psql", "-U", "postgres", "-c",
@@ -965,9 +1076,9 @@ def _monitoring_health_dir(app_id):
 
 def _bootstrap_portainer():
     """Create Portainer admin via its bootstrap API with a fresh random password."""
-    import json as _json, random, string as _string, base64 as _b64
+    import json as _json, secrets as _secrets, string as _string, base64 as _b64
     user = os.getenv("PORTAINER_ADMIN_USER", "admin")
-    newpw = "".join(random.choices(_string.ascii_letters + _string.digits, k=16))
+    newpw = "".join(_secrets.choice(_string.ascii_letters + _string.digits) for _ in range(16))
 
     # 1) read setup token from portainer logs (via the docker socket the agent holds)
     ok, logs = _docker("logs", "app-portainer", capture=True)
@@ -1859,7 +1970,12 @@ def _do_uninstall(app_id):
                 for cname in outc.strip().splitlines():
                     _docker("stop", cname.strip())
                     _docker("rm", cname.strip())
-                _docker("volume", "prune", "-f", capture=True)
+                # Prune ONLY this stack's labeled volumes. A bare 'volume prune'
+                # deletes EVERY dangling volume on the host - including volumes
+                # belonging to unrelated stopped containers.
+                _docker("volume", "prune", "-f",
+                        "--filter", f"label=com.docker.compose.project={_stack_project(app_id)}",
+                        capture=True)
             try:
                 _sync_caddy_apps()
             except Exception:
@@ -2421,16 +2537,17 @@ def _mon_sec(mon_id, action="get", value=None):
     Stored per-install: set on bootstrap-install, cleared on uninstall so a
     reinstall gets a fresh password. Keyed agent_state["monitoring"]["<id>"]["admin_pass"].
     """
-    m = agent_state.setdefault("monitoring", {})
-    entry = m.setdefault(mon_id, {})
-    if action == "set" and value is not None:
-        entry["admin_pass"] = value
-        save_agent_state(agent_state)
-    elif action == "get":
-        return entry.get("admin_pass", "")
-    elif action == "clear":
-        m.pop(mon_id, None)
-        save_agent_state(agent_state)
+    with _STATE_LOCK:
+        m = agent_state.setdefault("monitoring", {})
+        entry = m.setdefault(mon_id, {})
+        if action == "set" and value is not None:
+            entry["admin_pass"] = value
+            save_agent_state(agent_state)
+        elif action == "get":
+            return entry.get("admin_pass", "")
+        elif action == "clear":
+            m.pop(mon_id, None)
+            save_agent_state(agent_state)
     return ""
 
 @app.route("/api/monitoring")
@@ -2545,8 +2662,9 @@ def api_license():
     data = request.json or {}
     # Empty key clears the license (downgrades to free-only); a non-empty key applies it.
     key = (data.get("license_key") or "").strip()
-    agent_state["license_key"] = key
-    save_agent_state(agent_state)
+    with _STATE_LOCK:
+        agent_state["license_key"] = key
+        save_agent_state(agent_state)
     ok = register_with_central()
     if ok:
         # Re-sync catalog so the correct apps show (premium when paid, free-only when cleared)
@@ -2598,8 +2716,9 @@ def api_license_refresh():
 
     key = central.get("license_key") or ""
     if key and key != agent_state.get("license_key"):
-        agent_state["license_key"] = key
-        save_agent_state(agent_state)
+        with _STATE_LOCK:
+            agent_state["license_key"] = key
+            save_agent_state(agent_state)
 
     ok = register_with_central()
     try:
@@ -3014,13 +3133,14 @@ def api_install(app_id):
     if blocked:
         return jsonify({"status": "error", "app_id": app_id, "message": blocked}), \
             (400 if app_def and app_def.get("disabled") else 402)
-    # Initialize progress
-    _set_progress(app_id, "Queued...", 2)
     # Serialize per-app operations: no concurrent install/uninstall/restart
     op_lock = _app_op_lock(app_id)
     if not op_lock.acquire(blocking=False):
         return jsonify({"status": "busy", "app_id": app_id,
                         "message": "Another operation is already running for this app"}), 409
+    # Initialize progress only AFTER owning the lock, so a 409 response can't
+    # clobber the in-flight operation's progress entry.
+    _set_progress(app_id, "Queued...", 2)
     # Run install in background thread
     def _install_thread():
         try:
@@ -3176,19 +3296,17 @@ def api_stop(app_id):
     finally:
         op_lock.release()
 
-@app.route("/api/exec/<app_id>", methods=["POST", "GET"])
+@app.route("/api/exec/<app_id>", methods=["POST"])
 def api_exec(app_id):
-    """Run a command inside the container targeting a specific app (e.g. npx omniroute reset-password)."""
+    """Run a command inside the container targeting a specific app (e.g. npx omniroute reset-password).
+
+    POST-only on purpose: commands in query strings leak into proxy logs and history."""
     cname = _app_container_name(app_id)
     if not (container_running(cname) or container_exists(cname)):
         return jsonify({"status": "error", "app_id": app_id, "message": f"App container '{cname}' for '{app_id}' is not running"}), 400
 
-    cmd = None
-    if request.method == "POST":
-        data = request.get_json(silent=True) or request.form or {}
-        cmd = data.get("command") or data.get("cmd")
-    else:
-        cmd = request.args.get("command") or request.args.get("cmd")
+    data = request.get_json(silent=True) or request.form or {}
+    cmd = data.get("command") or data.get("cmd")
 
     if not cmd:
         return jsonify({"status": "error", "message": "Missing 'command' parameter (provide JSON body: {\"command\": \"...\"} or query param ?cmd=...)"}), 400
@@ -3220,16 +3338,17 @@ def api_ai_generate_command():
     if not prompt:
         return jsonify({"status": "error", "message": "Missing 'prompt' in request body"}), 400
 
-    import re
+    import re, shlex
     pass_match = re.search(r'(?:password\s+(?:to|is|=)\s*|password:\s*)(\S+)', raw_prompt, re.I)
     pwd = pass_match.group(1) if pass_match else "NewAdminPass123"
+    pwd_q = shlex.quote(pwd)
 
     cmd = ""
     explanation = ""
 
     if app_id == "omniroute":
         if any(k in prompt for k in ["reset", "password", "pass"]):
-            cmd = f"printf '{pwd}' | node /app/bin/reset-password.mjs --password-stdin"
+            cmd = f"printf {pwd_q} | node /app/bin/reset-password.mjs --password-stdin"
             explanation = f"Resets OmniRoute admin password non-interactively to '{pwd}'."
         elif any(k in prompt for k in ["help", "option"]):
             cmd = "node /app/bin/omniroute.mjs --help"
@@ -3272,7 +3391,9 @@ def api_ai_generate_command():
             cmd = "ls -la /app"
             explanation = "Lists files in /app directory."
         else:
-            cmd = f"echo 'Executing request: {prompt}' && env"
+            # shlex.quote: the raw prompt may contain quotes that break out of
+            # the echo'd shell string (command injection into /api/exec).
+            cmd = f"echo {shlex.quote('Executing request: ' + prompt)} && env"
             explanation = f"Generated CLI command for: '{prompt}'"
 
     return jsonify({
@@ -3289,7 +3410,8 @@ def api_ai_generate_command():
 # Replaces the hardcoded demo block. State lives in SQLite, roster status is
 # derived from live probes, Oracle sweeps real RSS feeds, LLM config is central.
 # ==============================================================================
-from agentic_plane import agentic_bp
+from agentic_plane import agentic_bp, start_funnel_scheduler
+start_funnel_scheduler()  # boot the funnel scheduler daemon (prospect machine)
 app.register_blueprint(agentic_bp)
 
 # HEIMDALL â€” auto-configure on startup

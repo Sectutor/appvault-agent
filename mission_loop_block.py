@@ -34,6 +34,17 @@ MISSION_TEMPLATES = {
             {"title": "Record + report + goal bump", "task_type": "report", "executor": "mission", "depends_on": 3},
         ],
     },
+    "product": {
+        "name": "Product mission",
+        "description": "Spec -> build -> verify (compile) -> ship (manifest + ledger) -> report",
+        "tasks": [
+            {"title": "Write the build spec (files + acceptance criteria)", "task_type": "spec", "executor": "mission"},
+            {"title": "Build the artifact (Python code)", "task_type": "build", "executor": "mission", "depends_on": 0},
+            {"title": "Verify the artifact (compile + gates)", "task_type": "verify_build", "executor": "mission", "depends_on": 1},
+            {"title": "Ship the artifact (manifest + work record)", "task_type": "ship", "executor": "mission", "depends_on": 2},
+            {"title": "Record + report + goal bump", "task_type": "report", "executor": "mission", "depends_on": 3},
+        ],
+    },
 }
 
 
@@ -52,6 +63,10 @@ def _missions_migrate():
         status TEXT DEFAULT 'queued', attempts INTEGER DEFAULT 0, last_error TEXT,
         wait_until TEXT, depends_on INTEGER, result_ref TEXT, verified INTEGER DEFAULT 0,
         created TEXT, updated TEXT
+    );
+    CREATE TABLE IF NOT EXISTS metrics (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        metric_type TEXT, value REAL, note TEXT, ts TEXT DEFAULT (datetime('now'))
     );
     """)
     conn.commit()
@@ -294,6 +309,16 @@ def _mission_report(mission, task, ctx):
     conn.close()
     lines = ["# Mission report: %s" % mission.get("title", "")]
     lines.append("Objective: %s | Status: %s" % (mission.get("objective_type", ""), mission.get("status", "")))
+    try:
+        conn = _db()
+        mrows = conn.execute("SELECT metric_type, value, note FROM metrics ORDER BY id DESC LIMIT 3").fetchall()
+        conn.close()
+        if mrows:
+            lines.append("\nRecent metrics:")
+            for mr in mrows:
+                lines.append("- %s: %s%s" % (mr["metric_type"], mr["value"], (" (" + mr["note"] + ")") if mr["note"] else ""))
+    except Exception:
+        pass
     for t in tasks:
         mark = "x" if t["verified"] else " "
         lines.append("- [%s] %s (%s)%s" % (mark, t["title"], t["status"],
@@ -406,6 +431,94 @@ def _mission_followup(mission, task, ctx):
     return (True, path + (" sent:%d" % sent if sent else ""), None)
 
 
+def _mission_spec(mission, task, ctx):
+    topic = mission.get("title") or "Build a small tool"
+    prompt = ("You are the engineer arm of an autonomous business agent. Voice: %s\n"
+              "Write a build spec for: %s\nSpec must include: purpose, 1-3 files (Python), "
+              "key functions, and 3 acceptance criteria. Output ONLY the spec (markdown)."
+              % (ctx["voice"], topic))
+    out = _call_llm_with({}, prompt, agent="hermes", timeout=180)
+    out = (out or "").strip()
+    if len(out) < 150:
+        return (False, None, "spec too short (%d chars)" % len(out))
+    path = _write_vault_output("05_Build", "spec_%s.md" % _mission_slug(topic), out, tag="Spec", agent="Mission")
+    return (True, path, None)
+
+
+def _mission_build(mission, task, ctx):
+    spec = _read_dep_result(task) or ""
+    topic = mission.get("title") or "tool"
+    prompt = ("You are the engineer arm of an autonomous business agent. Voice: %s\n"
+              "Write the COMPLETE, syntactically valid Python 3 script implementing this spec. "
+              "Rules: output ONLY code (no markdown fences, no explanation); a single self-contained file; "
+              "no comments naming other files; NO 'from __future__' imports (the compiler rejects them here).\n\nSpec:\n%s"
+              % (ctx["voice"], spec[:3000]))
+    # adaptive feedback: previous verification failure
+    try:
+        conn = _db()
+        v = conn.execute(
+            "SELECT last_error FROM mission_tasks WHERE mission_id=? AND task_type='verify_build' "
+            "AND last_error IS NOT NULL AND last_error LIKE '%SYNTAX%' ORDER BY id DESC LIMIT 1",
+            (mission.get("id"),)).fetchone()
+        conn.close()
+        if v and v["last_error"]:
+            prompt += ("\n\nIMPORTANT: your previous attempt was REJECTED by the compiler with:\n%s\n"
+                       "Fix that exact issue, and remember: NO 'from __future__' imports, single file, "
+                       "output only code." % v["last_error"])
+    except Exception:
+        pass
+    out = _call_llm_with({}, prompt, agent="hermes", timeout=300)
+    out = (out or "").strip()
+    out = out.replace("```python", "").replace("```", "").strip()
+    if len(out) < 60:
+        return (False, None, "artifact too short (%d chars)" % len(out))
+    path = _write_vault_output("05_Build", "%s.py" % _mission_slug(topic), out, tag="Build", agent="Mission")
+    return (True, path, None)
+
+
+def _mission_verify_build(mission, task, ctx):
+    code = _read_dep_result(task) or ""
+    if not code:
+        return (False, None, "no artifact to verify")
+    try:
+        compile(code, "<mission>", "exec")
+    except SyntaxError as e:
+        return (False, None, "SYNTAX ERROR line %s: %s" % (getattr(e, "lineno", "?"), str(e)[:120]))
+    if len(code) < 60:
+        return (False, None, "artifact too short (%d chars)" % len(code))
+    lines = len(code.splitlines())
+    return (True, "compile-ok %d lines" % lines, None)
+
+
+def _mission_ship(mission, task, ctx):
+    build_ref = _mission_result_by_type(mission.get("id"), "build")
+    code = _read_ref(build_ref) or ""
+    if not code:
+        return (False, None, "no build artifact found to ship")
+    slug = _mission_slug(mission.get("title") or "artifact")
+    shipped = []
+    try:
+        vault = _vault_path()
+        d = os.path.join(vault, "05_Build", "shipped")
+        os.makedirs(d, exist_ok=True)
+        spath = os.path.join(d, "%s.py" % slug)
+        with open(spath, "w", encoding="utf-8") as f:
+            f.write(code)
+        manifest = os.path.join(d, "SHIPPED.md")
+        with open(manifest, "a", encoding="utf-8") as f:
+            f.write("- %s | %s | %d lines | %s\n" % (slug, mission.get("title", ""), len(code.splitlines()),
+                                                      datetime.now().strftime("%Y-%m-%d %H:%M")))
+        shipped.append(spath)
+    except Exception as e:
+        return (False, None, "ship failed: %s" % str(e)[:150])
+    try:
+        _work_record(category="product", title=mission.get("title") or "Product artifact",
+                     content=("shipped artifact: %s" % slug)[:500], source="mission")
+    except Exception:
+        pass
+    return (True, "shipped:%s" % slug, None)
+
+
 def _mission_review(mission):
     """Post-mission learning: review file + append lessons to MISSION_LESSONS.md."""
     try:
@@ -466,9 +579,65 @@ def _mission_execute(mission, task):
             return _mission_send_emails(mission, task, ctx)
         if ttype == "followup":
             return _mission_followup(mission, task, ctx)
+        if ttype == "spec":
+            return _mission_spec(mission, task, ctx)
+        if ttype == "build":
+            return _mission_build(mission, task, ctx)
+        if ttype == "verify_build":
+            return _mission_verify_build(mission, task, ctx)
+        if ttype == "ship":
+            return _mission_ship(mission, task, ctx)
         return (False, None, "unknown task_type: %s" % ttype)
     except Exception as e:
         return (False, None, str(e)[:300])
+
+
+def _mission_run_task(mission, task):
+    """Run one task and persist the outcome (daemon thread)."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        ok, ref, err = _mission_execute(mission, task)
+    except Exception as e:
+        ok, ref, err = False, None, str(e)[:300]
+    try:
+        conn = _db()
+        if ok:
+            conn.execute("UPDATE mission_tasks SET status='verified', verified=1, result_ref=?, last_error=NULL, updated=? WHERE id=?",
+                         (ref, now, task["id"]))
+            # a verified producer un-blocks its verifier so the new artifact gets checked
+            if task.get("task_type") in ("build", "draft"):
+                conn.execute("UPDATE mission_tasks SET status='queued', attempts=0, last_error=NULL, updated=? "
+                             "WHERE mission_id=? AND task_type IN ('verify_build','qa') AND status='blocked'",
+                             (now, task.get("mission_id")))
+            conn.commit()
+            conn.close()
+            return
+        attempts = (task.get("attempts") or 0) + 1
+        # self-correction: a failed verification re-queues its producer to regenerate
+        if task.get("task_type") in ("verify_build", "qa") and task.get("depends_on"):
+            conn.execute("UPDATE mission_tasks SET status='queued', attempts=0, last_error=NULL, updated=? WHERE id=?",
+                         (now, task["depends_on"]))
+        if attempts >= 3:
+            conn.execute("UPDATE mission_tasks SET status='blocked', attempts=?, last_error=?, updated=? WHERE id=?",
+                         (attempts, str(err)[:300], now, task["id"]))
+            out_note = "blocked: %s" % str(err)[:80]
+        else:
+            conn.execute("UPDATE mission_tasks SET status='queued', attempts=?, last_error=?, updated=? WHERE id=?",
+                         (attempts, str(err)[:300], now, task["id"]))
+            out_note = "retry(%d)" % attempts
+        conn.commit()
+        conn.close()
+        return out_note
+    except Exception as e:
+        try:
+            conn = _db()
+            conn.execute("UPDATE mission_tasks SET last_error=?, updated=? WHERE id=?",
+                         ("worker-db-error: %s" % str(e)[:200], now, task["id"]))
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+        return None
 
 
 def _mission_tick():
@@ -484,6 +653,12 @@ def _mission_tick():
             chosen = None
             for t in tasks:
                 tdict = dict(t)
+                # self-heal: outcome landed but status went stale (thread race)
+                if tdict["status"] == "running" and tdict["verified"]:
+                    conn.execute("UPDATE mission_tasks SET status='verified', updated=? WHERE id=?", (now, tdict["id"]))
+                    conn.commit()
+                    out.append("M%d T%d healed" % (m["id"], tdict["id"]))
+                    continue
                 if tdict["status"] != "queued":
                     continue
                 if tdict["depends_on"]:
@@ -508,28 +683,24 @@ def _mission_tick():
                         out.append("M%d done%s" % (m["id"], (" review:" + rev) if rev else ""))
                     except Exception:
                         out.append("M%d done" % m["id"])
+                    # P0-1 mail notify: report mission completion headlessly
+                    try:
+                        mt = mdict.get("title") or ("M%d" % m["id"])
+                        _queue_mail("✅ Mission complete: %s" % mt,
+                                    "Mission \"%s\" finished — every task verified.\n\n%s" % (
+                                        mt, (mdict.get("description") or "")[:400]))
+                    except Exception:
+                        pass
                 continue
             conn.execute("UPDATE mission_tasks SET status='running', updated=? WHERE id=?", (now, chosen["id"]))
             conn.commit()
             conn.close()
-            ok, ref, err = _mission_execute(mdict, chosen)
-            conn = _db()
-            if ok:
-                conn.execute("UPDATE mission_tasks SET status='verified', verified=1, result_ref=?, last_error=NULL, updated=? WHERE id=?",
-                             (ref, now, chosen["id"]))
-                out.append("M%d T%d ok" % (m["id"], chosen["id"]))
-            else:
-                attempts = chosen["attempts"] + 1
-                if attempts >= 3:
-                    conn.execute("UPDATE mission_tasks SET status='blocked', attempts=?, last_error=?, updated=? WHERE id=?",
-                                 (attempts, str(err)[:300], now, chosen["id"]))
-                    out.append("M%d T%d blocked: %s" % (m["id"], chosen["id"], str(err)[:80]))
-                else:
-                    conn.execute("UPDATE mission_tasks SET status='queued', attempts=?, last_error=?, updated=? WHERE id=?",
-                                 (attempts, str(err)[:300], now, chosen["id"]))
-                    out.append("M%d T%d retry(%d)" % (m["id"], chosen["id"], attempts))
-            conn.commit()
-            conn.close()
+            # async: run in a daemon thread so the tick never blocks on LLM calls
+            try:
+                threading.Thread(target=_mission_run_task, args=(mdict, chosen), daemon=True).start()
+            except Exception:
+                _mission_run_task(mdict, chosen)
+            out.append("M%d T%d started" % (m["id"], chosen["id"]))
             conn = _db()
         conn.close()
     except Exception as e:
@@ -671,6 +842,54 @@ def api_mission_tick():
         return jsonify({"status": "ok"})
     res = _mission_tick()
     return jsonify({"status": "ok", "events": res})
+
+
+@agentic_bp.route("/api/agentic/metrics", methods=["GET", "POST", "OPTIONS"])
+def api_metrics():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "POST":
+        data = request.get_json() or {}
+        mtype = (data.get("type") or "").strip().lower()
+        if mtype not in ("revenue", "leads", "traffic"):
+            return jsonify({"error": "type must be revenue|leads|traffic"}), 400
+        try:
+            value = float(data.get("value") or 0)
+        except Exception:
+            return jsonify({"error": "value must be a number"}), 400
+        note = (data.get("note") or "").strip()[:200]
+        conn = _db()
+        cur = conn.execute("INSERT INTO metrics (metric_type, value, note) VALUES (?,?,?)", (mtype, value, note))
+        conn.commit()
+        conn.close()
+        # revenue metrics feed business goals
+        if mtype == "revenue" and value > 0:
+            _goal_bump("revenue", "revenue", 2, "metrics", note=("Revenue recorded: $%s" % value))
+        return jsonify({"status": "ok", "metric_id": cur.lastrowid})
+    conn = _db()
+    rows = conn.execute("SELECT * FROM metrics ORDER BY id DESC LIMIT 50").fetchall()
+    conn.close()
+    return jsonify({"status": "ok", "metrics": [dict(r) for r in rows]})
+
+
+@agentic_bp.route("/api/agentic/tasks/<int:tid>/delay", methods=["POST", "OPTIONS"])
+def api_task_delay(tid):
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    try:
+        minutes = int(data.get("minutes") or 0)
+    except Exception:
+        return jsonify({"error": "minutes required"}), 400
+    if minutes < 1:
+        return jsonify({"error": "minutes must be >= 1"}), 400
+    wait = (datetime.now() + timedelta(minutes=minutes)).strftime("%Y-%m-%d %H:%M:%S")
+    conn = _db()
+    conn.execute("UPDATE mission_tasks SET wait_until=?, updated=? WHERE id=?", (wait, wait, tid))
+    conn.commit()
+    row = conn.execute("SELECT * FROM mission_tasks WHERE id=?", (tid,)).fetchone()
+    conn.close()
+    return jsonify({"status": "ok", "task": _mtask_to_dict(row) if row else None})
 
 
 @agentic_bp.route("/api/agentic/missions/templates", methods=["GET", "OPTIONS"])

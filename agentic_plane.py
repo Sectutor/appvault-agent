@@ -30,7 +30,9 @@ from flask import Blueprint, request, jsonify, Response
 agentic_bp = Blueprint("agentic_plane", __name__)
 
 def _http(url, method="GET", json_data=None, timeout=8, headers=None):
-    """stdlib HTTP helper (the agent image has NO requests module)."""
+    """stdlib HTTP helper (the agent image has NO requests module).
+    Follows redirects (incl. 307/308 with POST body) — urllib refuses to
+    re-send a POST body to a different host, which Ocoya's www. redirect needs."""
     data = None
     hdrs = {"User-Agent": "AppVault-Agent/1.0"}
     if headers:
@@ -38,21 +40,31 @@ def _http(url, method="GET", json_data=None, timeout=8, headers=None):
     if json_data is not None:
         data = json.dumps(json_data).encode()
         hdrs["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=data, headers=hdrs, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-            try:
-                return json.loads(body), resp.status
-            except Exception:
-                return {"raw": body[:2000]}, resp.status
-    except urllib.error.HTTPError as e:
+    cur = url
+    for _ in range(5):
+        req = urllib.request.Request(cur, data=data, headers=hdrs, method=method)
         try:
-            return json.loads(e.read().decode("utf-8", errors="replace")), e.code
-        except Exception:
-            return {"error": f"HTTP {e.code}"}, e.code
-    except Exception as e:
-        return {"error": str(e)}, 0
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+                try:
+                    return json.loads(body), resp.status
+                except Exception:
+                    return {"raw": body[:2000]}, resp.status
+        except urllib.error.HTTPError as e:
+            if e.code in (301, 302, 303, 307, 308) and e.headers.get("Location"):
+                loc = e.headers["Location"]
+                cur = urllib.parse.urljoin(cur, loc)
+                if e.code in (301, 302, 303) and method == "POST":
+                    method, data = "GET", None  # spec: 301/302/303 -> GET
+                # 307/308 keep method + body
+                continue
+            try:
+                return json.loads(e.read().decode("utf-8", errors="replace")), e.code
+            except Exception:
+                return {"error": f"HTTP {e.code}"}, e.code
+        except Exception as e:
+            return {"error": str(e)}, 0
+    return {"error": "too many redirects"}, 508
 
 # ---------------------------------------------------------------------------
 # Persistence
@@ -136,6 +148,31 @@ def _init_db():
         last_error TEXT,
         created TEXT, sent TEXT
     );
+    CREATE TABLE IF NOT EXISTS businesses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT UNIQUE, voice TEXT, website TEXT, cta_offer TEXT,
+        created TEXT, updated TEXT
+    );
+    CREATE TABLE IF NOT EXISTS social_profiles (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        business_id INTEGER DEFAULT NULL,
+        platform TEXT, display_name TEXT, handle TEXT,
+        ocoya_workspace_id TEXT, ocoya_profile_id TEXT,
+        enabled INTEGER DEFAULT 1, created TEXT
+    );
+    CREATE TABLE IF NOT EXISTS content_types (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        business_id INTEGER DEFAULT NULL,
+        name TEXT, purpose TEXT, voice TEXT, structure TEXT,
+        platforms TEXT, cadence TEXT, length_guard INTEGER DEFAULT 0,
+        enabled INTEGER DEFAULT 1, created TEXT
+    );
+    CREATE TABLE IF NOT EXISTS wordpress_sites (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        business_id INTEGER DEFAULT NULL,
+        name TEXT, site_url TEXT, username TEXT, app_password TEXT,
+        enabled INTEGER DEFAULT 1, created TEXT
+    );
     """)
     conn.commit()
     conn.close()
@@ -174,6 +211,59 @@ def _migrate_memory_schema():
 
 
 _migrate_memory_schema()
+
+
+def _migrate_multitenant_schema():
+    """Multi-tenant content layer: business scoping for feeds/posts.
+    No-op on fresh installs (columns already exist)."""
+    conn = _db()
+    try:
+        conn.execute("ALTER TABLE oracle_feeds ADD COLUMN business_id INTEGER DEFAULT NULL")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE oracle_posts ADD COLUMN business_id INTEGER DEFAULT NULL")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE oracle_posts ADD COLUMN profile_id INTEGER DEFAULT NULL")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE businesses ADD COLUMN social_platforms TEXT")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE businesses ADD COLUMN daily_target INTEGER DEFAULT 8")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE oracle_feeds ADD COLUMN is_engagement INTEGER DEFAULT 0")
+        conn.execute("ALTER TABLE oracle_feeds ADD COLUMN flash_threshold INTEGER DEFAULT 30")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE oracle_feeds ADD COLUMN x_watch TEXT DEFAULT '[]'")
+    except Exception:
+        pass
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS x_archived (link TEXT PRIMARY KEY, business_id INTEGER, archived_at TEXT)")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE social_profiles ADD COLUMN webhook_url TEXT")
+        conn.execute("ALTER TABLE social_profiles ADD COLUMN webhook_auth TEXT")
+    except Exception:
+        pass
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS links (code TEXT PRIMARY KEY, target TEXT, campaign TEXT, source TEXT, medium TEXT, clicks INTEGER DEFAULT 0, created TEXT)")
+    except Exception:
+        pass
+    conn.commit()
+    conn.close()
+
+
+_migrate_multitenant_schema()
 
 
 def _cfg_get(key, default=None):
@@ -220,6 +310,11 @@ AGENT_PROMPTS = {
                      "actual code/artifacts for the task.",
     "crew-reviewer": "You are the crew Code Reviewer. Review the proposed work for correctness, "
                      "security, and quality, and report concrete findings.",
+    "crew-prospector": "You are the crew Prospector. Identify and score the most promising candidate businesses for the task, requiring verified source evidence for every candidate.",
+    "crew-researcher": "You are the crew Researcher. Enrich each candidate with concrete verified facts — tech stack, decision-makers, public exposure, risks — and cite sources.",
+    "crew-sdr": "You are the crew SDR. Draft a concise, personalized outreach message from the approved template, tailored to the prospect's situation.",
+    "crew-proposal": "You are the crew Proposal Writer. Convert the qualified opportunity into a crisp proposal: scope, price, timeline, and a clear next step.",
+    "crew-delivery": "You are the crew Delivery Agent. Define the delivery plan: what gets executed, the deliverable/report format, and the completion checklist.",
     "deerflow": "You are DeerFlow, the long-horizon super-agent harness. You research deeply, "
                 "write and run code in sandboxes, persist memories, and orchestrate sub-agents and "
                 "skills to complete tasks that take minutes to hours. Break big asks into "
@@ -716,20 +811,11 @@ def _probe_all(force=False):
 # ---------------------------------------------------------------------------
 # RSS Oracle — REAL sweep (stdlib only)
 # ---------------------------------------------------------------------------
-FEEDS = [
-    ("Google News AI", "https://news.google.com/rss/search?q=AI+agent&hl=en-US&gl=US&ceid=US:en"),
-    ("Google News LLM", "https://news.google.com/rss/search?q=LLM+model&hl=en-US&gl=US&ceid=US:en"),
-    ("HN LLM", "https://hnrss.org/newest?q=LLM"),
-    ("The Verge AI", "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml"),
-    ("BBC Tech", "https://feeds.bbci.co.uk/news/technology/rss.xml"),
-]
+FEEDS = []  # Multi-tenant (2026-08-11): NO built-in feeds. Feeds come from DB rows
+# (oracle_feeds) or per-project pipeline_sources config. Clean installs start empty.
 
-KEYWORDS = {
-    "agent": 5, "ai": 3, "llm": 5, "model": 2, "openai": 5, "anthropic": 5, "google": 3,
-    "xai": 4, "grok": 4, "nvidia": 3, "microsoft": 3, "meta": 3, "startup": 2, "funding": 2,
-    "regulation": 3, "safety": 3, "robot": 3, "research": 2, "chip": 3, "semiconductor": 3,
-    "wordpress": 3, "autonomous": 3, "reasoning": 2, "open source": 2, "open-source": 2,
-}
+KEYWORDS = {}  # Multi-tenant (2026-08-11): NO built-in scoring keywords. Keywords come
+# from per-project pipeline_sources config. Empty keyword set = engagement-only scoring.
 
 def _active_feeds(project="appvault"):
     """Feeds to sweep: project config override (pipeline_sources.feeds,
@@ -994,15 +1080,34 @@ def api_oracle():
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _feed_defaults():
+    """Multi-tenant (2026-08-11): NO built-in defaults. Every feed is user-created."""
     return {
-        "rss_urls": [u for _, u in FEEDS],
-        "subreddits": ["artificial", "LocalLLaMA", "MachineLearning"],
-        "hn_query": "AI agent",
-        "github_query": "ai agent framework",
+        "rss_urls": [],
+        "subreddits": [],
+        "hn_query": "",
+        "github_query": "",
         "youtube_channels": [],
-        "sources": ["rss", "reddit", "hn", "github", "youtube"],
+        "sources": [],
         "skip_repeats": 1,
     }
+
+_NITTER_INSTANCES = ("nitter.net", "nitter.poast.org", "nitter.privacydev.net")
+
+
+def _x_watch_urls(handles):
+    """X creator handles -> nitter RSS urls across fallback instances.
+    No X API needed (2026-08-12): nitter renders public timelines as RSS.
+    Instances die/rotate, so every handle resolves to all mirrors — the
+    sweep's title dedupe keeps one copy and mirrors self-heal."""
+    out = []
+    for h in (handles or []):
+        h = str(h).strip().lstrip("@")
+        if not h or not re.match(r"^[A-Za-z0-9_]{1,15}$", h):
+            continue
+        for inst in _NITTER_INSTANCES:
+            out.append("https://" + inst + "/" + h + "/rss")
+    return out
+
 
 def _feed_row_to_dict(r):
     try:
@@ -1012,19 +1117,27 @@ def _feed_row_to_dict(r):
     if not sources:
         sources = _feed_defaults()["sources"]
     return {
-        "id": r["id"], "name": r["name"], "query": r["query"],
-        "rss_urls": json.loads(r["rss_urls"] or "[]"),
+        "id": r["id"], "business_id": r["business_id"] if "business_id" in r.keys() else None,
+        "name": r["name"], "query": r["query"],
+        "rss_urls": json.loads(r["rss_urls"] or "[]") + _x_watch_urls(json.loads(r["x_watch"] or "[]") if "x_watch" in r.keys() else []),
         "subreddits": json.loads(r["subreddits"] or "[]"),
         "hn_query": r["hn_query"] or "", "github_query": r["github_query"] or "",
+        "is_engagement": bool(r["is_engagement"]) if "is_engagement" in r.keys() else False,
+        "flash_threshold": int(r["flash_threshold"]) if "flash_threshold" in r.keys() and r["flash_threshold"] is not None else 30,
+        "x_watch": json.loads(r["x_watch"] or "[]") if "x_watch" in r.keys() else [],
         "youtube_channels": json.loads(r["youtube_channels"] or "[]"),
         "sources": sources,
         "skip_repeats": bool(r["skip_repeats"]) if r["skip_repeats"] is not None else True,
         "created": r["created"],
     }
 
-def _list_feeds():
+def _list_feeds(business_id=None):
     conn = _db()
-    rows = conn.execute("SELECT * FROM oracle_feeds ORDER BY id").fetchall()
+    if business_id is not None:
+        rows = conn.execute("SELECT * FROM oracle_feeds WHERE business_id=? ORDER BY id",
+                            (business_id,)).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM oracle_feeds ORDER BY id").fetchall()
     conn.close()
     return [_feed_row_to_dict(r) for r in rows]
 
@@ -1071,9 +1184,11 @@ def _check_seen(url, title, points):
     return False, 0
 
 
-def _sweep_feed_sources(feed):
+def _sweep_feed_sources(feed, include_repeats=False):
     """Parallel multi-source sweep, engagement-weighted scores, dedup/momentum.
-    Returns (stories, source_stats). Each source runs in its own thread."""
+    Returns (stories, source_stats). Each source runs in its own thread.
+    include_repeats=True keeps already-seen stories (for explicit user actions
+    like Flash/Thread/Plan — the news pipeline must not starve them)."""
     enabled = set(feed.get("sources") or _feed_defaults()["sources"])
     skip_repeats = bool(feed.get("skip_repeats", 1))
     stories = []
@@ -1162,7 +1277,10 @@ def _sweep_feed_sources(feed):
                 continue
 
     jobs = []
-    if "rss" in enabled: jobs.append(threading.Thread(target=_rss))
+    # rss runs whenever the feed HAS rss_urls — a feed with URLs but no
+    # sources list (e.g. x_watch nitter feeds) must still be swept.
+    if "rss" in enabled or (feed.get("rss_urls") or []):
+        jobs.append(threading.Thread(target=_rss))
     if "reddit" in enabled: jobs.append(threading.Thread(target=_reddit))
     if "hn" in enabled: jobs.append(threading.Thread(target=_hn))
     if "github" in enabled: jobs.append(threading.Thread(target=_github))
@@ -1188,7 +1306,7 @@ def _sweep_feed_sources(feed):
             is_repeat, delta = _check_seen(link, s.get("title", ""), points)
             s["is_repeat"] = is_repeat
             s["delta_points"] = delta
-            if is_repeat and skip_repeats and delta < 100:
+            if is_repeat and skip_repeats and delta < 100 and not include_repeats:
                 continue
         else:
             s["is_repeat"] = False
@@ -1232,7 +1350,8 @@ def api_oracle_feeds():
     if request.method == "OPTIONS":
         return jsonify({"status": "ok"})
     if request.method == "GET":
-        return jsonify({"status": "ok", "feeds": _list_feeds()})
+        biz = request.args.get("business_id")
+        return jsonify({"status": "ok", "feeds": _list_feeds(int(biz) if biz else None)})
     data = request.get_json() or {}
     name = (data.get("name") or "").strip()
     if not name:
@@ -1244,15 +1363,20 @@ def api_oracle_feeds():
             return [x.strip() for x in v.split(",") if x.strip()]
         return []
     conn = _db()
+    biz = data.get("business_id")
     cur = conn.execute(
-        "INSERT INTO oracle_feeds (name, query, rss_urls, subreddits, hn_query, github_query, youtube_channels, sources, skip_repeats, created)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO oracle_feeds (name, query, rss_urls, subreddits, hn_query, github_query, youtube_channels, sources, skip_repeats, business_id, is_engagement, flash_threshold, x_watch, created)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (name, (data.get("query") or name).strip(),
          json.dumps(_arr(data.get("rss_urls"))), json.dumps(_arr(data.get("subreddits"))),
          (data.get("hn_query") or "").strip(), (data.get("github_query") or "").strip(),
          json.dumps(_arr(data.get("youtube_channels"))),
-         json.dumps(_arr(data.get("sources")) or _feed_defaults()["sources"]),
+         json.dumps(_arr(data.get("sources"))),
          1 if data.get("skip_repeats", True) else 0,
+         int(biz) if biz else None,
+         1 if data.get("is_engagement") else 0,
+         int(data.get("flash_threshold") or 30),
+         json.dumps(_arr(data.get("x_watch"))),
          datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     conn.commit()
     feed = _get_feed(cur.lastrowid)
@@ -1289,14 +1413,22 @@ def api_oracle_feed(feed_id):
     hn = (data.get("hn_query") if data.get("hn_query") is not None else (row["hn_query"] or "")).strip()
     gh = (data.get("github_query") if data.get("github_query") is not None else (row["github_query"] or "")).strip()
     yt = _arr(data.get("youtube_channels")) if data.get("youtube_channels") is not None else json.loads(row["youtube_channels"] or "[]")
-    srcs = _arr(data.get("sources")) if data.get("sources") is not None else (json.loads(row["sources"] or "[]") if row["sources"] else _feed_defaults()["sources"])
+    srcs = _arr(data.get("sources")) if data.get("sources") is not None else (json.loads(row["sources"] or "[]") if row["sources"] else [])
     if not srcs:
-        srcs = _feed_defaults()["sources"]
+        srcs = []
+    biz = (data.get("business_id") if data.get("business_id") is not None
+           else (row["business_id"] if "business_id" in row.keys() and row["business_id"] is not None else None))
     skip = int(data.get("skip_repeats", row["skip_repeats"] if row["skip_repeats"] is not None else 1) is True or data.get("skip_repeats") == 1 or (row["skip_repeats"] and data.get("skip_repeats") is None))
+    xw = _arr(data.get("x_watch")) if data.get("x_watch") is not None else json.loads(row["x_watch"] or "[]") if "x_watch" in row.keys() else []
     conn.execute(
-        "UPDATE oracle_feeds SET name=?, query=?, rss_urls=?, subreddits=?, hn_query=?, github_query=?, youtube_channels=?, sources=?, skip_repeats=?"
+        "UPDATE oracle_feeds SET name=?, query=?, rss_urls=?, subreddits=?, hn_query=?, github_query=?, youtube_channels=?, sources=?, skip_repeats=?, business_id=?, is_engagement=?, flash_threshold=?, x_watch=?"
         " WHERE id=?",
-        (name, query, json.dumps(rss), json.dumps(subs), hn, gh, json.dumps(yt), json.dumps(srcs), skip, feed_id))
+        (name, query, json.dumps(rss), json.dumps(subs), hn, gh, json.dumps(yt), json.dumps(srcs), skip,
+         int(biz) if biz else None,
+         1 if data.get("is_engagement") is True or (data.get("is_engagement") == 1) else (row["is_engagement"] if "is_engagement" in row.keys() else 0),
+         int(data.get("flash_threshold") or (row["flash_threshold"] if "flash_threshold" in row.keys() and row["flash_threshold"] is not None else 30)),
+         json.dumps(xw),
+         feed_id))
     conn.commit()
     conn.close()
     return jsonify({"status": "ok", "feed": _get_feed(feed_id)})
@@ -1313,11 +1445,11 @@ def api_oracle_sweep():
     if not feed:
         feed = {
             "id": 0, "name": data.get("name") or "Default Feed",
-            "query": data.get("query") or "AI agent orchestration & LLM frameworks",
-            "rss_urls": data.get("rss_urls") or [u for _, u in FEEDS],
-            "subreddits": data.get("subreddits") or _feed_defaults()["subreddits"],
-            "hn_query": data.get("hn_query") or "AI agent",
-            "github_query": data.get("github_query") or "ai agent framework",
+            "query": data.get("query") or "",
+            "rss_urls": data.get("rss_urls") or [],
+            "subreddits": data.get("subreddits") or [],
+            "hn_query": data.get("hn_query") or "",
+            "github_query": data.get("github_query") or "",
             "youtube_channels": data.get("youtube_channels") or [],
         }
     signals, stats = _sweep_feed_sources(feed)
@@ -1354,29 +1486,40 @@ def api_oracle_generate():
         return jsonify({"status": "ok"})
     data = request.get_json() or {}
     platform = (data.get("platform") or "linkedin").lower()
-    if platform not in ("linkedin", "x", "blog"):
-        return jsonify({"error": "platform must be linkedin|x|blog"}), 400
     feed = _get_feed(int(data["feed_id"])) if data.get("feed_id") is not None else None
     if not feed:
         return jsonify({"error": "feed_id required"}), 400
-    signals = _sweep_feed_sources(feed)
+    # Multi-tenant: content type is a user-defined template (business-owned).
+    # When given, its voice/structure drive the prompt; otherwise a neutral generic prompt.
+    ct = _get_content_type(int(data["content_type_id"])) if data.get("content_type_id") is not None else None
+    signals, _stats = _sweep_feed_sources(feed)  # returns (top_signals, source_stats) tuple
 
     sig_lines = "\n".join(
         f"- {s.get('title','')} [{s.get('source','')} | score {s.get('score',0)}] {s.get('link','')}"
         for s in signals[:6])
 
-    if platform == "x":
-        sys_prompt = ("You write X/Twitter posts about AI. Output ONLY the post text (max 280 chars), "
+    if ct:
+        sys_prompt = (
+            f"You are a content writer for the '{ct['name']}' content type.\n"
+            f"Purpose: {ct['purpose'] or 'inform the audience'}\n"
+            f"Voice: {ct['voice'] or 'clear, conversational, expert'}\n"
+            f"Structure: {ct['structure'] or 'hook, body, close'}\n"
+            f"Length guard: {ct['length_guard'] or 'no hard limit'} characters\n"
+            f"Target platform: {platform}\n"
+            "Output ONLY the finished piece. Ground every claim in the signals below — never invent facts, "
+            "names, or numbers.")
+    elif platform == "x":
+        sys_prompt = ("You write X/Twitter posts about the feed topic. Output ONLY the post text (max 280 chars), "
                       "no preamble, no hashtag spam. Hook + one sharp insight from the signals.")
     elif platform == "blog":
         sys_prompt = ("You are a tech journalist. Write a 350-500 word blog article in markdown with a title "
                       "(# Heading), an intro, 2-3 sections with real substance drawn from the signals, and a "
                       "conclusion. Cite the source links inline.")
     else:
-        sys_prompt = ("You are a LinkedIn content strategist for an AI tools company. Write a professional "
-                      "LinkedIn post (200-320 words) with: a bold hook line, 3 concrete takeaways from the "
-                      "signals, and a question to drive comments. Plain text, short paragraphs, no emoji "
-                      "overuse, no hashtag spam. Output ONLY the post body.")
+        sys_prompt = ("You are a content strategist. Write a professional post (200-320 words) for the target "
+                      "platform with: a bold hook line, 3 concrete takeaways from the signals, and a question "
+                      "to drive engagement. Plain text, short paragraphs, no emoji overuse, no hashtag spam. "
+                      "Output ONLY the post body.")
 
     try:
         content = _call_llm(
@@ -1388,12 +1531,14 @@ def api_oracle_generate():
     title = signals[0]["title"][:80] if signals else feed["name"]
     conn = _db()
     cur = conn.execute(
-        "INSERT INTO oracle_posts (feed_id, platform, title, content, status, created) VALUES (?,?,?,?,?,?)",
-        (feed["id"], platform, title, content, "draft", datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        "INSERT INTO oracle_posts (feed_id, business_id, platform, title, content, status, created) VALUES (?,?,?,?,?,?,?)",
+        (feed["id"], feed.get("business_id"), platform, title, content, "draft",
+         datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     conn.commit()
     post_id = cur.lastrowid
     conn.close()
     return jsonify({"status": "ok", "post_id": post_id, "platform": platform,
+                    "content_type": ct["name"] if ct else None,
                     "title": title, "content": content, "feed": feed["name"]})
 
 @agentic_bp.route("/api/agentic/oracle/posts", methods=["GET", "OPTIONS"])
@@ -1426,6 +1571,20 @@ def api_oracle_schedule():
         conn.close()
         return jsonify({"error": "post not found"}), 404
     post = dict(row)
+    # Multi-tenant (2026-08-11): posts owned by a business route straight to that
+    # business's connectors (Ocoya-wired profile, else webhook profile).
+    if post.get("business_id"):
+        fake = {"category": platform, "content": post.get("content") or "",
+                "title": post.get("title") or "", "tags": "biz:%s" % (post.get("business_id") or ""),
+                "scheduled_at": post.get("scheduled_at") or ""}
+        ok, detail = _biz_deliver(fake, _social_router_cfg("appvault") or {})
+        if ok is True:
+            conn.execute("UPDATE oracle_posts SET status=?, scheduled_at=? WHERE id=?",
+                         ("scheduled", when, post_id))
+            conn.commit()
+            conn.close()
+            return jsonify({"status": "ok", "router": "business-connector",
+                            "detail": detail, "post_id": post_id})
     conn.execute("UPDATE oracle_posts SET status=?, scheduled_at=? WHERE id=?",
                  ("scheduled", when, post_id))
     conn.commit()
@@ -1449,7 +1608,7 @@ def api_oracle_schedule():
 
 @agentic_bp.route("/api/agentic/crew", methods=["POST", "OPTIONS"])
 def api_crew():
-    """Dispatch a crew: 3 REAL per-role LLM calls, results collected + logged."""
+    """Dispatch a crew: N REAL per-role LLM calls, results collected + logged."""
     if request.method == "OPTIONS":
         return jsonify({"status": "ok"})
     data = request.get_json() or {}
@@ -1457,7 +1616,7 @@ def api_crew():
     task = data.get("task", "Audit & refactor codebase for memory efficiency")
     job_id = f"job-{int(time.time())}"
 
-    roles = [("Architect", "crew-architect"), ("Lead Engineer", "crew-engineer"), ("Code Reviewer", "crew-reviewer")]
+    roles = _crew_roles_for(crew_name)
     results = {}
     errors = {}
     for label, agent_id in roles:
@@ -1947,6 +2106,15 @@ CREW_PRESETS = [
         "default_task": "Turn the latest Obsidian vault signals into a publish-ready article: outline, full draft, then editorial review with SEO improvements.",
         "roles": ["Content Strategist", "Staff Writer", "Editorial Reviewer"],
     },
+    {
+        "id": "client-acquisition",
+        "icon": "🎯",
+        "name": "Client Acquisition Crew",
+        "tagline": "Prospector → Researcher → SDR → Proposal Writer → Delivery: the full client funnel in one crew",
+        "default_task": "Run the client acquisition funnel for this business: identify and score candidate prospects (with source evidence), research the strongest one, draft personalized outreach, prepare a scope-and-price proposal, and outline the delivery plan.",
+        "roles": ["Prospector", "Researcher", "SDR", "Proposal Writer", "Delivery Agent"],
+        "role_ids": ["crew-prospector", "crew-researcher", "crew-sdr", "crew-proposal", "crew-delivery"],
+    },
 ]
 
 
@@ -1957,10 +2125,22 @@ def api_crews_presets():
     return jsonify({"status": "ok", "crews": CREW_PRESETS})
 
 
+def _crew_roles_for(crew_name):
+    """Resolve a crew's (label, persona_id) roster by preset name/id match.
+    Falls back to the default dev trio so legacy callers keep working."""
+    for preset in CREW_PRESETS:
+        if crew_name.lower() in (preset.get("name", "").lower(), preset.get("id", "").lower()):
+            labels = preset.get("roles") or []
+            ids = preset.get("role_ids") or labels
+            if labels:
+                return list(zip(labels, ids))
+    return [("Architect", "crew-architect"), ("Lead Engineer", "crew-engineer"), ("Code Reviewer", "crew-reviewer")]
+
+
 def _dispatch_crew(crew_name, task, roles=None):
     """Run a crew: N real per-role LLM calls. Shared by /crew and pipelines."""
     if not roles:
-        roles = [("Architect", "crew-architect"), ("Lead Engineer", "crew-engineer"), ("Code Reviewer", "crew-reviewer")]
+        roles = _crew_roles_for(crew_name)
     results = {}
     errors = {}
     for label, agent_id in roles:
@@ -3114,10 +3294,26 @@ def _init_compounding_tables():
         created_at TEXT DEFAULT (datetime('now')),
         updated_at TEXT DEFAULT (datetime('now'))
     );
-    """ )
+    """
+    )
+    # Calendar + link tracking columns (2026-08-11) — work_items exists here.
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(work_items)").fetchall()]
+        if "scheduled_at" not in cols:
+            conn.execute("ALTER TABLE work_items ADD COLUMN scheduled_at TEXT")
+        if "link_code" not in cols:
+            conn.execute("ALTER TABLE work_items ADD COLUMN link_code TEXT")
+        # project/research used to be added lazily by _projects_ensure() — a
+        # timing bomb for fresh installs (any _work_record before the first
+        # pipeline call silently failed). Now part of the import-time schema.
+        if "project" not in cols:
+            conn.execute("ALTER TABLE work_items ADD COLUMN project TEXT DEFAULT 'appvault'")
+        if "research" not in cols:
+            conn.execute("ALTER TABLE work_items ADD COLUMN research TEXT DEFAULT ''")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
-
 _init_compounding_tables()
 
 
@@ -3556,6 +3752,92 @@ MEDIA_STYLES = {
 }
 
 
+def _image_gen_config():
+    """Image engine config key \"image_gen\": {provider, model, api_key, api_base}.
+    provider=openai -> direct OpenAI images API; provider=litellm -> through the
+    hub; unset/empty -> keyless pollinations fallback."""
+    cfg = _cfg_get("image_gen")
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _openai_image_size(w, h):
+    """Map requested w/h to the nearest OpenAI-supported size."""
+    if w > h:
+        return "1536x1024"
+    if h > w:
+        return "1024x1536"
+    return "1024x1024"
+
+
+def _generate_image(prompt, style="", w=1024, h=1024, timeout=180):
+    """Provider-agnostic image generation into vault 05_Media. Priority:
+    1) configured provider (openai direct / litellm hub) when a key is set,
+    2) keyless pollinations fallback. Returns (local_url_or_None, provider)."""
+    cfg = _image_gen_config()
+    provider = (cfg.get("provider") or "").strip().lower()
+    api_key = (cfg.get("api_key") or "").strip()
+    model = (cfg.get("model") or "gpt-image-1").strip()
+    api_base = (cfg.get("api_base") or "").strip().rstrip("/")
+    style_suffix = MEDIA_STYLES.get(style, style) if style else ""
+    full_prompt = f"{prompt}, {style_suffix}" if style_suffix else prompt
+    body = None
+    used_provider = None
+
+    # 1) OpenAI-compatible images API (direct or via the LiteLLM hub)
+    if provider in ("openai", "litellm") and api_key:
+        if provider == "openai":
+            base = api_base or "https://api.openai.com/v1"
+        else:
+            base = api_base or os.environ.get("LITELLM_BASE", "http://host.docker.internal:4000/v1")
+        url = base.rstrip("/") + "/images/generations"
+        try:
+            data, status = _http(url, method="POST",
+                                 headers={"Authorization": f"Bearer {api_key}"},
+                                 json_data={"model": model, "prompt": full_prompt,
+                                            "n": 1, "size": _openai_image_size(w, h),
+                                            "response_format": "b64_json"},
+                                 timeout=timeout)
+            if status == 200 and isinstance(data, dict):
+                items = data.get("data") or []
+                if items:
+                    b64 = items[0].get("b64_json")
+                    if b64:
+                        import base64 as _b64
+                        body = _b64.b64decode(b64)
+                        used_provider = f"{provider}:{model}"
+                    elif items[0].get("url"):
+                        body, _ = _http_bytes(items[0]["url"], timeout=timeout)
+                        used_provider = f"{provider}:{model}"
+        except Exception as e:
+            print(f"[image-gen] {provider} failed: {e}")
+
+    # 2) Keyless pollinations fallback — always available
+    if body is None:
+        try:
+            url = ("https://image.pollinations.ai/prompt/" + urllib.parse.quote(full_prompt) +
+                   f"?width={w}&height={h}&nologo=true&seed={int(time.time()) % 1000000}")
+            body, status = _http_bytes(url, timeout=timeout)
+            if status == 200 and body:
+                used_provider = "pollinations"
+        except Exception as e:
+            print(f"[image-gen] pollinations failed: {e}")
+
+    if body is None:
+        return None, used_provider or "none"
+
+    vault = _vault_path()
+    d = os.path.join(vault, "05_Media")
+    try:
+        os.makedirs(d, exist_ok=True)
+        fname = f"IMG_{datetime.now().strftime('%Y%m%d-%H%M%S')}.png"
+        with open(os.path.join(d, fname), "wb") as f:
+            f.write(body)
+    except Exception as e:
+        print(f"[image-gen] vault write failed: {e}")
+        return None, used_provider
+    return f"/api/agentic/media/file/{fname}", used_provider
+
+
 @agentic_bp.route("/api/agentic/media", methods=["GET", "POST", "OPTIONS"])
 def api_media():
     if request.method == "OPTIONS":
@@ -3566,28 +3848,17 @@ def api_media():
         if not prompt:
             return jsonify({"error": "prompt required"}), 400
         style = (data.get("style") or "photo").strip()
-        style_suffix = MEDIA_STYLES.get(style, style)
         w = int(data.get("width", 1024) or 1024)
         h = int(data.get("height", 1024) or 1024)
-        full_prompt = f"{prompt}, {style_suffix}"
-        url = ("https://image.pollinations.ai/prompt/" +
-               urllib.parse.quote(full_prompt) +
-               f"?width={w}&height={h}&nologo=true&seed={int(time.time()) % 1000000}")
-        body, status = _http_bytes(url, timeout=120)
-        if status != 200 or not body:
-            return jsonify({"status": "error", "error": f"image provider HTTP {status}"}), 502
-        vault = _vault_path()
-        d = os.path.join(vault, "05_Media")
-        os.makedirs(d, exist_ok=True)
-        fname = f"IMG_{datetime.now().strftime('%Y%m%d-%H%M%S')}.png"
-        fpath = os.path.join(d, fname)
-        with open(fpath, "wb") as f:
-            f.write(body)
+        local_url, provider = _generate_image(prompt, style=style, w=w, h=h)
+        if not local_url:
+            return jsonify({"status": "error", "error": "image generation failed — no provider responded"}), 502
+        fname = os.path.basename(local_url)
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         conn = _db()
         cur = conn.execute(
             "INSERT INTO media_assets (prompt, style, file, provider, created) VALUES (?,?,?,?,?)",
-            (prompt, style, fname, "pollinations", now))
+            (prompt, style, fname, provider or "pollinations", now))
         conn.commit()
         conn.close()
         # compounding loop: memory row points at the artifact
@@ -3596,13 +3867,14 @@ def api_media():
             conn.execute("INSERT INTO memory (ts, agent, tag, content, tier, source, updated) "
                          "VALUES (?,?,?,?,?,?,?)",
                          (datetime.now().strftime("%H:%M LOCAL"), "Media Agent", "Media Generated",
-                          f"Generated `{fname}`: {prompt[:180]} (05_Media/)", "auto", "media", now))
+                          f"Generated `{fname}`: {prompt[:180]} (05_Media/, provider: {provider})",
+                          "auto", "media", now))
             conn.commit()
             conn.close()
         except Exception:
             pass
         return jsonify({"status": "ok", "file": fname, "prompt": prompt, "style": style,
-                        "url": f"/api/agentic/media/file/{fname}", "id": cur.lastrowid})
+                        "provider": provider, "url": local_url, "id": cur.lastrowid})
     conn = _db()
     rows = conn.execute("SELECT * FROM media_assets ORDER BY id DESC LIMIT 60").fetchall()
     conn.close()
@@ -3803,6 +4075,1025 @@ def _dispatch_crew_compounding(crew_name, task, roles=None):
             f"Task: {task}\n\n" + "\n".join(f"### {l}\n{r[:600]}" for l, r in results.items()),
             source=f"crew:{crew_name}")
     return results, errors, fname
+
+
+# =============================================================================
+# CLIENT ACQUISITION FUNNEL — sequential stage chain over work_items (2026-08-13)
+# lead -> lead_research -> outreach_draft (HUMAN GATE) -> proposal (HUMAN GATE)
+# -> delivery. Each stage embeds the PREVIOUS stage's artifact as context, so
+# the funnel roles hand off sequentially (unlike the parallel crew dispatch).
+# Items use source='pipeline:funnel' so they appear in the pipeline queue under
+# the business's project slug; status 'ready_for_approval' = the human gate
+# (reuses the existing Humanize -> Approve -> Send flow).
+# =============================================================================
+
+def _funnel_biz_context(biz):
+    biz = dict(biz or {})
+    name = biz.get("name") or "this business"
+    site = biz.get("website") or ""
+    offer = biz.get("cta_offer") or ""
+    parts = [f"The business running this client acquisition funnel: {name}."]
+    if site:
+        parts.append(f"Website: {site}")
+    if offer:
+        parts.append(f"Offer / CTA: {offer}")
+    return " ".join(parts)
+
+
+def _funnel_chain(wid):
+    """Collect the artifact chain for a funnel item by walking prev:<wid> tags
+    (newest -> oldest), returned oldest-first with category headers."""
+    parts, seen = [], set()
+    while wid and wid not in seen:
+        seen.add(wid)
+        item = _pipeline_get(wid)
+        if not item:
+            break
+        cat = item.get("category") or "item"
+        title = item.get("title") or ""
+        content = (item.get("content") or "")[:5000]
+        parts.append(f"### {cat} — {title}\n{content}")
+        m = re.search(r"prev:([A-Za-z0-9]+)", item.get("tags") or "")
+        wid = m.group(1) if m else None
+    return "\n\n".join(reversed(parts))
+
+
+def _funnel_stage(prompt, agent, timeout=90):
+    """One real LLM call for a funnel stage (raises on failure)."""
+    return _call_llm(prompt, agent=agent, timeout=timeout)
+
+
+_NO_TOOLS_SUFFIX = ("\n\nConstraints: You have NO tools, NO internet access, and NO code "
+                    "execution. Do NOT emit <tool_calls>, XML, markdown code blocks, or "
+                    "step-by-step plans. Output the deliverable itself as plain text, complete.")
+
+_TOOL_CALL_RE = re.compile(r"<tool_calls>.*?</tool_calls>|<invoke name=.*?(?:</invoke>|/>)", re.S)
+
+
+def _funnel_clean(reply):
+    """Strip tool-call XML the model sometimes emits instead of plain text."""
+    if not reply:
+        return reply
+    if "<tool_calls>" in reply or "<invoke " in reply:
+        cleaned = _TOOL_CALL_RE.sub("", reply).strip()
+        if len(cleaned) >= 80:
+            return cleaned
+    return reply
+
+
+def _funnel_stage_guarded(prompt, agent, min_len=300, timeout=150):
+    """One real LLM call with constraints, retried once when the reply is short
+    or tool-call XML (models sometimes answer with a plan/tool-calls only)."""
+    reply = _funnel_stage(prompt + _NO_TOOLS_SUFFIX, agent, timeout=timeout)
+    if (len(reply or "") < min_len or "<tool_calls>" in (reply or "")
+            or "<invoke " in (reply or "")):
+        reply = _funnel_stage(
+            prompt + _NO_TOOLS_SUFFIX + "\n\nYour previous reply was unacceptable — it was too "
+                     "short or emitted tool calls. Output the FULL deliverable as plain text now, "
+                     "no preamble, no tools.",
+            agent, timeout=timeout)
+    return _funnel_clean(reply)
+
+
+@agentic_bp.route("/api/agentic/funnel/run", methods=["POST", "OPTIONS"])
+def api_funnel_run():
+    """Stages 1-3: Prospector -> Researcher -> SDR. Outreach drafts land in
+    ready_for_approval (human gate). Returns the created work item ids.
+    Volume knobs: lead_count (1-15, default 5), research_n (1-5, default 3)."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    bid = data.get("business_id") or data.get("bid")
+    if not bid:
+        return jsonify({"status": "error", "error": "business_id required"}), 400
+    try:
+        lead_count = int(data.get("lead_count") or 5)
+        research_n = int(data.get("research_n") or 3)
+    except Exception:
+        lead_count, research_n = 5, 3
+    lead_count = max(1, min(lead_count, 15))
+    research_n = max(1, min(research_n, 5))
+    seed_ids = data.get("seed_ids")
+    if isinstance(seed_ids, list):
+        seed_ids = [str(s)[:40] for s in seed_ids[:15]]
+    else:
+        seed_ids = None
+    code, payload = _funnel_run_for(bid, lead_count, research_n, seed_ids)
+    return jsonify(payload), code
+
+
+_FUNNEL_LOCKS = {}
+
+
+def _funnel_run_lock(bid):
+    key = str(bid)
+    if key not in _FUNNEL_LOCKS:
+        _FUNNEL_LOCKS[key] = threading.Lock()
+    return _FUNNEL_LOCKS[key]
+
+
+def _funnel_run_for(bid, lead_count=5, research_n=3, seed_ids=None):
+    """Core funnel run — used by both the API route and the scheduler thread.
+    seed_ids: run on REAL imported prospect seeds (enriched facts feed the
+    research) instead of generated candidates. Returns (status_code, payload).
+    Serialized per business."""
+    biz = dict(_get_business(bid) or {})
+    if not biz:
+        return 404, {"status": "error", "error": f"business {bid} not found"}
+    project = _biz_project(biz)
+    biz_name = biz.get("name") or "business"
+    biz_ctx = _funnel_biz_context(biz)
+
+    # Ensure the business's pipeline project is REGISTERED — the pipeline UI
+    # only shows registered projects as filter buttons, so an unregistered
+    # slug silently orphans every funnel item (user: "i don't see it on the
+    # pipeline"). Idempotent: INSERT OR IGNORE.
+    try:
+        conn = _db()
+        conn.execute("INSERT OR IGNORE INTO projects (slug, name, config, created) VALUES (?,?,?,?)",
+                     (project, biz_name, "{}", datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+    with _funnel_run_lock(bid):
+        # Load REAL imported seeds when requested (seed mode)
+        seed_rows = []
+        if seed_ids:
+            try:
+                import uuid as _uuid  # noqa: F401
+                conn = _db()
+                ph = ",".join("?" * len(seed_ids))
+                seed_rows = conn.execute(
+                    f"SELECT id, company, website, site_title, signal_score, signals_found, status, note "
+                    f"FROM prospect_seeds WHERE id IN ({ph}) AND business_id=?",
+                    (*seed_ids, str(bid))).fetchall()
+                conn.close()
+            except Exception:
+                seed_rows = []
+        # Stage 1 — lead (seed mode: imported prospects ARE the candidates;
+        # generate mode: Prospector imagines + scores a candidate list)
+        if seed_rows:
+            lines = []
+            for s in seed_rows:
+                sig = json.loads(s[5] or "[]")
+                lines.append(f"- {s[1]} ({s[2] or 'no website'}) — site: {s[3] or ''} — "
+                             f"signals: {', '.join(sig) or 'none'} — score: {s[4]}")
+            lead_content = f"IMPORTED PROSPECT SEEDS ({len(seed_rows)}):\n" + "\n".join(lines)
+            lead_wid = _work_record(category="lead",
+                                    title=f"Imported prospects ({len(seed_rows)}) — {biz_name}",
+                                    content=lead_content, source="pipeline:funnel", status="new",
+                                    tags=f"funnel,stage:lead,biz:{bid},seeds:{len(seed_rows)}",
+                                    project=project)
+            research_n = min(research_n, len(seed_rows))
+            lead_count = len(seed_rows)
+        else:
+            try:
+                lead_content = _funnel_stage(
+                    f"{biz_ctx}\n\nTask: Identify {lead_count} REAL candidate businesses that could "
+                    f"realistically become clients of this business. For EACH candidate give: name, "
+                    f"location, industry, why they fit, source evidence (a concrete URL), and a fit "
+                    f"score out of 25. Be specific — no placeholder candidates; if you cannot verify "
+                    f"a URL, mark it 'unverified' rather than inventing it.",
+                    "crew-prospector", timeout=180)
+            except Exception as e:
+                return 502, {"status": "error", "stage": "lead", "error": str(e)[:300]}
+            lead_wid = _work_record(category="lead", title=f"Prospects ({lead_count}) — {biz_name}",
+                                    content=lead_content, source="pipeline:funnel", status="new",
+                                    tags=f"funnel,stage:lead,biz:{bid},count:{lead_count}", project=project)
+
+        # Stages 2+3 — Researcher + SDR loop over the top research_n candidates.
+        # Each candidate gets its own research item and outreach draft (both chained
+        # to the lead via prev: tags) so gates and proposals stay per-prospect.
+        research_wids, outreach_wids = [], []
+        for i in range(research_n):
+            cand = i + 1
+            seed_facts = ""
+            if seed_rows and i < len(seed_rows):
+                s = seed_rows[i]
+                sig = json.loads(s[5] or "[]")
+                seed_facts = (f"\n\nSEED FACTS (imported, real — do NOT invent contact details or "
+                              f"URLs beyond these):\ncompany={s[1]}\nwebsite={s[2] or 'n/a'}\n"
+                              f"site_title={s[3] or ''}\nsignal_keywords_found={', '.join(sig) or 'none'}\n"
+                              f"signal_score={s[4]}\ncontact_note={s[7] or ''}\n")
+            try:
+                research_content = _funnel_stage_guarded(
+                    f"{biz_ctx}\n\nPrevious stage — Prospector findings:\n{lead_content[:7000]}\n\n"
+                    f"Task: Deep-research candidate #{cand} in the list above and OUTPUT THE FULL "
+                    f"PROFILE NOW — do not describe steps, do not write a plan. Produce the "
+                    f"verified profile directly: company facts, tech-stack signals, decision-maker, "
+                    f"public exposure/risk, budget signals — each with a source (mark unverified "
+                    f"facts as such). End with the recommended outreach angle."
+                    f"{seed_facts}",
+                    "crew-researcher", timeout=150)
+            except Exception as e:
+                _pipeline_update(lead_wid, status="failed")
+                return 502, {"status": "error", "stage": f"research:{cand}", "error": str(e)[:300],
+                             "lead_wid": lead_wid}
+            research_wid = _work_record(category="lead_research",
+                                        title=f"Research #{cand} — {biz_name}",
+                                        content=research_content, source="pipeline:funnel",
+                                        status="enriched",
+                                        tags=f"funnel,stage:research,biz:{bid},cand:{cand},prev:{lead_wid}",
+                                        project=project)
+            research_wids.append(research_wid)
+
+            sdr_ctx = _funnel_chain(research_wid) or f"Research context:\n{research_content[:6000]}"
+            try:
+                outreach_content = _funnel_stage_guarded(
+                    f"{biz_ctx}\n\nResearch context:\n{sdr_ctx[:9000]}\n\n"
+                    f"Task: Write ONE personalized outreach message to the decision-maker identified "
+                    f"in the research (candidate #{cand}). Subject line + body. Conversational, "
+                    f"specific to their situation, one clear low-friction ask. This is a DRAFT — "
+                    f"a human approves before anything is sent.",
+                    "crew-sdr", timeout=120)
+            except Exception as e:
+                _pipeline_update(research_wid, status="failed")
+                return 502, {"status": "error", "stage": f"outreach:{cand}", "error": str(e)[:300],
+                             "research_wid": research_wid}
+            outreach_wid = _work_record(category="outreach_draft",
+                                        title=f"Outreach draft #{cand} — {biz_name}",
+                                        content=outreach_content, source="pipeline:funnel",
+                                        status="ready_for_approval",
+                                        tags=f"funnel,stage:outreach,biz:{bid},cand:{cand},prev:{research_wid}",
+                                        project=project)
+            outreach_wids.append(outreach_wid)
+            _bus_publish("funnel.outreach.ready", {"wid": outreach_wid, "business": biz_name,
+                                                   "candidate": cand})
+    return 200, {"status": "ok", "business": biz_name,
+                 "leads": [lead_wid], "research": research_wids, "outreach": outreach_wids}
+
+
+@agentic_bp.route("/api/agentic/funnel/replied", methods=["POST", "OPTIONS"])
+def api_funnel_replied():
+    """Human flag: the sent outreach got a positive reply -> Stage 4 Proposal
+    Writer. Proposal lands in ready_for_approval (gate 2)."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    wid = data.get("wid")
+    if not wid:
+        return jsonify({"status": "error", "error": "wid required"}), 400
+    item = _pipeline_get(wid)
+    if not item or item.get("category") != "outreach_draft":
+        return jsonify({"status": "error", "error": "wid must be an outreach_draft item"}), 404
+    chain = _funnel_chain(wid)
+    try:
+        proposal_content = _funnel_stage_guarded(
+            f"{chain}\n\nThe outreach above received a POSITIVE REPLY from the prospect.\n\n"
+            f"Task: Write a crisp proposal for this prospect: executive summary, scope of "
+            f"services, pricing (tiers or fixed fee), timeline, and a clear next step. "
+            f"This is a DRAFT — a human approves before it is sent.",
+            "crew-proposal", timeout=150)
+    except Exception as e:
+        return jsonify({"status": "error", "stage": "proposal", "error": str(e)[:300]}), 502
+    _pipeline_update(wid, status="replied")
+    proposal_wid = _work_record(category="proposal", title=f"Proposal — {item.get('title', '')}",
+                                content=proposal_content, source="pipeline:funnel",
+                                status="ready_for_approval",
+                                tags=f"funnel,stage:proposal,biz:{item.get('project', '')},prev:{wid}",
+                                project=item.get("project") or "appvault")
+    _bus_publish("funnel.proposal.ready", {"wid": proposal_wid})
+    return jsonify({"status": "ok", "proposal": proposal_wid})
+
+
+@agentic_bp.route("/api/agentic/funnel/accepted", methods=["POST", "OPTIONS"])
+def api_funnel_accepted():
+    """Human flag: proposal accepted -> Stage 5 Delivery Agent writes the
+    delivery plan (what gets executed, deliverable, checklist)."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    wid = data.get("wid")
+    if not wid:
+        return jsonify({"status": "error", "error": "wid required"}), 400
+    item = _pipeline_get(wid)
+    if not item or item.get("category") != "proposal":
+        return jsonify({"status": "error", "error": "wid must be a proposal item"}), 404
+    chain = _funnel_chain(wid)
+    try:
+        delivery_content = _funnel_stage_guarded(
+            f"{chain}\n\nThe proposal above was ACCEPTED by the prospect.\n\n"
+            f"Task: Write the delivery plan: what gets executed first, the deliverable/report "
+            f"format, a completion checklist with milestones, and SLA/response commitments.",
+            "crew-delivery", timeout=150)
+    except Exception as e:
+        return jsonify({"status": "error", "stage": "delivery", "error": str(e)[:300]}), 502
+    _pipeline_update(wid, status="accepted")
+    delivery_wid = _work_record(category="delivery", title=f"Delivery plan — {item.get('title', '')}",
+                                content=delivery_content, source="pipeline:funnel", status="done",
+                                tags=f"funnel,stage:delivery,biz:{item.get('project', '')},prev:{wid}",
+                                project=item.get("project") or "appvault")
+    _bus_publish("funnel.delivery.done", {"wid": delivery_wid})
+    return jsonify({"status": "ok", "delivery": delivery_wid})
+
+
+@agentic_bp.route("/api/agentic/funnel/reply", methods=["POST", "OPTIONS"])
+def api_funnel_reply():
+    """Log a prospect reply against an outreach/proposal card. LLM triage:
+    positive -> Proposal stage fires (gate 2); question/ooo -> a follow-up
+    draft is written (human approves before sending); negative -> chain closed."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    wid = data.get("wid")
+    text = (data.get("text") or "").strip()
+    if not wid or not text:
+        return jsonify({"status": "error", "error": "wid and text required"}), 400
+    item = _pipeline_get(wid)
+    if not item or item.get("category") not in ("outreach_draft", "proposal"):
+        return jsonify({"status": "error",
+                        "error": "wid must be an outreach_draft or proposal item"}), 404
+    try:
+        triage = _funnel_triage(text)
+    except Exception as e:
+        return jsonify({"status": "error", "stage": "triage", "error": str(e)[:300]}), 502
+    cls = triage.get("class") or "question"
+
+    if cls == "positive":
+        # Advance to the Proposal stage (same path as funnel/replied)
+        chain = _funnel_chain(wid)
+        try:
+            proposal_content = _funnel_stage_guarded(
+                f"{chain}\n\nThe outreach above received a POSITIVE REPLY from the prospect.\n\n"
+                f"Prospect reply: {text[:1500]}\n\n"
+                f"Task: Write a crisp proposal for this prospect: executive summary, scope of "
+                f"services, pricing (tiers or fixed fee), timeline, and a clear next step. "
+                f"This is a DRAFT — a human approves before it is sent.",
+                "crew-proposal", timeout=150)
+        except Exception as e:
+            return jsonify({"status": "error", "stage": "proposal", "error": str(e)[:300]}), 502
+        _pipeline_update(wid, status="replied")
+        proposal_wid = _work_record(category="proposal", title=f"Proposal — {item.get('title', '')}",
+                                    content=proposal_content, source="pipeline:funnel",
+                                    status="ready_for_approval",
+                                    tags=f"funnel,stage:proposal,biz:{item.get('project', '')},prev:{wid}",
+                                    project=item.get("project") or "appvault")
+        _bus_publish("funnel.proposal.ready", {"wid": proposal_wid})
+        return jsonify({"status": "ok", "action": "proposal", "class": cls,
+                        "summary": triage.get("summary", ""), "proposal": proposal_wid})
+
+    if cls == "negative":
+        _pipeline_update(wid, status="rejected")
+        _bus_publish("funnel.closed", {"wid": wid, "class": "negative"})
+        return jsonify({"status": "ok", "action": "closed", "class": cls,
+                        "summary": triage.get("summary", "")})
+
+    # question / ooo -> follow-up draft (human approves before sending)
+    reply = triage.get("suggested_reply") or triage.get("summary") or ""
+    followup_wid = _work_record(
+        category="outreach_draft", title=f"Follow-up — {item.get('title', '')}",
+        content=f"CONTEXT — original outreach (approved, sent):\n\n{item.get('content', '')[:3000]}\n\n"
+                f"PROSPECT REPLY: {text[:2000]}\n\nTRIAGE: {triage.get('summary', '')}\n\n"
+                f"DRAFT FOLLOW-UP (human approves before sending):\n\n{reply}",
+        source="pipeline:funnel", status="ready_for_approval",
+        tags=f"funnel,stage:followup,biz:{item.get('project', '')},prev:{wid},funnel:followup",
+        project=item.get("project") or "appvault")
+    _bus_publish("funnel.followup.ready", {"wid": followup_wid})
+    return jsonify({"status": "ok", "action": "followup", "class": cls,
+                    "summary": triage.get("summary", ""), "followup": followup_wid})
+
+
+def _funnel_triage(reply_text):
+    """Classify a prospect reply: positive | question | negative | ooo.
+    Returns {class, summary, suggested_reply} (LLM, best-effort)."""
+    raw = _funnel_stage_guarded(
+        "You are the crew SDR. A prospect replied to your outreach. Classify the reply.\n\n"
+        f"Reply: {reply_text[:2500]}\n\n"
+        "Output JSON only:\n"
+        "{\"class\": \"positive|question|negative|ooo\", \"summary\": \"one-line summary of their intent\", "
+        "\"suggested_reply\": \"a short, human, plain-text reply to send back (or '' if the class is negative/ooo)\"}",
+        "crew-sdr", timeout=90)
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict) and parsed.get("class") in ("positive", "question", "negative", "ooo"):
+            return parsed
+    except Exception:
+        pass
+    import re as _re
+    m = _re.search(r'"class"\s*:\s*"([^"]+)"', raw or "")
+    cls = m.group(1) if m and m.group(1) in ("positive", "question", "negative", "ooo") else "question"
+    return {"class": cls, "summary": (raw or "")[:300], "suggested_reply": ""}
+
+
+@agentic_bp.route("/api/agentic/funnel/schedule", methods=["GET", "POST", "OPTIONS"])
+def api_funnel_schedule():
+    """Per-business funnel schedule: interval off|daily|weekly + weekly_cap."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "POST":
+        data = request.get_json() or {}
+        bid = str(data.get("business_id") or "").strip()
+        interval = (data.get("interval") or "off").strip()
+        if interval not in ("off", "daily", "weekly"):
+            return jsonify({"status": "error", "error": "interval must be off|daily|weekly"}), 400
+        try:
+            cap = max(1, min(int(data.get("weekly_cap") or 5), 50))
+        except Exception:
+            cap = 5
+        cfg = _cfg_get("funnel_schedule") or {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+        cur = cfg.get(bid) or {}
+        cfg[bid] = {"interval": interval, "weekly_cap": cap,
+                    "runs_this_week": cur.get("runs_this_week", 0),
+                    "week_of": cur.get("week_of", ""),
+                    "last_run": cur.get("last_run", "")}
+        _cfg_set("funnel_schedule", cfg)
+        return jsonify({"status": "ok", "schedule": cfg[bid]})
+    bid = str((request.args.get("business_id") or "").strip())
+    cfg = _cfg_get("funnel_schedule") or {}
+    if bid:
+        return jsonify({"status": "ok", "schedule": (cfg or {}).get(bid) or {"interval": "off"}})
+    return jsonify({"status": "ok", "schedules": cfg or {}})
+
+
+def _funnel_week_key():
+    return datetime.now().strftime("%Y-W%W")
+
+
+def _funnel_schedule_tick():
+    """One scheduler tick: fire due funnel runs (cap-aware) + follow-up nudges.
+    Each run spawns its own thread so the tick never blocks on LLM calls."""
+    try:
+        cfg = _cfg_get("funnel_schedule") or {}
+        if not isinstance(cfg, dict):
+            return
+        week = _funnel_week_key()
+        for bid, s in list(cfg.items()):
+            if not isinstance(s, dict) or s.get("interval") not in ("daily", "weekly"):
+                continue
+            if s.get("week_of") != week:
+                s["runs_this_week"] = 0
+                s["week_of"] = week
+            if (s.get("runs_this_week") or 0) >= int(s.get("weekly_cap") or 5):
+                continue
+            due = True
+            try:
+                last = s.get("last_run") or ""
+                if last:
+                    age = (datetime.now() - datetime.strptime(last, "%Y-%m-%d %H:%M:%S")).total_seconds()
+                    due = age >= (20 * 3600 if s.get("interval") == "daily" else 6 * 24 * 3600)
+            except Exception:
+                due = True
+            if not due:
+                continue
+            s["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            s["runs_this_week"] = (s.get("runs_this_week") or 0) + 1
+            _cfg_set("funnel_schedule", cfg)
+            threading.Thread(target=_funnel_scheduled_run, args=(bid,), daemon=True).start()
+        _funnel_followup_nudge()
+    except Exception:
+        pass
+
+
+def _funnel_top_seed_ids(bid, n=10):
+    """Top-scored enriched seeds for a business — real prospects first."""
+    try:
+        _funnel_seeds_ensure()
+        conn = _db()
+        rows = conn.execute(
+            "SELECT id FROM prospect_seeds WHERE business_id=? AND status='enriched' "
+            "AND signal_score > 0 ORDER BY signal_score DESC LIMIT ?", (str(bid), n)).fetchall()
+        conn.close()
+        return [r[0] for r in rows]
+    except Exception:
+        return []
+
+
+def _funnel_scheduled_run(bid):
+    """Full funnel run from the scheduler (10 leads, research top 3).
+    Uses the business's top-scored REAL seeds when available (falls back to
+    generated candidates). Failures are NEVER silent: recorded in the schedule
+    config (last_error) and published to the bus, so the UI can surface them."""
+    ok = False
+    detail = "unknown"
+    seed_ids = _funnel_top_seed_ids(bid, 10)
+    try:
+        code, payload = _funnel_run_for(bid, lead_count=10, research_n=3, seed_ids=seed_ids)
+        ok = code == 200
+        detail = payload.get("status") if isinstance(payload, dict) else str(payload)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        detail = f"error: {str(e)[:200]}"
+    try:
+        cfg = _cfg_get("funnel_schedule") or {}
+        if isinstance(cfg, dict) and str(bid) in cfg:
+            cfg[str(bid)]["last_error"] = None if ok else detail
+            cfg[str(bid)]["last_run_ts"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            _cfg_set("funnel_schedule", cfg)
+    except Exception:
+        pass
+    _bus_publish("funnel.scheduled.run", {"business_id": bid, "ok": ok, "detail": detail})
+
+
+def _funnel_followup_nudge(days=5, max_n=3):
+    """Sent outreach (status approved, no reply) older than N days with no
+    existing follow-up draft -> SDR drafts a nudge (human approves before
+    sending). One nudge per chain, at most max_n per tick."""
+    try:
+        conn = _db()
+        rows = conn.execute(
+            "SELECT id, content, title, project FROM work_items WHERE source='pipeline:funnel' "
+            "AND category='outreach_draft' AND status='approved' "
+            "AND created_at < datetime('now', ?) ORDER BY created_at ASC",
+            (f"-{days} days",)).fetchall()
+        conn.close()
+    except Exception:
+        return
+    made = 0
+    for wid, content, title, project in rows:
+        if made >= max_n:
+            break
+        try:
+            conn = _db()
+            dup = conn.execute(
+                "SELECT count(*) FROM work_items WHERE tags LIKE '%funnel:followup%' AND tags LIKE ?",
+                (f"%prev:{wid}%",)).fetchone()[0]
+            conn.close()
+        except Exception:
+            dup = 1
+        if dup:
+            continue
+        try:
+            nudge = _funnel_stage_guarded(
+                f"You are the crew SDR. This outreach was approved and sent, but got no reply "
+                f"in {days} days.\n\nOUTREACH (sent):\n{content[:3000]}\n\n"
+                f"Task: Write a SHORT follow-up nudge (subject line + 2-3 sentence body). "
+                f"Friendly, low-pressure, one clear ask. This is a DRAFT — a human approves "
+                f"before it is sent.",
+                "crew-sdr", timeout=120)
+        except Exception:
+            continue
+        _work_record(category="outreach_draft", title=f"Follow-up — {title}",
+                     content=f"CONTEXT — original outreach (approved, sent):\n\n{content[:3000]}\n\n"
+                             f"DRAFT NUDGE (human approves before sending):\n\n{nudge}",
+                     source="pipeline:funnel", status="ready_for_approval",
+                     tags=f"funnel,stage:followup,biz:{project or ''},prev:{wid},funnel:followup",
+                     project=project or "appvault")
+        made += 1
+
+
+def start_funnel_scheduler():
+    """Boot hook (agent.py): start the daemon scheduler thread. Idempotent."""
+    if getattr(start_funnel_scheduler, "_started", False):
+        return
+    start_funnel_scheduler._started = True
+
+    def _loop():
+        while True:
+            try:
+                _funnel_schedule_tick()
+            except Exception:
+                pass
+            time.sleep(300)
+
+    threading.Thread(target=_loop, daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
+# LIGHT CRM — prospects DERIVED from the funnel chains (no parallel tables).
+# One prospect row per chain (anchored at its outreach item); stage computed
+# from the furthest-advanced item in the chain; value parsed from the proposal.
+# ---------------------------------------------------------------------------
+_FUNNEL_STAGES = ["new", "draft", "sent", "followup", "proposal", "won", "lost"]
+
+_FUNNEL_STAGE_META = {
+    "new": "New — candidate list, not yet developed.",
+    "draft": "Outreach draft — approve it to mark as sent.",
+    "sent": "Outreach sent — waiting for a reply (auto nudge in 5 days).",
+    "followup": "Follow-up draft — approve to send.",
+    "proposal": "Proposal stage — approve/send it; ⏭ accepted when it closes.",
+    "won": "Won — deal closed. 🎉",
+    "lost": "Lost — closed.",
+}
+
+
+def _funnel_prospect_name(research_content):
+    txt = (research_content or "").strip()
+    if not txt:
+        return "Prospect"
+    line = txt.splitlines()[0].strip()
+    for ch in ("—", "-", ":", "|"):
+        if ch in line:
+            line = line.split(ch)[0]
+    line = re.sub(r"[#*_`>]+", "", line).strip()
+    line = re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]", "", line).strip()
+    return line[:60] or "Prospect"
+
+
+def _funnel_dm(outreach_content):
+    m = re.search(r"(?:Hey|Hi|Hello|Dear)[,\s]+([A-Z][A-Za-z.'-]+)", outreach_content or "")
+    return m.group(1) if m else ""
+
+
+def _funnel_value(proposal_content):
+    nums = [int(v.replace(",", "")) for v in re.findall(r"\$(\d[\d,]*)", proposal_content or "")]
+    return max(nums) if nums else None
+
+
+def _funnel_stage_for(outreach_status, proposal_status, has_delivery, followup_status):
+    if has_delivery:
+        return "won"
+    if proposal_status == "accepted":
+        return "won"
+    if proposal_status in ("approved", "ready_for_approval") or outreach_status == "replied":
+        return "proposal"
+    if followup_status == "ready_for_approval":
+        return "followup"
+    if outreach_status == "approved":
+        return "sent"
+    if outreach_status == "ready_for_approval":
+        return "draft"
+    if outreach_status in ("rejected",) or proposal_status == "rejected":
+        return "lost"
+    return "new"
+
+
+def _funnel_prospects(project):
+    """Derive the prospect ledger for a pipeline project from its funnel chains."""
+    conn = _db()
+    rows = conn.execute(
+        "SELECT id, category, status, content, title, tags, updated_at FROM work_items "
+        "WHERE source='pipeline:funnel' AND project=? ORDER BY updated_at DESC", (project,)).fetchall()
+    conn.close()
+    by_id = {r[0]: r for r in rows}
+    prev_of = {}
+    for r in rows:
+        m = re.search(r"prev:([A-Za-z0-9]+)", r[5] or "")
+        if m:
+            prev_of[r[0]] = m.group(1)
+
+    prospects = []
+    for r in rows:
+        if r[1] != "outreach_draft" or "funnel:followup" in (r[5] or ""):
+            continue  # anchors only: real outreach items, not follow-ups
+        owid = r[0]
+        rwid = prev_of.get(owid, "")
+        lwid = prev_of.get(rwid, "")
+        research = by_id.get(rwid)
+        lead = by_id.get(lwid)
+        proposal = delivery = followup = None
+        for r2 in rows:
+            if prev_of.get(r2[0]) == owid:
+                if r2[1] == "proposal":
+                    proposal = r2
+                elif r2[1] == "delivery":
+                    delivery = r2
+                elif r2[1] == "outreach_draft":
+                    followup = r2
+        if delivery is None and proposal:
+            # delivery is a child of the proposal, not of the outreach
+            for r2 in rows:
+                if r2[1] == "delivery" and prev_of.get(r2[0]) == proposal[0]:
+                    delivery = r2
+                    break
+        stage = _funnel_stage_for(r[2], proposal[2] if proposal else None,
+                                  bool(delivery), followup[2] if followup else None)
+        value = _funnel_value(proposal[3]) if proposal else None
+        deepest = delivery or proposal or followup or r
+        prospects.append({
+            "prospect": _funnel_prospect_name(research[3] if research else (lead[3] if lead else "")),
+            "decision_maker": _funnel_dm(r[3]),
+            "stage": stage,
+            "status": r[2],
+            "outreach_wid": owid,
+            "anchor": {"id": deepest[0], "category": deepest[1], "status": deepest[2]},
+            "value": value,
+            "updated_at": (deepest[6] or "")[:16],
+            "next": _FUNNEL_STAGE_META.get(stage, ""),
+        })
+    counts = {s: 0 for s in _FUNNEL_STAGES}
+    for p in prospects:
+        counts[p["stage"]] = counts.get(p["stage"], 0) + 1
+    revenue = sum(p["value"] or 0 for p in prospects if p["stage"] == "won")
+    return {"prospects": prospects, "counts": counts, "revenue_won": revenue}
+
+
+@agentic_bp.route("/api/agentic/funnel/prospects", methods=["GET", "OPTIONS"])
+def api_funnel_prospects():
+    """GET ?project=SLUG -> derived prospect ledger + stage counts + won revenue."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    project = (request.args.get("project") or "appvault").strip()
+    data = _funnel_prospects(project)
+    return jsonify({"status": "ok", "project": project, **data})
+
+
+# ---------------------------------------------------------------------------
+# PROSPECT SEEDS — real lead ingestion, fully tenant-configured (NOTHING
+# hardcoded: signal keywords + connectors live in the project config, so a
+# GRC tool tenant and a coaching tenant configure completely different
+# sources and signals). Enrichment fetches real pages; the LLM only writes.
+# ---------------------------------------------------------------------------
+def _funnel_seeds_ensure():
+    try:
+        conn = _db()
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS prospect_seeds ("
+            "id TEXT PRIMARY KEY, business_id TEXT, company TEXT, website TEXT, note TEXT DEFAULT '', "
+            "source TEXT DEFAULT 'csv', status TEXT DEFAULT 'new', signal_score REAL DEFAULT 0, "
+            "signals_found TEXT DEFAULT '[]', site_title TEXT DEFAULT '', created_at TEXT)")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def _funnel_project_cfg(bid):
+    """Tenant config: {'prospect_signals': {kw: weight}, 'prospect_connectors': [...]}."""
+    try:
+        biz = dict(_get_business(bid) or {})
+        project = _biz_project(biz) if biz else str(bid)
+        cfg = _project_cfg(project) or {}
+    except Exception:
+        cfg = {}
+    return {
+        "signals": (cfg.get("prospect_signals") or {}),
+        "connectors": (cfg.get("prospect_connectors") or []),
+        "probe_paths": (cfg.get("probe_paths") or []),
+    }
+
+
+def _funnel_save_project_cfg(bid, patch_cfg):
+    try:
+        biz = dict(_get_business(bid) or {})
+        project = _biz_project(biz) if biz else str(bid)
+        conn = _db()
+        conn.execute("INSERT OR IGNORE INTO projects (slug, name, config, created) VALUES (?,?,?,?)",
+                     (project, (biz.get("name") or project), "{}",
+                      datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        conn.commit()
+        conn.close()
+        cfg = _project_cfg(project) or {}
+        cfg.update(patch_cfg)
+        _project_save_cfg(project, cfg)
+    except Exception:
+        pass
+
+
+@agentic_bp.route("/api/agentic/funnel/connectors", methods=["GET", "PUT", "OPTIONS"])
+def api_funnel_connectors():
+    """Tenant-defined prospect connectors + signal keywords (per business).
+    PUT {business_id, connectors: [{name,url,link_regex}], signals: {kw: weight}}"""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    bid = str(data.get("business_id") or "").strip()
+    if not bid:
+        return jsonify({"status": "error", "error": "business_id required"}), 400
+    if request.method == "PUT":
+        connectors = data.get("connectors")
+        signals = data.get("signals")
+        patch = {}
+        if connectors is not None:
+            clean = []
+            for c in connectors:
+                if isinstance(c, dict) and c.get("name") and c.get("url"):
+                    clean.append({"name": str(c["name"])[:60],
+                                  "url": str(c["url"])[:300],
+                                  "link_regex": str(c.get("link_regex") or r"^https?://")[:300]})
+            patch["prospect_connectors"] = clean
+        if signals is not None and isinstance(signals, dict):
+            patch["prospect_signals"] = {str(k)[:60]: float(v) for k, v in signals.items() if v}
+        if data.get("probe_paths") is not None and isinstance(data["probe_paths"], list):
+            patch["probe_paths"] = [str(p)[:80] for p in data["probe_paths"]
+                                    if str(p).startswith("/")][:8]
+        if patch:
+            _funnel_save_project_cfg(bid, patch)
+    return jsonify({"status": "ok", **{k: v for k, v in _funnel_project_cfg(bid).items()}})
+
+
+@agentic_bp.route("/api/agentic/funnel/seeds/import", methods=["POST", "OPTIONS"])
+def api_funnel_seeds_import():
+    """Import real prospect rows. Payload: {business_id, rows: [{company, website?, note?}]}
+    OR {business_id, csv: "company,website\\nAcme,https://acme.com"} (header names matched
+    case-insensitively for company/name and website/url/domain)."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    bid = str(data.get("business_id") or "").strip()
+    if not bid:
+        return jsonify({"status": "error", "error": "business_id required"}), 400
+    _funnel_seeds_ensure()
+    rows = []
+    if data.get("rows") and isinstance(data["rows"], list):
+        rows = data["rows"]
+    elif data.get("csv"):
+        lines = [ln.strip() for ln in str(data["csv"]).splitlines() if ln.strip()]
+        if lines:
+            headers = [h.strip().lower() for h in lines[0].split(",")]
+            ci = next((i for i, h in enumerate(headers) if h in ("company", "name")), None)
+            wi = next((i for i, h in enumerate(headers) if h in ("website", "url", "domain", "site")), None)
+            for ln in lines[1:]:
+                parts = [p.strip() for p in ln.split(",")]
+                if ci is None or ci >= len(parts) or not parts[ci]:
+                    continue
+                row = {"company": parts[ci]}
+                if wi is not None and wi < len(parts) and parts[wi]:
+                    row["website"] = parts[wi]
+                rows.append(row)
+    added = 0
+    import uuid as _uuid
+    conn = _db()
+    for r in rows:
+        company = str(r.get("company") or "").strip()
+        website = str(r.get("website") or "").strip()
+        if not company:
+            continue
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO prospect_seeds "
+                "(id, business_id, company, website, note, source, created_at) VALUES (?,?,?,?,?,'import',datetime('now'))",
+                (_uuid.uuid4().hex[:12], bid, company[:200], website[:300], str(r.get("note") or "")[:500]))
+            added += 1
+        except Exception:
+            pass
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok", "added": added})
+
+
+@agentic_bp.route("/api/agentic/funnel/seeds", methods=["GET", "OPTIONS"])
+def api_funnel_seeds():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    bid = str((request.args.get("business_id") or "").strip())
+    limit = min(int(request.args.get("limit") or 100), 500)
+    _funnel_seeds_ensure()
+    conn = _db()
+    if bid:
+        rows = conn.execute(
+            "SELECT id, company, website, status, signal_score, signals_found, site_title, source, created_at "
+            "FROM prospect_seeds WHERE business_id=? ORDER BY signal_score DESC, created_at DESC LIMIT ?",
+            (bid, limit)).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id, company, website, status, signal_score, signals_found, site_title, source, created_at "
+            "FROM prospect_seeds ORDER BY signal_score DESC LIMIT ?", (limit,)).fetchall()
+    conn.close()
+    seeds = [{"id": r[0], "company": r[1], "website": r[2], "status": r[3], "signal_score": r[4],
+              "signals_found": json.loads(r[5] or "[]"), "site_title": r[6], "source": r[7],
+              "created_at": r[8]} for r in rows]
+    return jsonify({"status": "ok", "seeds": seeds, "count": len(seeds)})
+
+
+def _funnel_norm(t):
+    """Accent-insensitive lowercase (é->e, ü->u ...) — multilingual scoring."""
+    try:
+        import unicodedata as _ud
+        return "".join(c for c in _ud.normalize("NFKD", (t or "").lower())
+                       if not _ud.combining(c))
+    except Exception:
+        return (t or "").lower()
+
+
+def _funnel_extract_companies(html, base_url, link_regex):
+    """Generic candidate extraction: anchor hrefs matching the configured regex.
+    Dedupes by full URL (same host may host many prospect pages)."""
+    found = {}
+    try:
+        import re as _re
+        rx = _re.compile(link_regex)
+        for m in _re.finditer(r'<a[^>]+href=["\']([^"\'#]+)["\'][^>]*>(.*?)</a>', html or "", _re.S | _re.I):
+            href, text = m.group(1), _re.sub(r"<[^>]+>", "", m.group(2)).strip()
+            href = href.split("?")[0]
+            if not rx.search(href):
+                continue
+            full = href if href.startswith("http") else (base_url.rstrip("/") + "/" + href.lstrip("/"))
+            try:
+                host = full.split("/")[2] if len(full.split("/")) > 2 else full
+            except Exception:
+                host = full
+            name = (text or host.replace("www.", ""))[:200]
+            if not name or name.lower() in ("read more", "learn more", "here", "view"):
+                continue
+            try:
+                path = full.split(host, 1)[1] if host else full
+            except Exception:
+                path = full
+            if path in ("", "/"):
+                continue  # link back to the list page itself
+            found.setdefault(full, {"company": name, "website": full})
+    except Exception:
+        pass
+    return list(found.values())
+
+
+@agentic_bp.route("/api/agentic/funnel/connector/run", methods=["POST", "OPTIONS"])
+def api_funnel_connector_run():
+    """Run one configured connector: fetch the list page, extract candidate
+    companies (regex-driven, tenant-configured), insert as seeds."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    bid = str(data.get("business_id") or "").strip()
+    name = str(data.get("name") or "").strip()
+    if not bid or not name:
+        return jsonify({"status": "error", "error": "business_id and connector name required"}), 400
+    cfg = _funnel_project_cfg(bid)
+    conn_def = next((c for c in cfg["connectors"] if c.get("name") == name), None)
+    if not conn_def:
+        return jsonify({"status": "error", "error": f"connector '{name}' not configured"}), 404
+    try:
+        r = _http(conn_def["url"], timeout=25)
+        body = r[0] if isinstance(r, tuple) else r
+        html = body.get("raw", "") if isinstance(body, dict) else str(body)
+    except Exception as e:
+        return jsonify({"status": "error", "error": f"fetch failed: {str(e)[:150]}"}), 502
+    candidates = _funnel_extract_companies(html, conn_def["url"], conn_def.get("link_regex") or r"^https?://")
+    _funnel_seeds_ensure()
+    import uuid as _uuid
+    conn = _db()
+    added = skipped = 0
+    for c in candidates:
+        try:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO prospect_seeds "
+                "(id, business_id, company, website, note, source, created_at) VALUES (?,?,?,?,?,?,datetime('now'))",
+                (_uuid.uuid4().hex[:12], bid, c["company"], c["website"], f"connector:{name}", name))
+            if cur.rowcount:
+                added += 1
+            else:
+                skipped += 1
+        except Exception:
+            skipped += 1
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok", "connector": name, "candidates": len(candidates),
+                    "added": added, "skipped": skipped})
+
+
+def _funnel_enrich_seeds(bid, limit=50):
+    """Fetch each seed's website and score it against the tenant's configured
+    signal keywords (weighted, accent-insensitive). No LLM — real fetched facts.
+    Returns a result dict. Callable directly (docker exec / tests) — no Flask."""
+    cfg = _funnel_project_cfg(bid)
+    signals = cfg["signals"]
+    probes = cfg.get("probe_paths") or []
+    _funnel_seeds_ensure()
+    conn = _db()
+    rows = conn.execute(
+        "SELECT id, website FROM prospect_seeds WHERE business_id=? AND status IN ('new','enriched') "
+        "ORDER BY created_at ASC LIMIT ?", (str(bid), limit)).fetchall()
+    scored = found_signal = failed = 0
+    for sid, website in rows:
+        if not website:
+            continue
+        title = ""
+        texts = ""
+        urls = [website] + [website.rstrip("/") + (p if p.startswith("/") else "/" + p) for p in probes]
+        for u in urls:
+            try:
+                r = _http(u, timeout=6)
+                body = r[0] if isinstance(r, tuple) else r
+                if isinstance(body, dict) and "error" in body:
+                    continue
+                html = body.get("raw", "") if isinstance(body, dict) else str(body)
+                texts += " " + (html or "")
+                if not title:
+                    import re as _re
+                    tm = _re.search(r"<title[^>]*>(.*?)</title>", html or "", _re.S | _re.I)
+                    if tm:
+                        title = _re.sub(r"<[^>]+>", "", tm.group(1)).strip()[:200]
+            except Exception:
+                continue
+        if not texts.strip():
+            conn.execute("UPDATE prospect_seeds SET status='failed' WHERE id=?", (sid,))
+            failed += 1
+            continue
+        low = _funnel_norm(texts)
+        score = 0.0
+        hit = []
+        for kw, w in (signals or {}).items():
+            if kw and _funnel_norm(kw) in low:
+                score += float(w or 1)
+                hit.append(kw)
+        conn.execute("UPDATE prospect_seeds SET status='enriched', signal_score=?, signals_found=?, site_title=? WHERE id=?",
+                     (round(score, 2), json.dumps(hit[:20]), title, sid))
+        scored += 1
+        if hit:
+            found_signal += 1
+    conn.commit()
+    conn.close()
+    return {"status": "ok", "scored": scored, "with_signal": found_signal,
+            "failed": failed, "signals_used": list((signals or {}).keys())[:20],
+            "probes_used": probes}
+
+
+@agentic_bp.route("/api/agentic/funnel/seeds/enrich", methods=["POST", "OPTIONS"])
+def api_funnel_seeds_enrich():
+    """POST {business_id, limit} — enrich + score seeds against tenant signals."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    bid = str(data.get("business_id") or "").strip()
+    if not bid:
+        return jsonify({"status": "error", "error": "business_id required"}), 400
+    limit = min(int(data.get("limit") or 50), 200)
+    return jsonify(_funnel_enrich_seeds(bid, limit))
 
 
 # hook: pipeline run (called by api_pipeline_run)
@@ -8738,6 +10029,8 @@ def _pipeline_brief_from_signal(signal_text, source="radar", project="appvault")
              "STRICT JSON brief with EXACTLY these keys: angle (the hook), keyword_target (primary "
              "SEO keyword), pillar (which content pillar it maps to), pain_point (audience pain it "
              "solves), cta (call to action), title_proposal, outline (array of section headings). "
+             "When the signal names a specific product, model, company or person, include the EXACT "
+             "name in angle and title_proposal — never a vague label like 'the new model'. "
              "No prose outside the JSON.")
     raw = _call_llm(f"Signal: {signal_text[:1200]}", system_prompt=sys_p,
                     agent="strategist", timeout=90)
@@ -8758,18 +10051,168 @@ def _pipeline_brief_from_signal(signal_text, source="radar", project="appvault")
         _bus_publish("pipeline.brief.ready", {"wid": wid, "title": title})
     return wid, brief
 
-def _pipeline_draft(wid):
-    """Writer: brief -> draft (needs_refinement). Strictly on-brief."""
+def _pipeline_research(wid, max_chars=3500):
+    """Researcher: pull last-30-days material (Bing News RSS, Hacker News,
+    Reddit, and X when a token is configured) about the item's title, so the
+    Writer grounds the article in real facts (model names, dates, numbers).
+    Non-fatal per source: a failing source never blocks drafting."""
     item = _pipeline_get(wid)
     if not item:
         return None, "not found"
-    sys_p = ("You are the Writer Agent. Write the article EXACTLY from this brief: follow the "
-             "angle, keyword, outline and CTA. No freelancing, no extra sections, no preamble. "
-             "You have NO tools and NO filesystem — never output XML tags, tool calls, code fences "
-             "or commands. Return ONLY the article body in markdown.\n\n===== BRIEF =====\n"
-             + (item.get("content") or "")[:4000])
-    draft = _call_llm("Write the article now.", system_prompt=sys_p,
-                      agent="writer", timeout=120)
+    title = (item.get("title") or "").strip()
+    stops = {"the","a","an","of","for","on","to","in","and","with","lets","let","you","your",
+             "how","new","top","best","why","what","this","that","from","by","at","is","are"}
+    topic = ""
+    try:
+        m = re.search(r"\{.*\}", item.get("content") or "", re.S)
+        if m:
+            b = json.loads(m.group(0))
+            if b.get("keyword_target"):
+                topic = str(b["keyword_target"])[:80].strip()
+    except Exception:
+        pass
+    words = [w for w in re.split(r"\W+", topic or title) if w.lower() not in stops and len(w) > 2]
+    topic = " ".join(words[:4])[:60]
+    if not topic:
+        return "", "no topic"
+    q = urllib.parse.quote(topic)
+    cutoff_epoch = int(time.time()) - 30 * 86400
+    ua = {"User-Agent": "AppVault-Agentic/1.0 (content research)"}
+    brief = []
+    def _raw(url, headers=None):
+        """_http returns (body, status); body is a parsed dict for JSON or
+        {'raw': ...} for non-JSON. Unwrap to usable text/dict."""
+        r = _http(url, timeout=10, headers=headers or ua)
+        body = r[0] if isinstance(r, tuple) else r
+        if isinstance(body, dict):
+            if "raw" in body:
+                return body["raw"] or ""
+            return body  # already parsed JSON
+        return body or ""
+    try:
+        rss = _raw(f"https://www.bing.com/news/search?q={q}&format=rss&qft=interval%3d%2230%22")
+        if isinstance(rss, dict):
+            rss = rss.get("raw", "") or ""
+        for m in re.finditer(r"<item>(.*?)</item>", rss, re.S):
+            body = m.group(1)
+            t = re.search(r"<title>(.*?)</title>", body, re.S)
+            d = re.search(r"<pubDate>(.*?)</pubDate>", body, re.S)
+            s = re.search(r"<News:Source>(.*?)</News:Source>", body, re.S)
+            ttl = re.sub(r"&[a-z]+;", "", t.group(1).strip() if t else "")
+            brief.append(f"- NEWS: {ttl} ({s.group(1).strip() if s else 'news'} {d.group(1)[:16] if d else ''})")
+    except Exception:
+        pass
+    try:
+        d = _raw(f"https://hn.algolia.com/api/v1/search?query={q}&tags=story&hitsPerPage=20&numericFilters=created_at_i%3E{cutoff_epoch}")
+        if not isinstance(d, dict):
+            d = json.loads(d) if d else {}
+        hits = sorted((d.get("hits") or []), key=lambda h: h.get("points") or 0, reverse=True)
+        for h in hits[:6]:
+            if (h.get("points") or 0) >= 3:
+                brief.append(f"- HN: {h.get('title','')[:110]} ({h.get('points')} pts, {h.get('created_at','')[:10]})")
+    except Exception:
+        pass
+    try:
+        reddit_ua = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"}
+        d = _raw(f"https://www.reddit.com/search.json?q={q}&sort=top&t=month&limit=6", headers=reddit_ua)
+        if not isinstance(d, dict):
+            d = json.loads(d) if d else {}
+        for ch in (d.get("data", {}).get("children") or [])[:6]:
+            p = ch.get("data", {})
+            if (p.get("score") or 0) >= 5:
+                brief.append(f"- r/{p.get('subreddit') or ''}: {p.get('title','')[:110]} ({p.get('score')} pts)")
+    except Exception:
+        pass
+    try:
+        x_token = os.environ.get("X_BEARER_TOKEN", "").strip()
+        if x_token and len(x_token) > 20:
+            d = _raw(f"https://api.x.com/2/tweets/search/recent?query={q}&max_results=8&tweet.fields=created_at,public_metrics",
+                     headers={"Authorization": f"Bearer {x_token}"})
+            if not isinstance(d, dict):
+                d = json.loads(d) if d else {}
+            for tw in (d.get("data") or [])[:8]:
+                brief.append(f"- X: {tw.get('text','')[:110]} ({tw.get('created_at','')[:10]})")
+    except Exception:
+        pass
+    if not brief:
+        brief.append("(no last-30-days material found for this topic)")
+    # Detect a product name in release-style headlines so the Writer can't miss it.
+    name_hits = []
+    for line in brief:
+        m = re.search(r"(?:releases?|launches?|unveils?|introduces?|announces?|debuts?)\s+"
+                      r"([A-Z][A-Za-z0-9][A-Za-z0-9 .'\-]{1,40}?)"
+                      r"(?=\s*[,:;(]|\s+(?:model|AI|LLM|for|with|on|the|at|in)\b|$)", line)
+        if m:
+            cand = m.group(1).strip()
+            if 2 <= len(cand) <= 40 and cand.lower() not in ("it", "them", "this", "new", "ai"):
+                name_hits.append(cand)
+    if name_hits:
+        counts = {}
+        for c in name_hits:
+            counts[c] = counts.get(c, 0) + 1
+        top = max(counts, key=counts.get)
+        brief.insert(0, f"PRODUCT NAME FOUND IN RESEARCH: '{top}' — the article MUST use this exact name.")
+    text = "===== RESEARCH BRIEFING (last 30 days) =====\n" + "\n".join(brief) + "\n===== END RESEARCH ====="
+    if len(text) > max_chars:
+        text = text[:max_chars] + "\n…(truncated)"
+    try:
+        _pipeline_update(wid, research=text)
+    except Exception:
+        pass
+    return text, None
+
+def _pipeline_draft(wid):
+    """Writer: research + brief -> draft (needs_refinement). Grounded, specific."""
+    item = _pipeline_get(wid)
+    if not item:
+        return None, "not found"
+    briefing, _ = _pipeline_research(wid)
+    sys_p = ("You are the Writer Agent: a sharp, conversational tech writer who explains things "
+             "to smart founders like a knowledgeable friend — NOT a corporate press release. "
+             "Write the article from the BRIEF below, GROUNDED IN the RESEARCH BRIEFING.\n"
+             "REQUIREMENTS:\n"
+             "1. GROUND IN FACTS: use ONLY product/model/company names, dates, numbers, "
+             "headlines and claims found in the RESEARCH BRIEFING. NEVER invent a model name, "
+             "stat, date, quote or source. If a fact is not in the research, do not fabricate it.\n"
+             "2. NAME THE THING: if the research names the exact product/model behind the topic "
+             "(e.g. the model behind \"Meta's new open-weight model\"), USE THE EXACT NAME in the "
+             "first two paragraphs and every time the topic is mentioned after that. Never write "
+             "around it with vague labels like 'the model' or 'the announcement'. If a RESEARCH "
+             "headline names a product (e.g. \"Meta releases Muse Glimmer, 30B parameter open-weight "
+             "edge model\"), that product IS the article's subject — treat the name as the story, "
+             "not a side mention.\n"
+             "3. CONVERSATIONAL EXPERT VOICE — THIS IS THE MOST IMPORTANT RULE. Write like a "
+             "knowledgeable insider talking to a friend: natural, warm, concrete, short paragraphs, "
+             "active voice. Open with something the reader feels — a relatable scene, a pain point, "
+             "a question, or a sharp observation — NEVER with a date or an announcement. FORBIDDEN "
+             "press-release patterns: opening with a date ('On August 10, Meta released…'), "
+             "'Meta announced/unveiled today…', 'the release, which drew N points on Hacker News…', "
+             "'according to the company'. Weave dates and numbers into the story naturally where "
+             "they matter, not as the lede. Every paragraph still carries at least one specific, "
+             "research-traceable fact, but the facts ride inside a human narrative.\n"
+             "   GOOD opener: \"You've been renting your AI by the token long enough. What if the "
+             "thing that runs your agents lived in your own laptop?\"\n"
+             "   BAD opener: \"On August 10, 2026, Meta released a new open-weight model.\"\n"
+             "4. STRUCTURE: follow the brief's angle, keyword_target, outline and cta exactly. "
+             "Write 800-1400 words in markdown.\n"
+             "5. NO TOOLS, NO XML, NO code fences, NO preamble — return ONLY the article body.\n"
+             "6. SELF-CHECK before returning: (a) do the first two paragraphs name the exact "
+             "product/model from the research briefing? (b) does the article open with a scene, "
+             "question or observation instead of a date or announcement? Fix either before "
+             "returning. If the research truly contains no name, keep the [Note: ...] marker.\n"
+             "If the research briefing contains nothing useful for this topic, start the draft "
+             "with a single bracketed note: [Note: no recent material found — facts unverified] "
+             "and write the best on-brief draft you can without inventing specifics.\n\n"
+             "===== RESEARCH BRIEFING =====\n" + (briefing or "(research unavailable)")
+             + "\n\n===== BRIEF =====\n" + (item.get("content") or "")[:4000])
+    cfg = _pipeline_cfg()
+    overrides = {}
+    if cfg.get("writer_model"):
+        overrides["model"] = cfg["writer_model"]
+    elif (_get_llm_config().get("provider") or "").lower() == "deepseek":
+        overrides["model"] = "deepseek-reasoner"  # follows the grounding rules far better than chat
+    draft = _call_llm_with(overrides, "Write the article now.", system_prompt=sys_p,
+                           agent="writer", timeout=300)
     draft = _pipeline_strip_leaks(draft)
     it = _pipeline_update(wid, content=draft, status="needs_refinement",
                           tags=(item.get("tags") or "") + ",draft")
@@ -8833,7 +10276,9 @@ def _pipeline_refine(wid):
         overrides["model"] = "deepseek-reasoner"  # genuinely different weights than deepseek-chat
     sys_p = ("You are the Editor Agent. Apply the humanise-text rules below: strip AI tells, "
              "m-dashes, verbose phrasing; tighten every paragraph; keep the SEO angle and keyword "
-             "intact. You have NO tools, NO filesystem, NO scripts — never output XML tags, tool "
+             "intact. CRITICAL: preserve every proper noun, model/product name, company, date and "
+             "number from the draft — never generalize a specific into 'the model', 'the company' "
+             "or 'recently'. You have NO tools, NO filesystem, NO scripts — never output XML tags, tool "
              "calls, code fences, bash commands or heredocs. Return ONLY the refined article text.\n\n"
              "===== HUMANISE RULES =====\n"
              + (_skill_prose(humanise) if humanise else "(no skill file — apply standard anti-AI-tell rules)")
@@ -8887,81 +10332,158 @@ def _pipeline_publish(wid):
                                         "url": (res.get("link") or "") if isinstance(res, dict) else ""})
     return it, res
 
-_PIPELINE_PLATFORMS = ("x", "linkedin", "facebook", "instagram")
+_PIPELINE_PLATFORMS = ("x", "x_thread", "linkedin", "facebook", "instagram")
 
-def _pipeline_social_posts(wid):
+def _pipeline_social_posts(wid, platforms=None):
     """From an approved article, generate one post per platform — each its own
-    work_item (ready_for_approval, source pipeline:social)."""
+    work_item (ready_for_approval, source pipeline:social).
+    platforms: optional override (e.g. ['x_thread'] for the daily thread job)."""
     item = _pipeline_get(wid)
     if not item:
         return 0
     title = item.get("title") or "Post"
     article = item.get("content") or ""
+    research = item.get("research") or ""
     sys_prompts = {
-        "x": ("You write X/Twitter posts. From the article, output ONLY the post text (max 280 "
-              "chars): a hook plus one sharp insight from the article. No preamble, no hashtag spam."),
-        "linkedin": ("You write LinkedIn posts. From the article, write a professional post "
+        "x": ("You are a professional tech/entrepreneur copywriter for X/Twitter. Write ONE post "
+              "(max 280 chars) that makes people want to read this article. REQUIREMENTS:\n"
+              "1. NAME THE PRODUCT: use the exact product/model/company name found in the research "
+              "or article (e.g. 'Muse Glimmer') — never generic labels like 'the new model'.\n"
+              "2. ONE SPECIFIC FACT: include at least one concrete number, spec, date or named "
+              "claim traceable to the research or article.\n"
+              "3. HOOK: the first 8-10 words must earn the scroll.\n"
+              "4. HUMAN VOICE: confident, plain English. NO AI-tells ('In today's fast-paced world', "
+              "'game-changing', 'revolutionary'), no emoji spam, max 2 hashtags. Never cite an outlet "
+              "or source not present in the research.\n"
+              "5. Output ONLY the post text."),
+        "x_thread": ("You are a professional tech/entrepreneur copywriter for X/Twitter. Write ONE "
+                     "long-form X post (X Premium allows up to 4000 characters). REQUIREMENTS:\n"
+                     "1. NO NUMBERING: this is a single continuous post — never split it into "
+                     "'1/5', '2/5'… numbered tweets or any other separation.\n"
+                     "2. COMPACT + PUNCHY: every sentence earns the next. Short, sharp sentences, "
+                     "boom-boom-boom rhythm. No fluff, no filler, no preamble — grab attention in "
+                     "the first line and hold it.\n"
+                     "3. NAME THE PRODUCT: the exact product/model/company (e.g. 'Muse Glimmer') "
+                     "appears early and is the story, not a side mention.\n"
+                     "4. SPECIFIC: weave in concrete facts from the research (numbers, specs, "
+                     "dates) — no generic claims.\n"
+                     "5. HOOK OPENER: start with a sharp claim, question or observation — never a "
+                     "date or an announcement.\n"
+                     "6. CLOSER: the last line lands the takeaway + CTA (read the article).\n"
+                     "7. HUMAN VOICE: plain English, no AI-tells, no emoji spam, max 2 hashtags. "
+                     "Never cite an outlet not present in the research.\n"
+                     "8. LENGTH: 250-600 words (roughly 1500-3500 chars) — substantial but compact.\n"
+                     "9. Output ONLY the post."),
+        "linkedin": ("You write LinkedIn posts. From the article + research, write a professional post "
                      "(200-320 words): bold hook line, 3 concrete takeaways, and a question to drive "
-                     "comments. Plain text, short paragraphs, no hashtag spam. Output ONLY the post body."),
-        "facebook": ("You write Facebook posts. From the article, write a conversational post "
-                     "(150-250 words): friendly hook, the key insight, a question to drive comments. "
-                     "Short paragraphs, light emoji use, a few hashtags. Output ONLY the post body."),
-        "instagram": ("You write Instagram captions. From the article, write a caption (120-220 "
-                      "words): strong hook, line breaks for readability, and 8-12 relevant hashtags "
-                      "at the end. Output ONLY the caption."),
+                     "comments. NAME the exact product/model/company (e.g. 'Muse Glimmer') and include "
+                     "specific facts (numbers, dates) from the research — no generic filler. Never cite "
+                     "an outlet or source not present in the research. Plain text, "
+                     "short paragraphs, no hashtag spam. Output ONLY the post body."),
+        "facebook": ("You write Facebook posts. From the article + research, write a conversational post "
+                     "(150-250 words): friendly hook, the key insight with a specific fact (name, number, "
+                     "date), a question to drive comments. Short paragraphs, light emoji use, a few "
+                     "hashtags. Output ONLY the post body."),
+        "instagram": ("You write Instagram captions. From the article + research, write a caption "
+                      "(120-220 words): strong hook, the exact product name and one specific fact from "
+                      "the research, line breaks for readability, and 8-12 relevant hashtags at the end. "
+                      "Output ONLY the caption."),
     }
     made = 0
-    for p in _PIPELINE_PLATFORMS:
+    cfg = _pipeline_cfg()
+    overrides = {}
+    if cfg.get("social_model"):
+        overrides["model"] = cfg["social_model"]
+    elif (_get_llm_config().get("provider") or "").lower() == "deepseek":
+        overrides["model"] = "deepseek-reasoner"  # reliably follows the naming/grounding rules
+    # Multi-tenant (2026-08-11): generation platforms are data-driven —
+    # business.social_platforms, else the union of its content types' platforms.
+    # Decoupled from accounts: drafts generate for the platforms you WANT;
+    # routing (later) only sends to profiles you connected. Legacy projects
+    # without a business keep the historical 5-platform set.
+    biz = _biz_for_project(item.get("project") or "appvault")
+    if platforms is None:
+        platforms = _platforms_for_business(biz) if biz else None
+    if not platforms:
+        platforms = _PIPELINE_PLATFORMS  # legacy fallback only
+    biz_tag = (",biz:" + str(biz["id"])) if biz else ""
+    # B3 (2026-08-11): tracked short link per post — clicks count in the links
+    # table and redirect with UTM. Uses the public media base URL; skipped when
+    # no public base or no target URL is configured.
+    short_url = ""
+    link_code = ""
+    if biz:
+        target = (item.get("url") or "").strip() or (biz.get("website") or "").strip()
+        if target:
+            pub_base = ((_social_router_cfg("appvault") or {}).get("media_base_url") or "").strip().rstrip("/")
+            if pub_base:
+                link_code = _new_link_code()
+                try:
+                    conn = _db()
+                    conn.execute("INSERT OR IGNORE INTO links (code, target, campaign, source, medium, clicks, created)"
+                                 " VALUES (?,?,?,?,?,0,?)",
+                                 (link_code, target, biz["name"], "social", "social",
+                                  datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                    conn.commit()
+                    conn.close()
+                    short_url = pub_base + "/api/agentic/link/" + link_code
+                except Exception:
+                    link_code, short_url = "", ""
+    for p in platforms:
         try:
-            post = _call_llm(f"Article title: {title}\n\nARTICLE:\n{article[:5000]}",
-                             system_prompt=sys_prompts[p], agent="social", timeout=90)
+            post = _call_llm_with(overrides,
+                                  f"Article title: {title}\n\nRESEARCH (last 30 days):\n{(research or '(none)')[:2000]}\n\nARTICLE:\n{article[:5000]}"
+                                  + (f"\n\nCTA LINK (include this exact URL in the post as the clickable link): {short_url}" if short_url else ""),
+                                  system_prompt=sys_prompts[p], agent="social", timeout=120)
         except Exception:
             continue
         post = _pipeline_strip_leaks(post)
         if not post:
             continue
-        _work_record(category=p, title=f"{title[:60]} — {p}", content=post[:3000],
+        # Length guard: X hard-caps at 280 chars; other platforms truncate at
+        # their spec ceiling on a word boundary so no monster posts can ship.
+        caps = {"x": 280, "x_thread": 4000, "linkedin": 2500, "facebook": 1800, "instagram": 1600}
+        cap = caps.get(p, 2000)
+        if len(post) > cap:
+            cut = post[:cap].rsplit(" ", 1)[0].rstrip(".,;:!? ")
+            post = (cut + "…") if cut else post[:cap]
+        if p == "x" and len(post) > 280:
+            post = post[:280]
+        made_wid = _work_record(category=p, title=f"{title[:60]} — {p}", content=post[:3000],
                      source="pipeline:social", status="ready_for_approval",
-                     tags=f"social,platform:{p},article:{wid}",
+                     tags=f"social,platform:{p},article:{wid}{biz_tag}",
                      project=item.get("project") or "appvault")
+        if made_wid and link_code:
+            _pipeline_update(made_wid, link_code=link_code)
         made += 1
     if made:
         _bus_publish("pipeline.social.ready", {"wid": wid, "title": title, "posts": made})
     return made
 
 def _pipeline_cover_image(wid, prompt=None):
-    """Keyless cover image (pollinations, same as the Media Agent) into the
-    vault 05_Media; stores image_url on the work item."""
+    """Cover image for an approved article — real provider via _generate_image
+    (OpenAI/hub when configured, keyless pollinations fallback) into 05_Media;
+    stores image_url on the work item."""
     item = _pipeline_get(wid)
     if not item:
         return None
     base = prompt or (item.get("title") or "Technology article cover")
     full_prompt = f"{base}, modern editorial illustration, clean composition, no text"
-    url = ("https://image.pollinations.ai/prompt/" + urllib.parse.quote(full_prompt) +
-           "?width=1200&height=675&nologo=true&seed=" + str(int(time.time()) % 1000000))
-    body, status = _http_bytes(url, timeout=120)
-    if status != 200 or not body:
+    local_url, provider = _generate_image(full_prompt, style="", w=1200, h=675)
+    if not local_url:
         return None
-    vault = _vault_path()
-    d = os.path.join(vault, "05_Media")
-    try:
-        os.makedirs(d, exist_ok=True)
-        fname = f"COVER_{datetime.now().strftime('%Y%m%d-%H%M%S')}.png"
-        with open(os.path.join(d, fname), "wb") as f:
-            f.write(body)
-    except Exception:
-        return None
-    _pipeline_update(wid, image_url=f"/api/agentic/media/file/{fname}")
+    fname = os.path.basename(local_url)
+    _pipeline_update(wid, image_url=local_url)
     try:
         conn = _db()
         conn.execute("INSERT INTO media_assets (prompt, style, file, provider, created) VALUES (?,?,?,?,?)",
-                     (full_prompt, "photo", fname, "pollinations",
+                     (full_prompt, "photo", fname, provider or "pollinations",
                       datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
         conn.commit()
         conn.close()
     except Exception:
         pass
-    return f"/api/agentic/media/file/{fname}"
+    return local_url
 
 def _pipeline_socialize(wid):
     """On article approval: cover image + one post per platform (background)."""
@@ -8973,6 +10495,88 @@ def _pipeline_socialize(wid):
         _pipeline_social_posts(wid)
     except Exception:
         pass
+
+
+@agentic_bp.route("/api/agentic/pipeline/<wid>/image", methods=["POST", "OPTIONS"])
+def api_pipeline_image(wid):
+    """Generate an image for a pipeline item (article or social post) with the
+    configured image engine and attach it (image_url). Body: {prompt?, style?,
+    width?, height?} — prompt defaults to the item title."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    item = _pipeline_get(wid)
+    if not item:
+        return jsonify({"status": "error", "error": "not found"}), 404
+    data = request.get_json() or {}
+    prompt = (data.get("prompt") or "").strip() or (item.get("title") or "Post visual")
+    style = (data.get("style") or "").strip()
+    try:
+        w = int(data.get("width", 1200) or 1200)
+        h = int(data.get("height", 675) or 675)
+    except Exception:
+        w, h = 1200, 675
+    local_url, provider = _generate_image(prompt, style=style, w=w, h=h)
+    if not local_url:
+        return jsonify({"status": "error",
+                        "error": "image generation failed — no provider responded. "
+                                 "Set the image engine key in the 🖼 Image tab or check the network."}), 502
+    _pipeline_update(wid, image_url=local_url)
+    fname = os.path.basename(local_url)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        conn = _db()
+        conn.execute("INSERT INTO media_assets (prompt, style, file, provider, created) VALUES (?,?,?,?,?)",
+                     (prompt, style or "custom", fname, provider or "pollinations", now))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+    try:
+        conn = _db()
+        conn.execute("INSERT INTO memory (ts, agent, tag, content, tier, source, updated) "
+                     "VALUES (?,?,?,?,?,?,?)",
+                     (datetime.now().strftime("%H:%M LOCAL"), "Pipeline Image", "Image Generated",
+                      f"Generated `{fname}` for {wid}: {prompt[:180]} (provider: {provider})",
+                      "auto", "pipeline", now))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+    return jsonify({"status": "ok", "url": local_url, "file": fname,
+                    "provider": provider, "wid": wid})
+
+
+@agentic_bp.route("/api/agentic/pipeline/<wid>/image/attach", methods=["POST", "OPTIONS"])
+def api_pipeline_image_attach(wid):
+    """Attach an existing vault media file to a pipeline item (image_url).
+    Body: {file: <basename of a 05_Media asset>}."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    item = _pipeline_get(wid)
+    if not item:
+        return jsonify({"status": "error", "error": "not found"}), 404
+    data = request.get_json() or {}
+    fname = (data.get("file") or "").strip()
+    if not fname or "/" in fname or "\\" in fname or ".." in fname:
+        return jsonify({"status": "error", "error": "invalid file name"}), 400
+    fpath = os.path.join(_vault_path(), "05_Media", fname)
+    if not os.path.isfile(fpath):
+        return jsonify({"status": "error", "error": "media file not found"}), 404
+    local_url = f"/api/agentic/media/file/{fname}"
+    _pipeline_update(wid, image_url=local_url)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        conn = _db()
+        conn.execute("INSERT INTO memory (ts, agent, tag, content, tier, source, updated) "
+                     "VALUES (?,?,?,?,?,?,?)",
+                     (datetime.now().strftime("%H:%M LOCAL"), "Pipeline Image", "Image Attached",
+                      f"Attached `{fname}` to {wid}",
+                      "auto", "pipeline", now))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+    return jsonify({"status": "ok", "url": local_url, "file": fname, "wid": wid})
 
 # ---------------------------------------------------------------------------
 # SOCIAL ROUTER — route approved posts to an external scheduler (Ocoya via
@@ -8996,6 +10600,13 @@ def _social_router_send(post):
         post["image_url"] = pub
         if note:
             post["_media_note"] = note
+    # Multi-tenant (2026-08-11): business-owned posts route through the business's
+    # own connectors first — Ocoya-wired profile, then webhook profile. Legacy
+    # per-project routing below stays as the fallback for non-business posts.
+    if _biz_tag(post):
+        ok, det = _biz_deliver(post, cfg)
+        if ok is not None:
+            return ok, det
     if (cfg.get("provider") or "webhook").lower() == "ocoya":
         return _ocoya_send(post, cfg)
     url = (cfg.get("url") or "").strip()
@@ -9032,13 +10643,27 @@ def _ocoya_send(post, cfg):
         return False, "Ocoya needs an API key + workspace ID (set them in the 📱 Social tab)"
     platform = post.get("category") or ""
     prof = (cfg.get("profile_ids") or {}).get(platform) or ""
+    if not prof and platform == "x_thread":
+        prof = (cfg.get("profile_ids") or {}).get("x") or ""  # threads go to the X profile
+    if not prof:
+        # Multi-tenant (2026-08-11): fall back to the business's own connected
+        # Ocoya profile (business id embedded in the post tags as biz:<id>).
+        prof, ws = _biz_profile_for(post, platform, ws)
     payload = {"caption": post.get("content") or ""}
     img = post.get("image_url") or ""
     if img.startswith("http"):  # Ocoya must be able to fetch it — local vault URLs won't work
         payload["mediaUrls"] = [img]
     if prof:
         payload["socialProfileIds"] = [prof]
-    if (cfg.get("schedule_mode") or "draft") == "offset":
+    if post.get("scheduled_at"):
+        # Calendar slot wins (2026-08-12): the exact time the user picked in
+        # AppVault's calendar becomes Ocoya's publish time. Connector-agnostic:
+        # webhooks receive the same field and their receiver decides.
+        try:
+            payload["scheduledAt"] = datetime.strptime(str(post["scheduled_at"])[:16], "%Y-%m-%d %H:%M").strftime("%Y-%m-%dT%H:%M:%SZ")
+        except Exception:
+            pass
+    elif (cfg.get("schedule_mode") or "draft") == "offset":
         try:
             mins = max(1, int(cfg.get("schedule_offset_minutes", 60)))
             payload["scheduledAt"] = (datetime.now() + timedelta(minutes=mins)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -9072,6 +10697,17 @@ def _ocoya_check(cfg):
     if status != 200:
         return False, f"Ocoya auth HTTP {status}: {str(data)[:150]}"
     out = "Ocoya auth OK"
+    info = {"ok": True, "auth": "Ocoya auth OK", "text": out}
+    # Discover workspaces so the workspace ID never has to be hunted down.
+    try:
+        wdata, wstatus = _http("https://app.ocoya.com/api/_public/v1/workspaces",
+                               headers={"X-API-Key": api_key}, timeout=20)
+        if wstatus == 200 and isinstance(wdata, list):
+            info["workspaces"] = [{"id": str(w.get("id") or ""), "name": str(w.get("name") or "Workspace")}
+                                  for w in wdata if w.get("id")]
+            out += " · workspaces: " + ", ".join(f"{w['name']} ({w['id'][:8]}…)" for w in info["workspaces"])
+    except Exception:
+        pass
     ws = (cfg.get("workspace_id") or "").strip()
     if ws:
         try:
@@ -9079,13 +10715,16 @@ def _ocoya_check(cfg):
                 "https://app.ocoya.com/api/_public/v1/social-profiles?workspaceId=" + urllib.parse.quote(ws),
                 headers={"X-API-Key": api_key}, timeout=20)
             if pstatus == 200 and isinstance(pdata, list) and pdata:
-                names = [f"{p.get('platform') or p.get('name') or '?'}:{p.get('id')}" for p in pdata[:12]]
-                out += " | profiles: " + ", ".join(names)
+                info["profiles"] = [{"id": str(p.get("id") or ""),
+                                     "platform": str(p.get("platform") or ""),
+                                     "name": str(p.get("name") or "")} for p in pdata[:15] if p.get("id")]
+                out += " · profiles: " + ", ".join(f"{p['platform'] or '?'}:{p['id']}" for p in info["profiles"])
             else:
                 out += f" | profiles HTTP {pstatus}"
         except Exception as e:
             out += f" | profiles error: {str(e)[:100]}"
-    return True, out
+    info["text"] = out
+    return True, json.dumps(info)
 
 def _social_auto_route(wid):
     """auto_route: try scheduling an approved post; mark scheduled on success."""
@@ -9096,6 +10735,13 @@ def _social_auto_route(wid):
             _bus_publish("pipeline.social.scheduled", {"wid": wid})
     except Exception:
         pass
+
+def _mask_router_cfg(project):
+    cfg = dict(_social_router_cfg(project))
+    for k in ("api_key", "auth_header"):
+        if cfg.get(k):
+            cfg[k] = "•••••• (set)"
+    return cfg
 
 @agentic_bp.route("/api/agentic/pipeline/social/config", methods=["GET", "POST", "OPTIONS"])
 def api_social_router_config():
@@ -9117,6 +10763,13 @@ def api_social_router_config():
                   "schedule_offset_minutes", "media_base_url"):
             if k in data and data[k] is not None:
                 cfg[k] = data[k]
+        # Secret preservation: an empty api_key/auth_header field means "keep the
+        # current one" (the UI renders masked secrets as blank inputs). Without
+        # this, saving ANY other field silently wipes the stored credentials.
+        prev = _social_router_cfg(project)
+        for k in ("api_key", "auth_header"):
+            if str(cfg.get(k) or "").strip() == "" and prev.get(k):
+                cfg[k] = prev[k]
         _project_save_cfg(project, {"social_router": cfg})
         if data.get("test"):
             if (cfg.get("provider") or "webhook").lower() == "ocoya":
@@ -9126,13 +10779,38 @@ def api_social_router_config():
                                                   "category": "test", "content": "Pipeline router test — ignore.",
                                                   "tags": "", "project": project})
             return jsonify({"status": "ok" if ok else "error",
-                            "config": _social_router_cfg(project), "test": detail})
-        return jsonify({"status": "ok", "config": _social_router_cfg(project)})
+                            "config": _mask_router_cfg(project), "test": detail})
+        return jsonify({"status": "ok", "config": _mask_router_cfg(project)})
     cfg = dict(_social_router_cfg(project))
     for k in ("api_key", "auth_header"):
         if cfg.get(k):
             cfg[k] = "•••••• (set)"
     return jsonify({"status": "ok", "config": cfg, "project": project})
+
+@agentic_bp.route("/api/agentic/image/config", methods=["GET", "POST", "OPTIONS"])
+def api_image_gen_config():
+    """Image engine config: {provider (openai|litellm|pollinations), model,
+    api_key, api_base}. Stored globally like the LLM config; keys masked on GET."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "POST":
+        data = request.get_json() or {}
+        if data.get("reset"):
+            _cfg_set("image_gen", {})
+            return jsonify({"status": "ok", "config": {}})
+        cfg = dict(_image_gen_config())
+        for k in ("provider", "model", "api_key", "api_base"):
+            if k in data and data[k] is not None:
+                cfg[k] = str(data[k]).strip()
+        _cfg_set("image_gen", cfg)
+        out = dict(cfg)
+        if out.get("api_key"):
+            out["api_key"] = "•••••• (set)"
+        return jsonify({"status": "ok", "config": out})
+    cfg = dict(_image_gen_config())
+    if cfg.get("api_key"):
+        cfg["api_key"] = "•••••• (set)"
+    return jsonify({"status": "ok", "config": cfg})
 
 @agentic_bp.route("/api/agentic/pipeline/social/<wid>/schedule", methods=["POST", "OPTIONS"])
 def api_social_schedule(wid):
@@ -9142,7 +10820,7 @@ def api_social_schedule(wid):
     item = _pipeline_get(wid)
     if not item:
         return jsonify({"error": "not found"}), 404
-    if item.get("category") not in ("x", "linkedin", "facebook", "instagram"):
+    if item.get("category") not in ("x", "x_thread", "linkedin", "facebook", "instagram"):
         return jsonify({"error": "not a social post"}), 400
     if item.get("status") != "approved":
         return jsonify({"error": "only approved posts can be scheduled (approve it first)"}), 400
@@ -9428,6 +11106,10 @@ def _projects_ensure():
         conn.execute("ALTER TABLE work_items ADD COLUMN project TEXT DEFAULT 'appvault'")
     except Exception:
         pass
+    try:
+        conn.execute("ALTER TABLE work_items ADD COLUMN research TEXT DEFAULT ''")
+    except Exception:
+        pass
     conn.execute("CREATE TABLE IF NOT EXISTS projects "
                  "(slug TEXT PRIMARY KEY, name TEXT, config TEXT, created TEXT)")
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -9646,6 +11328,11 @@ def api_pipeline_brief():
         signal_label = signal[:80]
         source_key = source_key or ("manual:" + signal[:80])
     project = _project_from(data, "appvault")
+    # Idempotency: an explicit signal_key that was already briefed must not
+    # create a duplicate work item (covers double-clicks, retries, multi-user).
+    if source_key and _pipeline_signal_consumed(source_key):
+        return jsonify({"status": "ok", "dup": True, "wid": None,
+                        "message": "This story already has a brief in the pipeline — check the Approval Queue."}), 200
     wid, brief = _pipeline_brief_from_signal(signal, data.get("source") or "manual",
                                              project=project)
     if wid and source_key:
@@ -9715,11 +11402,11 @@ def _pipeline_sources_payload(project="appvault"):
     if using_cfg:
         feeds = cfg["feeds"]
     else:
-        feeds = [{"name": n, "url": u, "enabled": True} for n, u in FEEDS]
+        feeds = []  # Multi-tenant: no built-in fallback feeds
     if isinstance(cfg, dict) and isinstance(cfg.get("keywords"), dict) and cfg["keywords"]:
         keywords = cfg["keywords"]
     else:
-        keywords = dict(KEYWORDS)
+        keywords = {}  # Multi-tenant: no built-in fallback keywords
     return {"feeds": feeds, "keywords": keywords, "using_config": using_cfg}
 
 @agentic_bp.route("/api/agentic/pipeline/sources", methods=["GET", "POST", "OPTIONS"])
@@ -9894,7 +11581,7 @@ def api_pipeline_action(wid, action):
             if (it.get("category") or "") == "content" or (it.get("source") or "").startswith("pipeline:strategist"):
                 threading.Thread(target=_pipeline_socialize, args=(wid,), daemon=True).start()
             # auto_route: approved social posts go to the scheduler immediately
-            elif it.get("category") in ("x", "linkedin", "facebook", "instagram") and _social_router_cfg().get("auto_route"):
+            elif it.get("category") in ("x", "x_thread", "linkedin", "facebook", "instagram") and _social_router_cfg().get("auto_route"):
                 threading.Thread(target=_social_auto_route, args=(wid,), daemon=True).start()
     elif action == "reject":
         it = _pipeline_update(wid, status="rejected")
@@ -10038,3 +11725,1413 @@ def api_help():
         text = _HELP_DEFAULT
     return jsonify({"status": "ok", "markdown": text, "source": source,
                     "updated": datetime.now().strftime("%Y-%m-%d %H:%M")})
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# MULTI-TENANT CONTENT (2026-08-11)
+# Businesses / social profiles / content types / WordPress sites — all
+# user-created DB data. NO built-in defaults: clean installs start empty.
+# The seller's own setup ships only as an OPTIONAL importable starter
+# template (POST /api/agentic/businesses/seed). See
+# Obsidian → GRC-Brain/appvault/AppVault-MultiTenant-Content-Architecture.md
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _now():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _business_row_to_dict(r):
+    try:
+        raw_sp = r["social_platforms"] if "social_platforms" in r.keys() else None
+        sp = json.loads(raw_sp or "[]") if raw_sp else []
+    except Exception:
+        sp = []
+    return {"id": r["id"], "name": r["name"], "voice": r["voice"] or "",
+            "website": r["website"] or "", "cta_offer": r["cta_offer"] or "",
+            "social_platforms": sp or None,
+            "daily_target": int(r["daily_target"]) if "daily_target" in r.keys() and r["daily_target"] is not None else 8,
+            "created": r["created"], "updated": r["updated"]}
+
+
+def _get_business(bid):
+    conn = _db()
+    row = conn.execute("SELECT * FROM businesses WHERE id=?", (bid,)).fetchone()
+    conn.close()
+    return _business_row_to_dict(row) if row else None
+
+
+def _get_content_type(ctid):
+    """User-defined content template (voice/structure/platforms). Used by
+    /api/agentic/oracle/generate to drive prompt assembly."""
+    conn = _db()
+    row = conn.execute("SELECT * FROM content_types WHERE id=?", (ctid,)).fetchone()
+    conn.close()
+    if not row:
+        return None
+    try:
+        platforms = json.loads(row["platforms"] or "[]")
+    except Exception:
+        platforms = []
+    return {"id": row["id"], "business_id": row["business_id"], "name": row["name"],
+            "purpose": row["purpose"] or "", "voice": row["voice"] or "",
+            "structure": row["structure"] or "", "platforms": platforms,
+            "cadence": row["cadence"] or "", "length_guard": row["length_guard"] or 0,
+            "enabled": bool(row["enabled"]), "created": row["created"]}
+
+
+def _social_row_to_dict(r):
+    has = lambda k: k in r.keys()
+    return {"id": r["id"], "business_id": r["business_id"], "platform": r["platform"] or "",
+            "display_name": r["display_name"] or "", "handle": r["handle"] or "",
+            "ocoya_workspace_id": r["ocoya_workspace_id"] or "",
+            "ocoya_profile_id": r["ocoya_profile_id"] or "",
+            "webhook_url": (r["webhook_url"] or "") if has("webhook_url") else "",
+            "webhook_auth": ("•••• (set)" if r["webhook_auth"] else "") if has("webhook_auth") else "",
+            "enabled": bool(r["enabled"]), "created": r["created"]}
+
+
+def _wp_site_row_to_dict(r, mask=True):
+    d = {"id": r["id"], "business_id": r["business_id"], "name": r["name"] or "",
+         "site_url": r["site_url"] or "", "username": r["username"] or "",
+         "enabled": bool(r["enabled"]), "created": r["created"]}
+    d["app_password"] = ("•••••• (set)" if r["app_password"] else "") if mask else (r["app_password"] or "")
+    return d
+
+
+# ---- businesses ----
+
+@agentic_bp.route("/api/agentic/businesses", methods=["GET", "POST", "OPTIONS"])
+def api_businesses():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "GET":
+        conn = _db()
+        rows = conn.execute("SELECT * FROM businesses ORDER BY id").fetchall()
+        conn.close()
+        return jsonify({"status": "ok", "businesses": [_business_row_to_dict(r) for r in rows]})
+    data = request.get_json() or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "name required"}), 400
+    now = _now()
+    conn = _db()
+    try:
+        cur = conn.execute(
+            "INSERT INTO businesses (name, voice, website, cta_offer, social_platforms, daily_target, created, updated) VALUES (?,?,?,?,?,?,?,?)",
+            (name, (data.get("voice") or "").strip(), (data.get("website") or "").strip(),
+             (data.get("cta_offer") or "").strip(),
+             json.dumps(data.get("social_platforms") or []) if data.get("social_platforms") else None,
+             int(data.get("daily_target") or 8),
+             now, now))
+        conn.commit()
+        biz = _business_row_to_dict(conn.execute(
+            "SELECT * FROM businesses WHERE id=?", (cur.lastrowid,)).fetchone())
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+        return jsonify({"error": f"could not create business: {str(e)[:120]}"}), 400
+    conn.close()
+    return jsonify({"status": "ok", "business": biz})
+
+
+@agentic_bp.route("/api/agentic/businesses/<int:bid>", methods=["GET", "PUT", "DELETE", "OPTIONS"])
+def api_business(bid):
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    conn = _db()
+    row = conn.execute("SELECT * FROM businesses WHERE id=?", (bid,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "business not found"}), 404
+    if request.method == "GET":
+        biz = _business_row_to_dict(row)
+        conn.close()
+        return jsonify({"status": "ok", "business": biz})
+    if request.method == "DELETE":
+        conn.execute("UPDATE oracle_feeds SET business_id=NULL WHERE business_id=?", (bid,))
+        conn.execute("UPDATE social_profiles SET business_id=NULL WHERE business_id=?", (bid,))
+        conn.execute("UPDATE content_types SET business_id=NULL WHERE business_id=?", (bid,))
+        conn.execute("UPDATE wordpress_sites SET business_id=NULL WHERE business_id=?", (bid,))
+        conn.execute("DELETE FROM businesses WHERE id=?", (bid,))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok", "deleted": bid})
+    data = request.get_json() or {}
+    name = (data.get("name") if data.get("name") is not None else row["name"]).strip() or row["name"]
+    sp = row["social_platforms"] if "social_platforms" in row.keys() else None
+    if data.get("social_platforms") is not None:
+        sp = json.dumps([str(x).strip() for x in data["social_platforms"] if str(x).strip()]) if isinstance(data["social_platforms"], list) else None
+    conn.execute("UPDATE businesses SET name=?, voice=?, website=?, cta_offer=?, social_platforms=?, daily_target=?, updated=? WHERE id=?",
+                 (name,
+                 (data.get("voice") if data.get("voice") is not None else row["voice"] or "").strip(),
+                 (data.get("website") if data.get("website") is not None else row["website"] or "").strip(),
+                 (data.get("cta_offer") if data.get("cta_offer") is not None else row["cta_offer"] or "").strip(),
+                 sp,
+                 int(data.get("daily_target") if data.get("daily_target") is not None else (row["daily_target"] if "daily_target" in row.keys() else 8) or 8),
+                 _now(), bid))
+    conn.commit()
+    biz = _business_row_to_dict(conn.execute("SELECT * FROM businesses WHERE id=?", (bid,)).fetchone())
+    conn.close()
+    return jsonify({"status": "ok", "business": biz})
+
+
+# ---- social profiles (user-built, per business) ----
+
+@agentic_bp.route("/api/agentic/social-profiles/discover", methods=["GET", "OPTIONS"])
+def api_social_profiles_discover():
+    """List ALL Ocoya workspaces + connected profiles so the Businesses panel
+    can wire a business's account with one click. Uses the appvault project's
+    Ocoya key (the single key that owns every workspace)."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    cfg = _social_router_cfg("appvault") or {}
+    key = (cfg.get("api_key") or "").strip()
+    if not key:
+        return jsonify({"status": "error", "error": "no Ocoya API key configured (Pipeline → Social tab, appvault project)"}), 200
+    ok, detail = _ocoya_check(cfg)
+    info = {}
+    try:
+        info = json.loads(detail) if isinstance(detail, str) else (detail or {})
+    except Exception:
+        info = {}
+    ws_list = info.get("workspaces") or []
+    profiles = []
+    for w in ws_list:
+        wid = w.get("id")
+        if not wid:
+            continue
+        try:
+            pdata, pstatus = _http(
+                "https://app.ocoya.com/api/_public/v1/social-profiles?workspaceId=" + urllib.parse.quote(str(wid)),
+                headers={"X-API-Key": key}, timeout=15)
+            if pstatus == 200 and isinstance(pdata, list):
+                for p in pdata:
+                    if p.get("id"):
+                        # Ocoya returns the account kind in `provider` (twitter,
+                        # linkedin, facebook…) — normalize to our platform names.
+                        prov = str(p.get("provider") or p.get("platform") or "").lower()
+                        plat = "x" if prov == "twitter" else prov
+                        profiles.append({"workspace_id": str(wid), "workspace_name": w.get("name") or "",
+                                         "id": str(p.get("id")), "platform": plat,
+                                         "name": str(p.get("name") or "")})
+        except Exception:
+            continue
+    return jsonify({"status": "ok", "workspaces": ws_list, "profiles": profiles})
+
+
+@agentic_bp.route("/api/agentic/social-profiles", methods=["GET", "POST", "OPTIONS"])
+def api_social_profiles():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "GET":
+        biz = request.args.get("business_id")
+        conn = _db()
+        if biz:
+            rows = conn.execute("SELECT * FROM social_profiles WHERE business_id=? ORDER BY id",
+                                (int(biz),)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM social_profiles ORDER BY id").fetchall()
+        conn.close()
+        return jsonify({"status": "ok", "profiles": [_social_row_to_dict(r) for r in rows]})
+    data = request.get_json() or {}
+    platform = (data.get("platform") or "").strip()
+    if not platform:
+        return jsonify({"error": "platform required (e.g. X, LinkedIn, Facebook, Instagram, TikTok)"}), 400
+    conn = _db()
+    cur = conn.execute(
+        "INSERT INTO social_profiles (business_id, platform, display_name, handle, ocoya_workspace_id, ocoya_profile_id, webhook_url, webhook_auth, enabled, created)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (data.get("business_id"), platform, (data.get("display_name") or "").strip(),
+         (data.get("handle") or "").strip(), (data.get("ocoya_workspace_id") or "").strip(),
+         (data.get("ocoya_profile_id") or "").strip(), (data.get("webhook_url") or "").strip(),
+         (data.get("webhook_auth") or "").strip(), 1 if data.get("enabled", True) else 0, _now()))
+    conn.commit()
+    prof = _social_row_to_dict(conn.execute("SELECT * FROM social_profiles WHERE id=?", (cur.lastrowid,)).fetchone())
+    conn.close()
+    return jsonify({"status": "ok", "profile": prof})
+
+
+@agentic_bp.route("/api/agentic/social-profiles/<int:sid>", methods=["PUT", "DELETE", "OPTIONS"])
+def api_social_profile(sid):
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    conn = _db()
+    row = conn.execute("SELECT * FROM social_profiles WHERE id=?", (sid,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "profile not found"}), 404
+    if request.method == "DELETE":
+        conn.execute("DELETE FROM social_profiles WHERE id=?", (sid,))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok", "deleted": sid})
+    data = request.get_json() or {}
+    # Secret preservation: empty webhook_auth means "keep the current one".
+    new_auth = (data.get("webhook_auth") if data.get("webhook_auth") is not None else row["webhook_auth"] or "").strip()
+    if data.get("webhook_auth") == "" and row["webhook_auth"]:
+        new_auth = row["webhook_auth"]
+    conn.execute(
+        "UPDATE social_profiles SET business_id=?, platform=?, display_name=?, handle=?, ocoya_workspace_id=?, ocoya_profile_id=?, webhook_url=?, webhook_auth=?, enabled=? WHERE id=?",
+        (data.get("business_id") if data.get("business_id") is not None else row["business_id"],
+         (data.get("platform") if data.get("platform") is not None else row["platform"] or "").strip(),
+         (data.get("display_name") if data.get("display_name") is not None else row["display_name"] or "").strip(),
+         (data.get("handle") if data.get("handle") is not None else row["handle"] or "").strip(),
+         (data.get("ocoya_workspace_id") if data.get("ocoya_workspace_id") is not None else row["ocoya_workspace_id"] or "").strip(),
+         (data.get("ocoya_profile_id") if data.get("ocoya_profile_id") is not None else row["ocoya_profile_id"] or "").strip(),
+         (data.get("webhook_url") if data.get("webhook_url") is not None else row["webhook_url"] or "").strip(),
+         new_auth,
+         1 if (data.get("enabled") if data.get("enabled") is not None else row["enabled"]) else 0, sid))
+    conn.commit()
+    prof = _social_row_to_dict(conn.execute("SELECT * FROM social_profiles WHERE id=?", (sid,)).fetchone())
+    conn.close()
+    return jsonify({"status": "ok", "profile": prof})
+
+
+# ---- content types (user-defined templates) ----
+
+@agentic_bp.route("/api/agentic/content-types", methods=["GET", "POST", "OPTIONS"])
+def api_content_types():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "GET":
+        biz = request.args.get("business_id")
+        conn = _db()
+        if biz:
+            rows = conn.execute("SELECT * FROM content_types WHERE business_id=? ORDER BY id",
+                                (int(biz),)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM content_types ORDER BY id").fetchall()
+        conn.close()
+        return jsonify({"status": "ok", "content_types": [_get_content_type(r["id"]) for r in rows]})
+    data = request.get_json() or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "name required"}), 400
+    conn = _db()
+    cur = conn.execute(
+        "INSERT INTO content_types (business_id, name, purpose, voice, structure, platforms, cadence, length_guard, enabled, created)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (data.get("business_id"), name, (data.get("purpose") or "").strip(),
+         (data.get("voice") or "").strip(), (data.get("structure") or "").strip(),
+         json.dumps(data.get("platforms") or []), (data.get("cadence") or "").strip(),
+         int(data.get("length_guard") or 0), 1 if data.get("enabled", True) else 0, _now()))
+    conn.commit()
+    ct = _get_content_type(cur.lastrowid)
+    conn.close()
+    return jsonify({"status": "ok", "content_type": ct})
+
+
+@agentic_bp.route("/api/agentic/content-types/<int:ctid>", methods=["PUT", "DELETE", "OPTIONS"])
+def api_content_type(ctid):
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    conn = _db()
+    row = conn.execute("SELECT * FROM content_types WHERE id=?", (ctid,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "content type not found"}), 404
+    if request.method == "DELETE":
+        conn.execute("DELETE FROM content_types WHERE id=?", (ctid,))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok", "deleted": ctid})
+    data = request.get_json() or {}
+    conn.execute(
+        "UPDATE content_types SET business_id=?, name=?, purpose=?, voice=?, structure=?, platforms=?, cadence=?, length_guard=?, enabled=? WHERE id=?",
+        (data.get("business_id") if data.get("business_id") is not None else row["business_id"],
+         (data.get("name") if data.get("name") is not None else row["name"] or "").strip(),
+         (data.get("purpose") if data.get("purpose") is not None else row["purpose"] or "").strip(),
+         (data.get("voice") if data.get("voice") is not None else row["voice"] or "").strip(),
+         (data.get("structure") if data.get("structure") is not None else row["structure"] or "").strip(),
+         json.dumps(data.get("platforms") if data.get("platforms") is not None else json.loads(row["platforms"] or "[]")),
+         (data.get("cadence") if data.get("cadence") is not None else row["cadence"] or "").strip(),
+         int(data.get("length_guard") if data.get("length_guard") is not None else (row["length_guard"] or 0)),
+         1 if (data.get("enabled") if data.get("enabled") is not None else row["enabled"]) else 0, ctid))
+    conn.commit()
+    ct = _get_content_type(ctid)
+    conn.close()
+    return jsonify({"status": "ok", "content_type": ct})
+
+
+# ---- WordPress sites (multi, per business) ----
+
+@agentic_bp.route("/api/agentic/wordpress-sites", methods=["GET", "POST", "OPTIONS"])
+def api_wp_sites():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "GET":
+        biz = request.args.get("business_id")
+        conn = _db()
+        if biz:
+            rows = conn.execute("SELECT * FROM wordpress_sites WHERE business_id=? ORDER BY id",
+                                (int(biz),)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM wordpress_sites ORDER BY id").fetchall()
+        conn.close()
+        return jsonify({"status": "ok", "sites": [_wp_site_row_to_dict(r) for r in rows]})
+    data = request.get_json() or {}
+    site_url = (data.get("site_url") or "").strip().rstrip("/")
+    if not site_url:
+        return jsonify({"error": "site_url required (e.g. https://yourblog.com)"}), 400
+    conn = _db()
+    cur = conn.execute(
+        "INSERT INTO wordpress_sites (business_id, name, site_url, username, app_password, enabled, created)"
+        " VALUES (?,?,?,?,?,?,?)",
+        (data.get("business_id"), (data.get("name") or "").strip(), site_url,
+         (data.get("username") or "").strip(), (data.get("app_password") or "").strip(),
+         1 if data.get("enabled", True) else 0, _now()))
+    conn.commit()
+    site = _wp_site_row_to_dict(conn.execute("SELECT * FROM wordpress_sites WHERE id=?", (cur.lastrowid,)).fetchone())
+    conn.close()
+    return jsonify({"status": "ok", "site": site})
+
+
+@agentic_bp.route("/api/agentic/wordpress-sites/<int:wsid>", methods=["PUT", "DELETE", "OPTIONS"])
+def api_wp_site(wsid):
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    conn = _db()
+    row = conn.execute("SELECT * FROM wordpress_sites WHERE id=?", (wsid,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "site not found"}), 404
+    if request.method == "DELETE":
+        conn.execute("DELETE FROM wordpress_sites WHERE id=?", (wsid,))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok", "deleted": wsid})
+    data = request.get_json() or {}
+    # SECRET PRESERVATION: empty app_password on save = keep current (same rule as Ocoya router)
+    pw = row["app_password"]
+    if data.get("app_password") is not None and str(data.get("app_password")).strip():
+        pw = str(data.get("app_password")).strip()
+    conn.execute(
+        "UPDATE wordpress_sites SET business_id=?, name=?, site_url=?, username=?, app_password=?, enabled=? WHERE id=?",
+        (data.get("business_id") if data.get("business_id") is not None else row["business_id"],
+         (data.get("name") if data.get("name") is not None else row["name"] or "").strip(),
+         (data.get("site_url") if data.get("site_url") is not None else row["site_url"] or "").strip().rstrip("/"),
+         (data.get("username") if data.get("username") is not None else row["username"] or "").strip(),
+         pw, 1 if (data.get("enabled") if data.get("enabled") is not None else row["enabled"]) else 0, wsid))
+    conn.commit()
+    site = _wp_site_row_to_dict(conn.execute("SELECT * FROM wordpress_sites WHERE id=?", (wsid,)).fetchone())
+    conn.close()
+    return jsonify({"status": "ok", "site": site})
+
+
+@agentic_bp.route("/api/agentic/wordpress-sites/<int:wsid>/test", methods=["POST", "OPTIONS"])
+def api_wp_site_test(wsid):
+    """Verify a site's credentials: GET /wp-json/wp/v2/posts?per_page=1."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    import base64 as _b64
+    conn = _db()
+    row = conn.execute("SELECT * FROM wordpress_sites WHERE id=?", (wsid,)).fetchone()
+    conn.close()
+    if not row:
+        return jsonify({"error": "site not found"}), 404
+    site = (row["site_url"] or "").rstrip("/")
+    if not site:
+        return jsonify({"status": "error", "error": "no site URL configured"}), 400
+    if not row["username"] or not row["app_password"]:
+        return jsonify({"status": "error", "error": "no credentials configured"}), 400
+    token = _b64.b64encode(f"{row['username']}:{row['app_password']}".encode("utf-8")).decode("ascii")
+    data, code = _http(f"{site}/wp-json/wp/v2/posts?per_page=1",
+                       headers={"Authorization": f"Basic {token}"}, timeout=25)
+    if code == 200:
+        n = len(data) if isinstance(data, list) else "?"
+        return jsonify({"status": "ok", "detail": f"auth OK — API reachable (sample: {n} post)"})
+    return jsonify({"status": "error", "detail": f"HTTP {code}: {str(data)[:300]}"}), 200
+
+
+def _wp_publish_site(site_id, title, content, status="draft"):
+    """Publish to a specific wordpress_sites row. Returns (ok, result)."""
+    import base64 as _b64
+    conn = _db()
+    row = conn.execute("SELECT * FROM wordpress_sites WHERE id=?", (site_id,)).fetchone()
+    conn.close()
+    if not row:
+        return False, "site not found"
+    site = (row["site_url"] or "").rstrip("/")
+    if not site:
+        return False, "not configured — no site URL"
+    if not row["username"] or not row["app_password"]:
+        return False, "not configured — add username + app password"
+    token = _b64.b64encode(f"{row['username']}:{row['app_password']}".encode("utf-8")).decode("ascii")
+    data, code = _http(f"{site}/wp-json/wp/v2/posts", method="POST",
+                       headers={"Authorization": f"Basic {token}"},
+                       json_data={"title": str(title)[:200], "content": str(content),
+                                  "status": status if status in ("publish", "draft", "pending", "private") else "draft"},
+                       timeout=40)
+    if code in (200, 201) and isinstance(data, dict):
+        return True, {"id": data.get("id"), "link": data.get("link"),
+                      "status": data.get("status"), "title": (data.get("title") or {}).get("rendered", title)}
+    return False, f"HTTP {code}: {str(data)[:300]}"
+
+
+# ---- starter template (optional import — the seller's own setup as seed data) ----
+
+_STARTER_TEMPLATE = {
+    "businesses": [
+        {
+            "name": "AI RepoIndex",
+            "voice": "conversational expert — a knowledgeable insider reviewing AI tools for founders and builders",
+            "website": "https://airepoindex.com",
+            "cta_offer": "Get your AI tool listed — Verified listings from $49/mo",
+            "feeds": [
+                {"name": "AI Tools News", "query": "AI tool releases",
+                 "rss_urls": ["https://news.google.com/rss/search?q=AI+tool&hl=en-US&gl=US&ceid=US:en",
+                              "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml"],
+                 "subreddits": ["artificial", "LocalLLaMA"], "hn_query": "AI tool",
+                 "github_query": "ai tool", "sources": ["rss", "reddit", "hn", "github"]},
+            ],
+            "content_types": [
+                {"name": "Tool Release Alert", "purpose": "announce a new AI tool release with one sharp take",
+                 "voice": "conversational expert — hook first, facts woven into the narrative",
+                 "structure": "hook → what it is → why it matters → CTA", "platforms": ["x", "linkedin"]},
+                {"name": "Weekly Roundup", "purpose": "the week's best AI tools in one post",
+                 "voice": "conversational expert", "structure": "intro → 3-5 tools → verdict → CTA",
+                 "platforms": ["blog"]},
+            ],
+        },
+        {
+            "name": "Security RepoIndex",
+            "voice": "conversational expert — an honest security tools reviewer",
+            "website": "https://securityrepoindex.com",
+            "cta_offer": "Get your security tool listed — Verified from $49/mo",
+            "feeds": [
+                {"name": "Security News", "query": "cybersecurity tools",
+                 "rss_urls": ["https://feeds.feedburner.com/TheHackersNews",
+                              "https://krebsonsecurity.com/feed/"],
+                 "subreddits": ["netsec"], "hn_query": "security vulnerability",
+                 "sources": ["rss", "reddit", "hn"]},
+            ],
+            "content_types": [
+                {"name": "Vulnerability Alert", "purpose": "breaking vuln news with who's affected and the fix",
+                 "voice": "calm, evidence-first — explains risk without panic",
+                 "structure": "what → who's affected → fix → CTA", "platforms": ["x", "linkedin", "blog"]},
+            ],
+        },
+        {
+            "name": "CISOvault",
+            "voice": "calm, evidence-first security advisor",
+            "website": "https://cisovault.com",
+            "cta_offer": "Full exposure scan + CVE report — $149",
+            "feeds": [
+                {"name": "Threat Intel", "query": "data breach vulnerability",
+                 "rss_urls": ["https://www.bleepingcomputer.com/feed/",
+                              "https://feeds.feedburner.com/TheHackersNews"],
+                 "subreddits": ["netsec"], "hn_query": "breach", "sources": ["rss", "reddit", "hn"]},
+            ],
+            "content_types": [
+                {"name": "Security Alert", "purpose": "urgent exposure news for business owners",
+                 "voice": "calm, evidence-first", "structure": "what happened → risk → one action → CTA",
+                 "platforms": ["x", "linkedin"]},
+                {"name": "Risk Explainer", "purpose": "plain-English security education",
+                 "voice": "plain-English teacher, zero jargon", "structure": "scene → problem → fix → CTA",
+                 "platforms": ["blog"]},
+            ],
+        },
+        {
+            "name": "WriterStudioAI",
+            "voice": "helpful, practical writing SaaS voice",
+            "website": "",
+            "cta_offer": "Start your free trial",
+            "feeds": [],
+            "content_types": [
+                {"name": "Writing Tip", "purpose": "one actionable writing tip per post",
+                 "voice": "helpful and practical", "structure": "tip → example → CTA",
+                 "platforms": ["x", "linkedin", "facebook", "instagram"]},
+            ],
+        },
+    ],
+}
+
+
+@agentic_bp.route("/api/agentic/businesses/seed", methods=["POST", "OPTIONS"])
+def api_businesses_seed():
+    """Import the optional starter template (seller's proven setup).
+    Idempotent: skips businesses whose name already exists unless force=1.
+    This is the ONLY place seller-specific data lives — as importable data,
+    never as code defaults."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    force = bool(data.get("force"))
+    conn = _db()
+    created_biz = created_feed = created_ct = skipped = 0
+    for tpl in _STARTER_TEMPLATE["businesses"]:
+        row = conn.execute("SELECT id FROM businesses WHERE name=?", (tpl["name"],)).fetchone()
+        if row and not force:
+            skipped += 1
+            continue
+        now = _now()
+        if row:
+            biz_id = row["id"]
+            conn.execute("UPDATE businesses SET voice=?, website=?, cta_offer=?, updated=? WHERE id=?",
+                         (tpl["voice"], tpl.get("website") or "", tpl.get("cta_offer") or "", now, biz_id))
+        else:
+            cur = conn.execute(
+                "INSERT INTO businesses (name, voice, website, cta_offer, created, updated) VALUES (?,?,?,?,?,?)",
+                (tpl["name"], tpl["voice"], tpl.get("website") or "", tpl.get("cta_offer") or "", now, now))
+            biz_id = cur.lastrowid
+            created_biz += 1
+        for f in tpl.get("feeds") or []:
+            conn.execute(
+                "INSERT INTO oracle_feeds (name, query, rss_urls, subreddits, hn_query, github_query, youtube_channels, sources, skip_repeats, business_id, created)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (f["name"], f.get("query") or f["name"], json.dumps(f.get("rss_urls") or []),
+                 json.dumps(f.get("subreddits") or []), f.get("hn_query") or "",
+                 f.get("github_query") or "", json.dumps(f.get("youtube_channels") or []),
+                 json.dumps(f.get("sources") or []), 1, biz_id, now))
+            created_feed += 1
+        for ct in tpl.get("content_types") or []:
+            conn.execute(
+                "INSERT INTO content_types (business_id, name, purpose, voice, structure, platforms, cadence, length_guard, enabled, created)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (biz_id, ct["name"], ct.get("purpose") or "", ct.get("voice") or "",
+                 ct.get("structure") or "", json.dumps(ct.get("platforms") or []),
+                 ct.get("cadence") or "", int(ct.get("length_guard") or 0), 1, now))
+            created_ct += 1
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok", "created_businesses": created_biz, "created_feeds": created_feed,
+                    "created_content_types": created_ct, "skipped_existing": skipped})
+
+
+# ---- onboarding status (drives the setup wizard) ----
+
+@agentic_bp.route("/api/agentic/content/status", methods=["GET", "OPTIONS"])
+def api_content_status():
+    """Clean-install overview: what exists per business. The wizard shows this
+    as '0 businesses → build your machine'. Nothing is pre-seeded."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    conn = _db()
+    businesses = [_business_row_to_dict(r) for r in conn.execute("SELECT * FROM businesses ORDER BY id").fetchall()]
+    per_business = []
+    for b in businesses:
+        per_business.append({
+            "id": b["id"], "name": b["name"],
+            "feeds": conn.execute("SELECT COUNT(*) AS n FROM oracle_feeds WHERE business_id=?", (b["id"],)).fetchone()["n"],
+            "profiles": conn.execute("SELECT COUNT(*) AS n FROM social_profiles WHERE business_id=?", (b["id"],)).fetchone()["n"],
+            "content_types": conn.execute("SELECT COUNT(*) AS n FROM content_types WHERE business_id=?", (b["id"],)).fetchone()["n"],
+            "wp_sites": conn.execute("SELECT COUNT(*) AS n FROM wordpress_sites WHERE business_id=?", (b["id"],)).fetchone()["n"],
+        })
+    totals = {
+        "businesses": len(businesses),
+        "feeds": conn.execute("SELECT COUNT(*) AS n FROM oracle_feeds").fetchone()["n"],
+        "social_profiles": conn.execute("SELECT COUNT(*) AS n FROM social_profiles").fetchone()["n"],
+        "content_types": conn.execute("SELECT COUNT(*) AS n FROM content_types").fetchone()["n"],
+        "wordpress_sites": conn.execute("SELECT COUNT(*) AS n FROM wordpress_sites").fetchone()["n"],
+    }
+    conn.close()
+    return jsonify({"status": "ok", "totals": totals, "per_business": per_business})
+
+
+# ---- business-aware routing helpers (2026-08-11) ----
+# Used by _pipeline_social_posts (dynamic platform list) and _ocoya_send
+# (profile resolution). Post carries its business as tag `biz:<id>`.
+
+def _platforms_for_business(biz):
+    """Platforms to GENERATE posts for (drafts). Data-driven — nothing hardcoded:
+    1) business.social_platforms when set; 2) union of the business's content-type
+    platforms; 3) None (= legacy default set). x expands to x + x_thread.
+    Generation is decoupled from accounts: routing still sends only to profiles
+    the business actually connected."""
+    if not biz:
+        return None
+    explicit = biz.get("social_platforms") or []
+    pools = [explicit] if explicit else []
+    if not pools:
+        conn = _db()
+        rows = conn.execute(
+            "SELECT platforms FROM content_types WHERE business_id=? AND enabled=1",
+            (biz["id"],)).fetchall()
+        conn.close()
+        pools = [json.loads(r["platforms"] or "[]") for r in rows if r["platforms"]]
+    plats = []
+    for pool in pools:
+        for p in pool:
+            p = str(p).lower().strip()
+            if p == "x":
+                for extra in ("x", "x_thread"):
+                    if extra not in plats:
+                        plats.append(extra)
+            elif p in _PIPELINE_PLATFORMS and p not in plats:
+                plats.append(p)
+    return plats or None
+
+
+def _biz_for_project(project):
+    """Resolve a pipeline project to its multi-tenant business.
+    1) explicit business_id in the project config; 2) normalized name match."""
+    if not project:
+        return None
+    cfg = _project_cfg(project) or {}
+    bid = cfg.get("business_id")
+    if bid:
+        b = _get_business(int(bid))
+        if b:
+            return b
+    conn = _db()
+    rows = conn.execute("SELECT * FROM businesses ORDER BY id").fetchall()
+    conn.close()
+    key = re.sub(r"[^a-z0-9]", "", str(project).lower())
+    for r in rows:
+        if re.sub(r"[^a-z0-9]", "", str(r["name"] or "").lower()) == key:
+            return _business_row_to_dict(r)
+    return None
+
+
+def _biz_profiles(biz_id):
+    """Enabled social_profiles rows for a business (multi-tenant).
+    RAW dicts — internal routing needs unmasked secrets (webhook_auth);
+    masking happens only at the API boundary (_social_row_to_dict)."""
+    conn = _db()
+    rows = conn.execute(
+        "SELECT * FROM social_profiles WHERE business_id=? AND enabled=1 ORDER BY id",
+        (biz_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def _biz_profile_for(post, platform, fallback_ws):
+    """Resolve a post's target Ocoya profile from the business's social_profiles.
+    Returns (profile_id, workspace_id). Empty profile = caller keeps its default."""
+    biz_id = None
+    for t in str(post.get("tags") or "").split(","):
+        t = t.strip()
+        if t.startswith("biz:") and t[4:].isdigit():
+            biz_id = int(t[4:])
+            break
+    if biz_id is None:
+        return "", (fallback_ws or "")
+    want = "x" if platform == "x_thread" else platform
+    for pr in _biz_profiles(biz_id):
+        if (pr.get("platform") or "").lower() == want and (pr.get("ocoya_profile_id") or ""):
+            return (pr.get("ocoya_profile_id") or ""), (pr.get("ocoya_workspace_id") or (fallback_ws or ""))
+    return "", (fallback_ws or "")
+
+
+def _biz_tag(post):
+    """True when the post carries a business id (tag biz:<id>)."""
+    for t in str(post.get("tags") or "").split(","):
+        if t.strip().startswith("biz:") and t.strip()[4:].isdigit():
+            return True
+    return False
+
+
+def _biz_id_of(post):
+    for t in str(post.get("tags") or "").split(","):
+        t = t.strip()
+        if t.startswith("biz:") and t[4:].isdigit():
+            return int(t[4:])
+    return None
+
+
+def _webhook_send(post, prof):
+    """Generic webhook delivery for a business profile (Buffer/Make/n8n/Zapier…).
+    Returns (ok, detail)."""
+    url = (prof.get("webhook_url") or "").strip()
+    if not url:
+        return False, "no webhook_url on profile"
+    payload = {
+        "title": post.get("title") or "",
+        "platform": post.get("category") or post.get("platform") or "",
+        "content": post.get("content") or "",
+        "image_url": post.get("image_url") or "",
+        "article_id": (post.get("tags") or "").replace("article:", "")[:40],
+        "business_id": _biz_id_of(post),
+        "scheduled_at": post.get("scheduled_at") or "",
+        "source": "appvault-pipeline",
+    }
+    hdrs = {"Content-Type": "application/json"}
+    ah = (prof.get("webhook_auth") or "").strip()
+    if ah and ":" in ah:
+        hdrs[ah.split(":", 1)[0].strip()] = ah.split(":", 1)[1].strip()
+    try:
+        data, status = _http(url, method="POST", headers=hdrs, json_data=payload, timeout=30)
+    except Exception as e:
+        return False, f"webhook call failed: {str(e)[:200]}"
+    if status in (200, 201, 202, 204):
+        return True, f"webhook HTTP {status}"
+    return False, f"webhook HTTP {status}: {str(data)[:200]}"
+
+
+def _biz_deliver(post, cfg):
+    """Deliver a business-owned post through the business's own connectors:
+    Ocoya-wired profile first, then a webhook profile. Returns
+    (True, detail) on success, (False, detail) on attempted-failure,
+    (None, None) when the business has NO connector for this platform."""
+    biz_id = _biz_id_of(post)
+    if biz_id is None:
+        return None, None
+    platform = post.get("category") or ""
+    want = "x" if platform == "x_thread" else platform
+    profs = _biz_profiles(biz_id)
+    ocoya_prof = next((p for p in profs if (p.get("platform") or "").lower() == want and (p.get("ocoya_profile_id") or "")), None)
+    wh_prof = next((p for p in profs if (p.get("platform") or "").lower() == want and (p.get("webhook_url") or "")), None)
+    if not ocoya_prof and not wh_prof:
+        return None, None
+    if ocoya_prof:
+        # The appvault project owns the single Ocoya API key for every workspace.
+        c2 = dict(_social_router_cfg("appvault") or {})
+        c2["workspace_id"] = ocoya_prof.get("ocoya_workspace_id") or c2.get("workspace_id")
+        c2["profile_ids"] = {}  # force business-profile resolution, not legacy project mapping
+        ok, det = _ocoya_send(post, c2)
+        if ok:
+            return True, det
+        if wh_prof:
+            ok2, det2 = _webhook_send(post, wh_prof)
+            if ok2:
+                return True, det2
+            return False, f"ocoya failed ({det}); webhook failed ({det2})"
+        return False, det
+    return _webhook_send(post, wh_prof)
+
+
+def _new_link_code():
+    import uuid as _uuid
+    return _uuid.uuid4().hex[:8]
+
+
+# ---- calendar (A2): scheduled work items + oracle posts in a date range ----
+
+def _pull_external_posts(biz_filter=""):
+    """Pull posts from each business's Ocoya-wired workspace (read-only,
+    kind=external). Only posts with a scheduled time land on the calendar.
+    Connector-agnostic shape: later connectors (Buffer…) plug in here."""
+    out = []
+    key = (_social_router_cfg("appvault") or {}).get("api_key") or ""
+    if not key:
+        return out
+    conn = _db()
+    rows = conn.execute(
+        "SELECT * FROM social_profiles WHERE ocoya_profile_id IS NOT NULL AND ocoya_profile_id != '' AND enabled=1").fetchall()
+    conn.close()
+    seen_ws = set()
+    for r in rows:
+        ws = r["ocoya_workspace_id"] or ""
+        if not ws or ws in seen_ws:
+            continue
+        seen_ws.add(ws)
+        if biz_filter and str(r["business_id"] or "") != biz_filter:
+            continue
+        # profile id -> platform map (provider field, twitter -> x)
+        idmap = {}
+        try:
+            pdata2, pstatus2 = _http("https://app.ocoya.com/api/_public/v1/social-profiles?workspaceId=" + urllib.parse.quote(ws),
+                                     headers={"X-API-Key": key}, timeout=15)
+            if pstatus2 == 200 and isinstance(pdata2, list):
+                for p2 in pdata2:
+                    if p2.get("id"):
+                        prov = str(p2.get("provider") or "").lower()
+                        idmap[str(p2.get("id"))] = "x" if prov == "twitter" else prov
+        except Exception:
+            pass
+        try:
+            pdata, pstatus = _http("https://app.ocoya.com/api/_public/v1/post?workspaceId=" + urllib.parse.quote(ws),
+                                   headers={"X-API-Key": key}, timeout=15)
+        except Exception:
+            continue
+        if pstatus != 200 or not isinstance(pdata, list):
+            continue
+        for p in pdata:
+            if not isinstance(p, dict):
+                continue
+            sched = p.get("scheduledAt") or ""
+            if not sched:
+                continue  # no slot -> nothing to place on the calendar
+            pids = p.get("socialProfileIds") or []
+            plat = ""
+            for pid in pids:
+                plat = idmap.get(str(pid)) or ""
+                if plat:
+                    break
+            out.append({"kind": "external", "id": str(p.get("id") or ""),
+                        "title": str(p.get("title") or p.get("caption") or "Ocoya post")[:80],
+                        "platform": plat,
+                        "status": str(p.get("status") or "unknown").lower(),
+                        "scheduled_at": sched[:16].replace("T", " ") if sched else "",
+                        "business_id": r["business_id"], "link_code": ""})
+    return out
+
+
+@agentic_bp.route("/api/agentic/calendar", methods=["GET", "OPTIONS"])
+def api_calendar():
+    """Week/month view: work items + oracle posts with scheduled_at in [start, end].
+    Query: ?start=YYYY-MM-DD&end=YYYY-MM-DD&business_id=N"""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    start = (request.args.get("start") or "").strip() or "0000-01-01"
+    end = (request.args.get("end") or "").strip() or "9999-12-31"
+    # Bare dates expand to full-day ranges so "2026-08-12 09:30" matches a
+    # single-day query (string comparison would otherwise exclude it).
+    if len(start) == 10:
+        start = start + " 00:00:00"
+    if len(end) == 10:
+        end = end + " 23:59:59"
+    biz_filter = (request.args.get("business_id") or "").strip()
+    conn = _db()
+    items = []
+    rows = conn.execute(
+        "SELECT * FROM work_items WHERE scheduled_at IS NOT NULL AND scheduled_at != ''"
+        " AND scheduled_at >= ? AND scheduled_at <= ? ORDER BY scheduled_at",
+        (start, end)).fetchall()
+    for r in rows:
+        d = dict(r)
+        bid = _biz_id_of({"tags": d.get("tags") or ""})
+        if biz_filter and str(bid or "") != biz_filter:
+            continue
+        items.append({"kind": "work", "id": d["id"], "title": d.get("title") or "Post",
+                      "platform": d.get("category") or "", "status": d.get("status") or "",
+                      "scheduled_at": d.get("scheduled_at") or "", "business_id": bid,
+                      "link_code": d.get("link_code") or ""})
+    rows2 = conn.execute(
+        "SELECT * FROM oracle_posts WHERE scheduled_at IS NOT NULL AND scheduled_at != ''"
+        " AND scheduled_at >= ? AND scheduled_at <= ? ORDER BY scheduled_at",
+        (start, end)).fetchall()
+    for r in rows2:
+        d = dict(r)
+        if biz_filter and str(d.get("business_id") or "") != biz_filter:
+            continue
+        items.append({"kind": "oracle", "id": d["id"], "title": d.get("title") or "Post",
+                      "platform": d.get("platform") or "", "status": d.get("status") or "",
+                      "scheduled_at": d.get("scheduled_at") or "", "business_id": d.get("business_id"),
+                      "link_code": ""})
+    # External connector posts (Ocoya etc.) — read-only, only dated ones.
+    if request.args.get("external") == "1":
+        for it in _pull_external_posts(biz_filter):
+            sa = it.get("scheduled_at") or ""
+            if sa and start <= sa <= end:
+                items.append(it)
+    names = {}
+    for r in conn.execute("SELECT id, name FROM businesses").fetchall():
+        names[r["id"]] = r["name"]
+    conn.close()
+    for it in items:
+        it["business_name"] = names.get(it.get("business_id")) or ""
+    return jsonify({"status": "ok", "items": items})
+
+
+@agentic_bp.route("/api/agentic/pipeline/<wid>", methods=["GET", "PUT", "OPTIONS"])
+def api_pipeline_item(wid):
+    """Human-in-the-loop (2026-08-12): GET a work item's full content and PUT
+    edited title/content back — the humanize-before-posting gate on the calendar."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    item = _pipeline_get(wid)
+    if not item:
+        return jsonify({"error": "not found"}), 404
+    if request.method == "GET":
+        return jsonify({"status": "ok", "item": item})
+    data = request.get_json() or {}
+    fields = {}
+    if data.get("title") is not None:
+        fields["title"] = str(data["title"])[:4000]
+    if data.get("content") is not None:
+        fields["content"] = str(data["content"])[:4000]
+    if not fields:
+        return jsonify({"error": "nothing to update (title/content)"}), 400
+    it = _pipeline_update(wid, **fields)
+    return jsonify({"status": "ok", "item": it})
+
+
+@agentic_bp.route("/api/agentic/pipeline/<wid>/schedule", methods=["POST", "OPTIONS"])
+def api_pipeline_schedule(wid):
+    """Set the calendar slot for a work item. Body: {scheduled_at: 'YYYY-MM-DD HH:MM'}"""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    item = _pipeline_get(wid)
+    if not item:
+        return jsonify({"error": "not found"}), 404
+    data = request.get_json() or {}
+    at = (data.get("scheduled_at") or "").strip()
+    if not at:
+        return jsonify({"error": "scheduled_at required (YYYY-MM-DD HH:MM)"}), 400
+    it = _pipeline_update(wid, scheduled_at=at)
+    return jsonify({"status": "ok", "item": it})
+
+
+# ---- link tracking (B3): short links + UTM + click counting ----
+
+@agentic_bp.route("/api/agentic/links", methods=["GET", "POST", "OPTIONS"])
+def api_links():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "GET":
+        conn = _db()
+        rows = conn.execute("SELECT * FROM links ORDER BY created DESC LIMIT 200").fetchall()
+        conn.close()
+        return jsonify({"status": "ok", "links": [dict(r) for r in rows]})
+    data = request.get_json() or {}
+    target = (data.get("target") or "").strip()
+    if not target:
+        return jsonify({"error": "target URL required"}), 400
+    code = (data.get("code") or "").strip() or _new_link_code()
+    conn = _db()
+    conn.execute("INSERT OR IGNORE INTO links (code, target, campaign, source, medium, clicks, created)"
+                 " VALUES (?,?,?,?,?,0,?)",
+                 (code, target, (data.get("campaign") or "").strip(), (data.get("source") or "").strip(),
+                  (data.get("medium") or "").strip(), datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    conn.commit()
+    conn.close()
+    base = request.host_url.rstrip("/")
+    return jsonify({"status": "ok", "code": code, "url": f"{base}/api/agentic/link/{code}"})
+
+
+@agentic_bp.route("/api/agentic/link/<code>")
+def api_link_redirect(code):
+    from flask import redirect as _flask_redirect
+    conn = _db()
+    row = conn.execute("SELECT * FROM links WHERE code=?", (code,)).fetchone()
+    if not row:
+        conn.close()
+        return "not found", 404
+    conn.execute("UPDATE links SET clicks = clicks + 1 WHERE code=?", (code,))
+    conn.commit()
+    conn.close()
+    target = row["target"]
+    params = []
+    if row["source"]:
+        params.append("utm_source=" + urllib.parse.quote(row["source"]))
+    if row["medium"]:
+        params.append("utm_medium=" + urllib.parse.quote(row["medium"]))
+    if row["campaign"]:
+        params.append("utm_campaign=" + urllib.parse.quote(row["campaign"]))
+    if params:
+        sep = "&" if "?" in target else "?"
+        target = target + sep + "&".join(params)
+    return _flask_redirect(target)
+
+
+# ---------------------------------------------------------------------------
+# GROWTH ENGINE (2026-08-12, G1-G4) — engagement inbox, thread studio,
+# flash posts, mix planner. All output queues ready_for_approval work items;
+# nothing publishes without the user (no AI自作主張 rule).
+# ---------------------------------------------------------------------------
+
+_REPLY_SYS = ("You write social media replies for a business. Given the post text, write 3 short reply "
+              "variants (max 240 chars each): 1) AGREE+ADD — affirm the post and add one sharp, specific "
+              "insight. 2) QUESTION — a genuine, curious question that invites the author to engage. "
+              "3) COUNTERPOINT — respectfully add a missing angle or fact. Voice: {voice}. "
+              "Plain English, human tone, no hashtags, no emoji spam. NEVER invent facts, names, numbers, "
+              "or sources not present in the post text. Output EXACTLY numbered lines:\n1. ...\n2. ...\n3. ...")
+
+_PLAN_SYS = {
+    "x": ("You write a short X post (max 280 chars) about a topic. REQUIREMENTS: hook in the first 8 words, "
+          "ONE specific fact from the topic, sharp take/opinion. Plain English, no AI-tells, no hashtag spam. "
+          "Never invent facts. Output ONLY the post."),
+    "x_thread": ("You write a long-form X post (X Premium allows up to 4000 chars). REQUIREMENTS: "
+                 "1. NO NUMBERING — a single continuous post, never '1/5' parts. 2. Sharp hook opener, "
+                 "never a date or announcement. 3. ONE specific fact from the topic. 4. Compact punchy "
+                 "rhythm, 150-400 words. 5. Closer lands the takeaway + CTA. 6. Plain English, no AI-tells, "
+                 "no hashtag spam. Never invent facts. Output ONLY the post."),
+    "linkedin": ("You write a LinkedIn post (180-260 words) about a topic: bold hook line, 3 concrete "
+                 "takeaways, a question to drive comments. Include ONE specific fact from the topic. "
+                 "Plain text, short paragraphs, no hashtag spam. Never invent facts. Output ONLY the post body."),
+    "facebook": ("You write a Facebook post (120-200 words) about a topic: friendly hook, one specific fact, "
+                 "a question to drive comments. Short paragraphs, light emoji, a few hashtags. "
+                 "Never invent facts. Output ONLY the post body."),
+    "instagram": ("You write an Instagram caption (100-180 words) about a topic: strong hook, one specific "
+                  "fact, line breaks for readability, 8-12 relevant hashtags. Never invent facts. "
+                  "Output ONLY the caption."),
+}
+
+def _parse_replies(text):
+    out = []
+    for line in (text or "").splitlines():
+        m = re.match(r"^\s*\d+[\.\)]\s*(.*)$", line)
+        if m and m.group(1).strip():
+            out.append(m.group(1).strip())
+    return out[:3]
+
+
+def _resolve_tweet_url(text):
+    """Turn an x.com/twitter.com post URL into the tweet text via fxtwitter's
+    free embed API (no X API needed). Returns None if not a URL / unfetchable."""
+    m = re.search(r"(?:twitter\.com|x\.com)/([A-Za-z0-9_]{1,15})/status/(\d+)", text or "")
+    if not m:
+        return None
+    user, tid = m.group(1), m.group(2)
+    try:
+        d, st = _http("https://api.fxtwitter.com/%s/status/%s" % (user, tid), timeout=15)
+    except Exception:
+        return None
+    if st == 200 and isinstance(d, dict):
+        tw = d.get("tweet") or {}
+        body = (tw.get("text") or "").strip()
+        if body:
+            author = (tw.get("author") or {}).get("screen_name") or user
+            return body + "\n— @" + author + " on X"
+    return None
+
+
+@agentic_bp.route("/api/agentic/reply/copilot", methods=["POST", "OPTIONS"])
+def api_reply_copilot():
+    """G1: paste any hot post text (or an x.com/twitter.com URL) -> 3 reply drafts."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    post_text = (data.get("post_text") or "").strip()
+    if not post_text:
+        return jsonify({"error": "post_text required"}), 400
+    if re.search(r"(?:twitter\.com|x\.com)/", post_text):
+        resolved = _resolve_tweet_url(post_text)
+        if resolved:
+            post_text = resolved
+        else:
+            return jsonify({"error": "could not fetch that tweet — paste the post text instead"}), 422
+    biz = _get_business(int(data["business_id"])) if data.get("business_id") else None
+    voice = (biz or {}).get("voice") or "clear, conversational, expert"
+    try:
+        text = _call_llm(f"Post text:\n{post_text[:2000]}",
+                         system_prompt=_REPLY_SYS.format(voice=voice), agent="reply", timeout=60)
+    except Exception as e:
+        return jsonify({"status": "error", "error": f"LLM failed: {str(e)[:200]}"}), 502
+    replies = _parse_replies(text) or [text[:240]]
+    wid = None
+    if biz and replies:
+        wid = _work_record(category="reply", title=f"Reply to: {post_text[:50]}",
+                           content="\n\n".join(replies)[:3000], source="reply:copilot",
+                           status="ready_for_approval", tags=f"reply,biz:{biz['id']}", project=_biz_project(biz))
+    return jsonify({"status": "ok", "replies": replies, "work_item": wid})
+
+
+@agentic_bp.route("/api/agentic/oracle/engagement/drafts", methods=["POST", "OPTIONS"])
+def api_engagement_drafts():
+    """G1: sweep the business's engagement feeds -> reply drafts for the top 3 items."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    bid = data.get("business_id")
+    feeds = _list_feeds(int(bid) if bid else None)
+    eng = [f for f in feeds if f.get("is_engagement")]
+    if not eng:
+        return jsonify({"status": "ok", "drafts": 0, "note": "no engagement feeds — mark a feed as engagement"})
+    made = 0
+    for f in eng:
+        try:
+            signals, _s = _sweep_feed_sources(f, include_repeats=True)
+        except Exception:
+            continue
+        biz = _get_business(f.get("business_id")) if f.get("business_id") else None
+        voice = (biz or {}).get("voice") or "clear, conversational, expert"
+        for sig in signals[:3]:
+            try:
+                text = _call_llm(
+                    f"Post text:\n{sig.get('title')}\n{sig.get('summary') or ''}\n{sig.get('link') or ''}",
+                    system_prompt=_REPLY_SYS.format(voice=voice), agent="reply", timeout=60)
+            except Exception:
+                continue
+            replies = _parse_replies(text) or [text[:240]]
+            _work_record(category="reply", title=f"Reply: {sig.get('title', '')[:50]}",
+                         content="\n\n".join(replies)[:3000], source="reply:engagement",
+                         status="ready_for_approval",
+                         tags=f"reply,biz:{f.get('business_id') or ''}", project=_biz_project(biz))
+            made += 1
+    return jsonify({"status": "ok", "drafts": made})
+
+
+@agentic_bp.route("/api/agentic/thread/daily", methods=["POST", "OPTIONS"])
+def api_thread_daily():
+    """G2: flagship long-form thread per business from its best recent article."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    conn = _db()
+    rows = conn.execute(
+        "SELECT * FROM work_items WHERE (category='content' OR category='article')"
+        " AND (status='approved' OR status='published' OR status='draft')"
+        " ORDER BY created_at DESC LIMIT 30").fetchall()
+    conn.close()
+    made = 0
+    for r in rows:
+        d = dict(r)
+        bid = _biz_id_of({"tags": d.get("tags") or ""})
+        if bid is None:
+            continue
+        if data.get("business_id") and str(bid) != str(data["business_id"]):
+            continue
+        conn = _db()
+        exists = conn.execute("SELECT COUNT(*) c FROM work_items WHERE category='x_thread' AND tags LIKE ?",
+                              ("%article:" + str(d["id"]) + "%",)).fetchone()["c"]
+        conn.close()
+        if exists:
+            continue
+        made += _pipeline_social_posts(d["id"], platforms=["x_thread"])
+        break  # one thread per run (first unmatched article of the business)
+    if made == 0 and data.get("business_id"):
+        # No article yet — thread from the top feed story so the button always works.
+        bid = int(data["business_id"])
+        for f in _list_feeds(bid)[:1]:
+            try:
+                signals, _s = _sweep_feed_sources(f, include_repeats=True)
+            except Exception:
+                continue
+            if not signals:
+                continue
+            sig = signals[0]
+            msg = f"TOPIC:\n{sig.get('title')}\n{sig.get('summary') or ''}\n{sig.get('link') or ''}"
+            link_code, short_url = _make_tracked_link(_get_business(bid))
+            if short_url:
+                msg += f"\n\nCTA LINK (include this exact URL in the post as the clickable link): {short_url}"
+            try:
+                content = _call_llm(msg, system_prompt=_PLAN_SYS["x_thread"], agent="plan", timeout=90)
+            except Exception:
+                content = ""
+            content = (content or "").strip()
+            if content:
+                wid = _work_record(category="x_thread", title=f"🧵 {sig.get('title', '')[:52]}",
+                                   content=content[:3000], source="oracle:thread", status="ready_for_approval",
+                                   tags=f"social,platform:x_thread,thread,biz:{bid}", project=_biz_project(_get_business(bid)))
+                if wid and link_code:
+                    _pipeline_update(wid, link_code=link_code)
+                made += 1
+            break
+    return jsonify({"status": "ok", "threads": made})
+
+
+def _biz_project(biz):
+    """work_items.project slug for a business — matches the pipeline project
+    filter (same slugify as _biz_for_project: lowercase alnum of the name)."""
+    if not biz:
+        return "appvault"
+    return re.sub(r"[^a-z0-9]", "", (biz.get("name") or "").lower()) or "appvault"
+
+
+def _make_tracked_link(biz):
+    """Create a tracked short link for a business post (B3). Returns
+    (code, short_url) or ('', '') when no public base / no target configured."""
+    if not biz:
+        return "", ""
+    target = (biz.get("website") or "").strip()
+    if not target:
+        return "", ""
+    pub_base = ((_social_router_cfg("appvault") or {}).get("media_base_url") or "").strip().rstrip("/")
+    if not pub_base:
+        return "", ""
+    code = _new_link_code()
+    try:
+        conn = _db()
+        conn.execute("INSERT OR IGNORE INTO links (code, target, campaign, source, medium, clicks, created)"
+                     " VALUES (?,?,?,?,?,0,?)",
+                     (code, target, biz.get("name") or "", "social", "social",
+                      datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        conn.commit()
+        conn.close()
+        return code, pub_base + "/api/agentic/link/" + code
+    except Exception:
+        return "", ""
+
+
+def _flash_from_signal(feed, sig, biz):
+    sys_p = ("You write a hot-take X post (max 280 chars) about a breaking item. REQUIREMENTS: "
+             "hook in the first 8 words, ONE specific fact from the item, sharp opinion/angle, "
+             "plain English, no AI-tells, no hashtag spam, no emoji spam. Ground ONLY in the item below "
+             "— never invent facts, names, numbers, or sources. Output ONLY the post.")
+    msg = f"BREAKING ITEM:\n{sig.get('title')}\n{sig.get('summary') or ''}\n{sig.get('link') or ''}"
+    link_code, short_url = _make_tracked_link(biz)
+    if short_url:
+        msg += f"\n\nCTA LINK (include this exact URL in the post as the clickable link): {short_url}"
+    try:
+        text = _call_llm(msg, system_prompt=sys_p, agent="flash", timeout=60)
+    except Exception:
+        return None
+    text = (text or "").strip()
+    if len(text) < 20:
+        return None
+    if len(text) > 280:
+        text = text[:280]
+    wid = _work_record(category="x", title=f"⚡ {sig.get('title', '')[:56]}", content=text,
+                       source="oracle:flash", status="ready_for_approval",
+                       tags=f"social,platform:x,flash,biz:{feed.get('business_id') or ''}",
+                       project=_biz_project(biz))
+    if wid and link_code:
+        _pipeline_update(wid, link_code=link_code)
+    return wid
+
+
+@agentic_bp.route("/api/agentic/oracle/watch", methods=["GET", "OPTIONS"])
+def api_oracle_watch():
+    """X Watch (2026-08-12): RAW reader view of a business's followed creators'
+    latest tweets (nitter RSS, no X API). Deliberately skips the news-scoring /
+    repeat-filtering pipeline — this is a feed reader, not a news filter, so a
+    tweet stays visible across refreshes. Returns full post text."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    biz = request.args.get("business_id")
+    feeds = _list_feeds(int(biz) if biz else None)
+    out = []
+    for f in feeds:
+        xw = f.get("x_watch") or []
+        if not xw:
+            continue
+        for url in f.get("rss_urls") or []:
+            if "nitter" not in url:
+                continue
+            try:
+                items = _parse_rss(_fetch_feed(url))
+            except Exception:
+                continue
+            if items:
+                handle = url.rstrip("/").split("/")[-2] if "/" in url.rstrip("/") else (xw[0] or "")
+                for it in items[:15]:
+                    title = it.get("title") or ""
+                    summary = it.get("summary") or ""
+                    text = title if len(title) >= len(summary) else summary
+                    link = it.get("link") or ""
+                    # nitter mirrors are read-only — surface the REAL x.com tweet
+                    # so "open original" opens where the user can actually reply.
+                    m = re.search(r"(?:nitter\.[a-z0-9.\-]+)/([A-Za-z0-9_]{1,15})/status/(\d+)", link)
+                    if m:
+                        link = "https://x.com/%s/status/%s" % (m.group(1), m.group(2))
+                    out.append({"title": title[:200], "text": text[:2000],
+                                "link": link, "handle": handle,
+                                "feed": f["name"]})
+                break  # one working mirror per feed is enough (self-healing)
+    seen, uniq = set(), []
+    for t in out:
+        if t["link"] and t["link"] not in seen:
+            seen.add(t["link"])
+            uniq.append(t)
+    conn = _db()
+    archived = set(r["link"] for r in conn.execute("SELECT link FROM x_archived").fetchall())
+    conn.close()
+    show_archived = request.args.get("archived") == "1"
+    if show_archived:
+        uniq = [t for t in uniq if t["link"] in archived]
+    else:
+        uniq = [t for t in uniq if t["link"] not in archived]
+    return jsonify({"status": "ok", "tweets": uniq[:25], "archived_count": len(archived)})
+
+
+@agentic_bp.route("/api/agentic/oracle/watch/archive", methods=["POST", "OPTIONS"])
+def api_oracle_watch_archive():
+    """Mark processed tweets as archived so they stop cluttering the X Watch."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    links = data.get("links") or ([data["link"]] if data.get("link") else [])
+    links = [str(l) for l in links if l]
+    if not links:
+        return jsonify({"error": "link(s) required"}), 400
+    conn = _db()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    for l in links:
+        conn.execute("INSERT OR IGNORE INTO x_archived (link, business_id, archived_at) VALUES (?,?,?)",
+                     (l, data.get("business_id"), now))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok", "archived": len(links)})
+
+
+@agentic_bp.route("/api/agentic/oracle/watch/unarchive", methods=["POST", "OPTIONS"])
+def api_oracle_watch_unarchive():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    link = str(data.get("link") or "").strip()
+    if not link:
+        return jsonify({"error": "link required"}), 400
+    conn = _db()
+    conn.execute("DELETE FROM x_archived WHERE link=?", (link,))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok"})
+
+
+@agentic_bp.route("/api/agentic/oracle/flash", methods=["POST", "OPTIONS"])
+def api_oracle_flash():
+    """G3: hot-take post from the top signal above the feed's flash threshold."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    feed = _get_feed(int(data["feed_id"])) if data.get("feed_id") is not None else None
+    if not feed:
+        return jsonify({"error": "feed_id required"}), 400
+    signals, _s = _sweep_feed_sources(feed, include_repeats=True)
+    biz = _get_business(feed.get("business_id")) if feed.get("business_id") else None
+    made = 0
+    sigs = signals[:3]
+    if not sigs:
+        return jsonify({"status": "ok", "flash_posts": 0, "feed": feed["name"]})
+    # An explicit click always flashes the top story — repeat-discounting
+    # (scores collapse to 0 on re-sweeps) must not starve the button.
+    if _flash_from_signal(feed, sigs[0], biz):
+        made += 1
+    thr = int(feed.get("flash_threshold") or 30)
+    for sig in sigs[1:3]:
+        if int(sig.get("score") or 0) >= thr:
+            if _flash_from_signal(feed, sig, biz):
+                made += 1
+    return jsonify({"status": "ok", "flash_posts": made, "feed": feed["name"]})
+
+
+@agentic_bp.route("/api/agentic/calendar/plan", methods=["POST", "OPTIONS"])
+def api_calendar_plan():
+    """G4: fill the gap between daily_target and what's already scheduled for a day
+    with a format mix (takes + thread + commentary) generated from fresh signals."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    bid = int(data.get("business_id") or 0)
+    biz = _get_business(bid) if bid else None
+    if not biz:
+        return jsonify({"error": "business_id required"}), 400
+    day = (data.get("day") or "").strip()
+    if not day:
+        day = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+    target = int(biz.get("daily_target") or 8)
+    conn = _db()
+    scheduled = conn.execute("SELECT COUNT(*) c FROM work_items WHERE scheduled_at LIKE ? AND tags LIKE ?",
+                             (day + "%", "%biz:" + str(bid) + "%")).fetchone()["c"]
+    conn.close()
+    gap = max(0, target - scheduled)
+    made = 0
+    if gap > 0:
+        signals = []
+        for f in _list_feeds(bid)[:2]:
+            try:
+                sigs, _s = _sweep_feed_sources(f, include_repeats=True)
+                signals.extend(sigs[:4])
+            except Exception:
+                continue
+        seen, uniq = set(), []
+        for s in signals:
+            t = s.get("title", "")
+            if t and t not in seen:
+                seen.add(t)
+                uniq.append(s)
+        uniq.sort(key=lambda s: -int(s.get("score") or 0))
+        mix = ["x", "x", "linkedin", "x", "x_thread", "x", "facebook", "x", "instagram", "x"]
+        for i in range(gap):
+            if not uniq:
+                break
+            platform = mix[i % len(mix)]
+            sig = uniq[i % len(uniq)]
+            hour, minute = 9 + (i * 90) // 60, (i * 90) % 60
+            when = f"{day} {hour:02d}:{minute:02d}"
+            msg = f"TOPIC:\n{sig.get('title')}\n{sig.get('summary') or ''}\n{sig.get('link') or ''}"
+            link_code, short_url = _make_tracked_link(biz)
+            if short_url:
+                msg += f"\n\nCTA LINK (include this exact URL in the post as the clickable link): {short_url}"
+            try:
+                content = _call_llm(msg, system_prompt=_PLAN_SYS.get(platform, _PLAN_SYS["x"]), agent="plan", timeout=60)
+            except Exception:
+                continue
+            content = (content or "").strip()
+            if not content:
+                continue
+            if platform == "x" and len(content) > 280:
+                content = content[:280]
+            wid = _work_record(category=platform, title=f"{sig.get('title', '')[:56]} — {platform}",
+                               content=content[:3000], source="oracle:plan", status="ready_for_approval",
+                               tags=f"social,platform:{platform},plan,biz:{bid}", project=_biz_project(biz))
+            if wid:
+                _pipeline_update(wid, scheduled_at=when)
+                if link_code:
+                    _pipeline_update(wid, link_code=link_code)
+            made += 1
+    return jsonify({"status": "ok", "business": biz["name"], "target": target,
+                    "scheduled": scheduled, "gap": gap, "planned": made})
