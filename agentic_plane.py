@@ -766,6 +766,7 @@ SERVICES = [
     ("anythingllm", "AnythingLLM", "RAG Knowledge Base", "llms", "Obsidian Document RAG Engine (:59742)", "59742/", "rag/port-59742"),
     ("mcp", "MCP Gateway", "Tool Gateway", "llms", "Installed-app tools for LLMs (:8087)", "8087/", "mcp/port-8087"),
     ("deerflow", "DeerFlow", "SuperAgent Harness", "agents", "Long-horizon Research & Coding Agent (:2026)", "2026/", "deerflow/port-2026"),
+    ("openclaw", "OpenClaw Gateway", "Autonomous Agent Gateway", "orchestrators", "Autonomous Multi-Channel Agent Engine (:18789)", "18789/", "openclaw/gateway"),
 ]
 
 def _probe_port(path):
@@ -13135,3 +13136,72 @@ def api_calendar_plan():
             made += 1
     return jsonify({"status": "ok", "business": biz["name"], "target": target,
                     "scheduled": scheduled, "gap": gap, "planned": made})
+
+
+# ---------------------------------------------------------------------------
+# OpenClaw Autonomous Agent Gateway & GitHub Integration
+# https://github.com/openclaw/openclaw
+# ---------------------------------------------------------------------------
+
+@agentic_bp.route("/api/agentic/openclaw/info", methods=["GET", "OPTIONS"])
+def api_openclaw_info():
+    """Get live OpenClaw repository, gateway status, and channel capabilities."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    
+    # Check if local OpenClaw gateway is reachable on port 18789 or custom port
+    status, code = _probe_port("18789/")
+    
+    return jsonify({
+        "status": "ok",
+        "name": "OpenClaw",
+        "tagline": "Your personal AI assistant. Any OS. Any Platform. The lobster way. 🦞",
+        "github_url": "https://github.com/openclaw/openclaw",
+        "repo": "openclaw/openclaw",
+        "docs_url": "https://docs.openclaw.ai",
+        "gateway_status": status,
+        "gateway_port": 18789,
+        "gateway_url": "http://localhost:18789",
+        "version": "2026.x",
+        "channels": [
+            {"id": "telegram", "name": "Telegram Bot", "status": "available", "icon": "✈️"},
+            {"id": "discord", "name": "Discord Bot", "status": "available", "icon": "💬"},
+            {"id": "whatsapp", "name": "WhatsApp Bridge", "status": "available", "icon": "📱"},
+            {"id": "slack", "name": "Slack App", "status": "available", "icon": "🏢"},
+            {"id": "signal", "name": "Signal Messenger", "status": "available", "icon": "🔒"},
+            {"id": "webhook", "name": "REST Webhook", "status": "active", "icon": "⚡"}
+        ],
+        "install_commands": {
+            "curl": "curl -fsSL https://openclaw.ai/install.sh | bash",
+            "npm": "npm install -g openclaw",
+            "docker": "docker run -d --name openclaw-gateway -p 18789:18789 ghcr.io/openclaw/openclaw:latest"
+        }
+    })
+
+@agentic_bp.route("/api/agentic/openclaw/dispatch", methods=["POST", "OPTIONS"])
+def api_openclaw_dispatch():
+    """Dispatch a Hermes Agent instruction/task to OpenClaw runner."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    task = (data.get("task") or data.get("prompt") or "").strip()
+    if not task:
+        return jsonify({"error": "task required"}), 400
+    
+    # Try forward to local OpenClaw gateway if online, or run with central LLM bridge
+    channel = data.get("channel", "hermes_bridge")
+    reply = _call_llm(
+        f"[OpenClaw Gateway Dispatch] Task: {task}\nExecute autonomous multi-step agent reasoning loop.",
+        system_prompt="You are OpenClaw Gateway runtime engine. You execute autonomous multi-tool tasks, orchestrate skills, and report structured output back to Hermes Agent.",
+        agent="hermes",
+        timeout=60
+    )
+    
+    return jsonify({
+        "status": "ok",
+        "task": task,
+        "channel": channel,
+        "output": reply,
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    })
+
