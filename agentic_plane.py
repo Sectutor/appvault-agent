@@ -660,9 +660,6 @@ def _call_llm_with(overrides, user_msg, system_prompt=None, agent="hermes", time
         "goose": "Goose Developer Agent (Block)",
         "deepseek-harness": "DeepSeek Harness Reasoning Engine",
         "deerflow": "DeerFlow Super-Agent",
-        "claude": "Claude Architect",
-        "antigravity": "Antigravity Builder",
-        "codex": "Codex Synthesizer",
     }
     agent_display = agent_names.get((agent or "hermes").lower(), f"{str(agent).capitalize()} Agent")
     agent_guard = f"=== YOUR STRICT IDENTITY ===\nYou are {agent_display}. Your name is {agent_display}. You must speak and act strictly as {agent_display}. Do NOT adopt the name or persona of OpenClaw or any other agent.\n=== END IDENTITY DIRECTIVE ===\n\n"
@@ -9969,9 +9966,6 @@ def _call_llm_stream(user_msg, system_prompt=None, agent="hermes", timeout=120):
         "goose": "Goose Developer Agent (Block)",
         "deepseek-harness": "DeepSeek Harness Reasoning Engine",
         "deerflow": "DeerFlow Super-Agent",
-        "claude": "Claude Architect",
-        "antigravity": "Antigravity Builder",
-        "codex": "Codex Synthesizer",
     }
     agent_display = agent_names.get((agent or "hermes").lower(), f"{str(agent).capitalize()} Agent")
     agent_guard = f"=== YOUR STRICT IDENTITY ===\nYou are {agent_display}. Your name is {agent_display}. You must speak and act strictly as {agent_display}. Do NOT adopt the name or persona of OpenClaw or any other agent.\n=== END IDENTITY DIRECTIVE ===\n\n"
