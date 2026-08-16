@@ -325,6 +325,9 @@ AGENT_PROMPTS = {
     "goose": "You are Goose (Block/aaif-goose), an autonomous open-source AI developer agent designed "
              "to automate complex software engineering tasks, inspect codebases, execute terminal tools, "
              "and generate production-ready implementations with precision.",
+    "buzz": "You are Buzz Workspace Coordinator, an autonomous multi-agent and human collaboration harness (block/buzz). "
+            "You operate on self-hosted Nostr relays where humans, Hermes, Goose, and autonomous processes share rooms, "
+            "review approvals, dispatch ACP agent tasks, and maintain a cryptographically signed audit trail.",
     "deepseek-harness": "You are DeepSeek Harness, an elite autonomous reasoning and agent evaluation engine "
                         "powered by DeepSeek-V3 / DeepSeek-R1. You specialize in complex logic chains, "
                         "rigorous algorithm verification, and deep architecture synthesis.",
@@ -657,6 +660,7 @@ def _call_llm_with(overrides, user_msg, system_prompt=None, agent="hermes", time
     agent_names = {
         "hermes": "Hermes Agent",
         "openclaw": "OpenClaw Autonomous Agent",
+        "buzz": "Buzz Workspace Coordinator (Block)",
         "goose": "Goose Developer Agent (Block)",
         "deepseek-harness": "DeepSeek Harness Reasoning Engine",
         "deerflow": "DeerFlow Super-Agent",
@@ -1705,12 +1709,10 @@ def _get_conversation(agent_id, thread_id="main"):
     greetings = {
         "openclaw": "🦞 **Greetings! I am OpenClaw**, your personal autonomous AI assistant. Ask me anything, assign multi-step coding or research tasks, or configure your API key anytime.",
         "hermes": "🤖 **Hermes Agent online.** 24/7 continuous watcher, signal radar, and tool sandbox ready.",
+        "buzz": "🐝 **Greetings! I am Buzz Workspace Coordinator** (Block). Ready to coordinate collaborative agent channels, Nostr relays, ACP workflows, and team huddles.",
         "goose": "🪿 **Greetings! I am Goose**, your autonomous open-source developer agent (aaif-goose/goose). Tell me what feature to build, debug, test, or refactor.",
         "deepseek-harness": "🐋 **DeepSeek Harness online.** Powered by DeepSeek reasoning models (R1/V3). Ready for high-precision logic verification, complex architectural analysis, and benchmark evaluation.",
-        "deerflow": "🦌 **DeerFlow Super-Agent online.** Ready for long-horizon autonomous tasks, sandbox execution, and deep multi-step workflows.",
-        "claude": "🧠 **Claude Architect online.** Deep reasoning, systems analysis, and architectural design ready.",
-        "antigravity": "⚡ **Antigravity Builder online.** Full-stack development, agentic workflows, and code synthesis ready.",
-        "codex": "💻 **Codex Synthesizer online.** Code synthesis, refactoring, and spec generation ready."
+        "deerflow": "🦌 **DeerFlow Super-Agent online.** Ready for long-horizon autonomous tasks, sandbox execution, and deep multi-step workflows."
     }
     agent_name = "Hermes Agent" if agent_id == "hermes" else f"{agent_id.capitalize()} Agent"
     default_text = greetings.get(agent_id.lower(), f"Agent **{agent_id.capitalize()}** online. Ready for tasks.")
@@ -3414,6 +3416,10 @@ def _init_compounding_tables():
             conn.execute("ALTER TABLE work_items ADD COLUMN scheduled_at TEXT")
         if "link_code" not in cols:
             conn.execute("ALTER TABLE work_items ADD COLUMN link_code TEXT")
+        if "attempts" not in cols:
+            conn.execute("ALTER TABLE work_items ADD COLUMN attempts INTEGER DEFAULT 0")
+        if "last_error" not in cols:
+            conn.execute("ALTER TABLE work_items ADD COLUMN last_error TEXT DEFAULT ''")
         # project/research used to be added lazily by _projects_ensure() — a
         # timing bomb for fresh installs (any _work_record before the first
         # pipeline call silently failed). Now part of the import-time schema.
@@ -6695,7 +6701,7 @@ def _public_media_url(image_path, project="appvault"):
 
 def _wp_publish(title, content, status="publish", project=None):
     """Create a WordPress post via the REST API. Returns (ok, result)."""
-    cfg = _project_cfg(project or "appvault", "wp_tool") if project else _wp_config()
+    cfg = _wp_config_for(project or "appvault")
     site = (cfg.get("site_url") or "").strip().rstrip("/")
     if not site:
         return False, "not configured — add site URL in 🛡️ Gov → WordPress Publisher"
@@ -7539,12 +7545,10 @@ def _get_conversation(agent_id, thread_id="main"):
     greetings = {
         "openclaw": "🦞 **Greetings! I am OpenClaw**, your personal autonomous AI assistant. Ask me anything, assign multi-step coding or research tasks, or configure your API key anytime.",
         "hermes": "🤖 **Hermes Agent online.** 24/7 continuous watcher, signal radar, and tool sandbox ready.",
+        "buzz": "🐝 **Greetings! I am Buzz Workspace Coordinator** (Block). Ready to coordinate collaborative agent channels, Nostr relays, ACP workflows, and team huddles.",
         "goose": "🪿 **Greetings! I am Goose**, your autonomous open-source developer agent (aaif-goose/goose). Tell me what feature to build, debug, test, or refactor.",
         "deepseek-harness": "🐋 **DeepSeek Harness online.** Powered by DeepSeek reasoning models (R1/V3). Ready for high-precision logic verification, complex architectural analysis, and benchmark evaluation.",
-        "deerflow": "🦌 **DeerFlow Super-Agent online.** Ready for long-horizon autonomous tasks, sandbox execution, and deep multi-step workflows.",
-        "claude": "🧠 **Claude Architect online.** Deep reasoning, systems analysis, and architectural design ready.",
-        "antigravity": "⚡ **Antigravity Builder online.** Full-stack development, agentic workflows, and code synthesis ready.",
-        "codex": "💻 **Codex Synthesizer online.** Code synthesis, refactoring, and spec generation ready."
+        "deerflow": "🦌 **DeerFlow Super-Agent online.** Ready for long-horizon autonomous tasks, sandbox execution, and deep multi-step workflows."
     }
     agent_name = "Hermes Agent" if agent_id == "hermes" else f"{agent_id.capitalize()} Agent"
     default_text = greetings.get(agent_id.lower(), f"Agent **{agent_id.capitalize()}** online. Ready for tasks.")
@@ -9963,6 +9967,7 @@ def _call_llm_stream(user_msg, system_prompt=None, agent="hermes", timeout=120):
     agent_names = {
         "hermes": "Hermes Agent",
         "openclaw": "OpenClaw Autonomous Agent",
+        "buzz": "Buzz Workspace Coordinator (Block)",
         "goose": "Goose Developer Agent (Block)",
         "deepseek-harness": "DeepSeek Harness Reasoning Engine",
         "deerflow": "DeerFlow Super-Agent",
@@ -11201,28 +11206,59 @@ code{{background:#0f172a;border-radius:4px;padding:1px 6px;color:#7dd3fc;font-si
 </div></body></html>"""
     return Response(page, mimetype="text/html")
 
+_PIPELINE_MAX_ATTEMPTS = 3
+
 def _pipeline_worker():
-    """Auto-advance: brief -> draft -> refine; approved -> publish (auto gate)."""
+    """Auto-advance: brief -> draft -> refine; approved -> publish (auto gate).
+
+    Failure handling: a failed stage attempt increments work_items.attempts and
+    stores the error in last_error; after 3 attempts the item moves to the
+    terminal 'failed' status (bus event + log) instead of being retried every
+    45s forever, invisibly burning LLM tokens. Only articles (content/article
+    categories) pass the auto gate — social posts publish via the /schedule
+    endpoint, proposals/outreach/replies are human-owned."""
     while True:
         try:
             if _pipeline_cfg().get("auto"):
                 conn = _db()
                 rows = conn.execute(
-                    "SELECT id, status, source FROM work_items "
+                    "SELECT id, status, source, category, attempts FROM work_items "
                     "WHERE status IN ('ready_to_write','needs_refinement','approved')").fetchall()
                 conn.close()
                 for r in rows:
                     if not (r["source"] or "").startswith("pipeline"):
                         continue
+                    if (r["category"] or "") not in ("content", "article"):
+                        continue
+                    stage = {"ready_to_write": _pipeline_draft,
+                             "needs_refinement": _pipeline_refine,
+                             "approved": _pipeline_publish}.get(r["status"])
+                    if not stage:
+                        continue
                     try:
-                        if r["status"] == "ready_to_write":
-                            _pipeline_draft(r["id"])
-                        elif r["status"] == "needs_refinement":
-                            _pipeline_refine(r["id"])
-                        elif r["status"] == "approved":
-                            _pipeline_publish(r["id"])
-                    except Exception:
-                        pass
+                        item, err = stage(r["id"])
+                        if item is None:
+                            raise Exception(str(err or "stage returned no result")[:300])
+                        if (r["attempts"] or 0):
+                            _pipeline_update(r["id"], attempts=0, last_error="")
+                    except Exception as e:
+                        try:
+                            attempts = (r["attempts"] or 0) + 1
+                            if attempts >= _PIPELINE_MAX_ATTEMPTS:
+                                _pipeline_update(r["id"], status="failed", attempts=attempts,
+                                                 last_error=str(e)[:500])
+                                _bus_publish("pipeline.item.failed",
+                                             {"wid": r["id"], "status": r["status"],
+                                              "error": str(e)[:200]})
+                                print(f"[pipeline] item {r['id']} FAILED after {attempts} "
+                                      f"attempts ({r['status']}): {str(e)[:150]}", flush=True)
+                            else:
+                                _pipeline_update(r["id"], attempts=attempts, last_error=str(e)[:500])
+                                print(f"[pipeline] item {r['id']} attempt {attempts}/"
+                                      f"{_PIPELINE_MAX_ATTEMPTS} failed ({r['status']}): "
+                                      f"{str(e)[:150]}", flush=True)
+                        except Exception:
+                            pass
         except Exception:
             pass
         time.sleep(45)
@@ -11252,6 +11288,14 @@ def _projects_ensure():
         pass
     try:
         conn.execute("ALTER TABLE work_items ADD COLUMN research TEXT DEFAULT ''")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE work_items ADD COLUMN attempts INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE work_items ADD COLUMN last_error TEXT DEFAULT ''")
     except Exception:
         pass
     conn.execute("CREATE TABLE IF NOT EXISTS projects "
@@ -11314,28 +11358,34 @@ def _project_from(data_or_args, default="appvault"):
         pass
     return v or default
 
-def _pipeline_signal_consumed(key):
+def _pipeline_signal_consumed(key, project="appvault"):
+    """Keys are stored prefixed with the project so each business/project gets
+    its own variety budget — a signal briefed for AppVault is still fresh for
+    CISOvault. Legacy unprefixed rows simply never match (each project may
+    re-brief one previously used signal, once)."""
     try:
         conn = _db()
         conn.execute("CREATE TABLE IF NOT EXISTS pipeline_signals (sig_id TEXT PRIMARY KEY, title TEXT, used_at TEXT)")
-        row = conn.execute("SELECT 1 FROM pipeline_signals WHERE sig_id=?", (key,)).fetchone()
+        row = conn.execute("SELECT 1 FROM pipeline_signals WHERE sig_id=?",
+                           (project + "|" + key,)).fetchone()
         conn.close()
         return bool(row)
     except Exception:
         return False
 
-def _pipeline_mark_consumed(key, title=""):
+def _pipeline_mark_consumed(key, title="", project="appvault"):
     try:
         conn = _db()
         conn.execute("CREATE TABLE IF NOT EXISTS pipeline_signals (sig_id TEXT PRIMARY KEY, title TEXT, used_at TEXT)")
         conn.execute("INSERT OR IGNORE INTO pipeline_signals (sig_id, title, used_at) VALUES (?,?,?)",
-                     (key, (title or "")[:200], datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                     (project + "|" + key, (title or "")[:200],
+                      datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
         conn.commit()
         conn.close()
     except Exception:
         pass
 
-def _pipeline_next_signal():
+def _pipeline_next_signal(project="appvault"):
     """Next UNCONSUMED signal — variety by construction:
     1) fresh sweep, first story whose title isn't used (diverse topics),
     2) then radar report files (vault 03_Signals/Signal_sig-*.md) newest-first
@@ -11347,7 +11397,7 @@ def _pipeline_next_signal():
             if not title:
                 continue
             key = "title:" + re.sub(r"\s+", " ", title.lower())[:120]
-            if _pipeline_signal_consumed(key):
+            if _pipeline_signal_consumed(key, project):
                 continue
             return (title + " — " + (story.get("summary") or ""))[:3000], key, title
     except Exception:
@@ -11359,7 +11409,7 @@ def _pipeline_next_signal():
                            if n.startswith("Signal_sig-") and n.endswith(".md"))
             for name in reversed(files):  # newest first
                 key = "file:" + name
-                if _pipeline_signal_consumed(key):
+                if _pipeline_signal_consumed(key, project):
                     continue
                 try:
                     with open(os.path.join(sig_dir, name), encoding="utf-8") as f:
@@ -11461,26 +11511,26 @@ def api_pipeline_brief():
         return jsonify({"status": "ok"})
     _pipeline_ensure()
     data = request.get_json() or {}
+    project = _project_from(data, "appvault")
     signal = (data.get("signal") or "").strip()
     source_key = (data.get("signal_key") or "").strip() or None
     signal_label = ""
     if not signal:
-        signal, source_key, signal_label = _pipeline_next_signal()
+        signal, source_key, signal_label = _pipeline_next_signal(project)
         if not signal:
             return jsonify({"error": "no fresh signal — every radar report and recent sweep story has been used. Try again after the next radar sweep (or pass a signal explicitly)."}), 400
     else:
         signal_label = signal[:80]
         source_key = source_key or ("manual:" + signal[:80])
-    project = _project_from(data, "appvault")
     # Idempotency: an explicit signal_key that was already briefed must not
     # create a duplicate work item (covers double-clicks, retries, multi-user).
-    if source_key and _pipeline_signal_consumed(source_key):
+    if source_key and _pipeline_signal_consumed(source_key, project):
         return jsonify({"status": "ok", "dup": True, "wid": None,
                         "message": "This story already has a brief in the pipeline — check the Approval Queue."}), 200
     wid, brief = _pipeline_brief_from_signal(signal, data.get("source") or "manual",
                                              project=project)
     if wid and source_key:
-        _pipeline_mark_consumed(source_key, signal_label)
+        _pipeline_mark_consumed(source_key, signal_label, project)
         _pipeline_update(wid, project=project)
     return jsonify({"status": "ok", "wid": wid, "brief": brief, "signal": signal[:300],
                     "signal_label": signal_label, "project": project})
@@ -11609,7 +11659,7 @@ def api_pipeline_brainstorm():
     signal = (data.get("signal") or "").strip()
     source_key, signal_label = None, ""
     if not signal:
-        signal, source_key, signal_label = _pipeline_next_signal()
+        signal, source_key, signal_label = _pipeline_next_signal(project)
         if not signal:
             return jsonify({"error": "no fresh signal — every radar report and recent sweep story has been used. Try again after the next radar sweep."}), 400
     else:
@@ -11633,7 +11683,7 @@ def api_pipeline_brainstorm():
                        tags=f"brainstorm,project:{project}", project=project,
                        url=f"signal:{signal[:500]}")
     if wid and source_key:
-        _pipeline_mark_consumed(source_key, signal_label)
+        _pipeline_mark_consumed(source_key, signal_label, project)
     _bus_publish("pipeline.brainstorm.ready", {"wid": wid, "project": project, "ideas": len(ideas)})
     return jsonify({"status": "ok", "wid": wid, "ideas": ideas,
                     "signal": signal[:200], "signal_label": signal_label, "project": project})
@@ -12774,7 +12824,9 @@ def api_pipeline_item(wid):
     if data.get("title") is not None:
         fields["title"] = str(data["title"])[:4000]
     if data.get("content") is not None:
-        fields["content"] = str(data["content"])[:4000]
+        # Articles run 5-9K chars; the old 4000 cap silently truncated the
+        # humanize-before-posting edit (published a stump).
+        fields["content"] = str(data["content"])[:200000]
     if not fields:
         return jsonify({"error": "nothing to update (title/content)"}), 400
     it = _pipeline_update(wid, **fields)
@@ -12998,8 +13050,12 @@ def api_thread_daily():
         if data.get("business_id") and str(bid) != str(data["business_id"]):
             continue
         conn = _db()
-        exists = conn.execute("SELECT COUNT(*) c FROM work_items WHERE category='x_thread' AND tags LIKE ?",
-                              ("%article:" + str(d["id"]) + "%",)).fetchone()["c"]
+        # Exact comma-token match: '%article:5%' also matched article:55,
+        # silently skipping threads for prefix-colliding article ids.
+        exists = conn.execute(
+            "SELECT COUNT(*) c FROM work_items WHERE category='x_thread' "
+            "AND ',' || REPLACE(tags, ' ', '') || ',' LIKE ?",
+            ("%,article:" + str(d["id"]) + ",%",)).fetchone()["c"]
         conn.close()
         if exists:
             continue
