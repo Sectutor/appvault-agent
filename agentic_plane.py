@@ -653,7 +653,20 @@ def _call_llm_with(overrides, user_msg, system_prompt=None, agent="hermes", time
     api_key = ((pkeys.get(provider) or cfg.get("api_key")) or "").strip()
     api_base = (cfg.get("api_base") or "").strip()
     temp = cfg.get("temperature", 0.7)
-    sys_prompt = system_prompt or cfg.get("system_prompt") or _get_agent_prompt(agent)
+    agent_base_prompt = _get_agent_prompt(agent)
+    agent_names = {
+        "hermes": "Hermes Agent",
+        "openclaw": "OpenClaw Autonomous Agent",
+        "goose": "Goose Developer Agent (Block)",
+        "deepseek-harness": "DeepSeek Harness Reasoning Engine",
+        "deerflow": "DeerFlow Super-Agent",
+        "claude": "Claude Architect",
+        "antigravity": "Antigravity Builder",
+        "codex": "Codex Synthesizer",
+    }
+    agent_display = agent_names.get((agent or "hermes").lower(), f"{str(agent).capitalize()} Agent")
+    agent_guard = f"=== YOUR STRICT IDENTITY ===\nYou are {agent_display}. Your name is {agent_display}. You must speak and act strictly as {agent_display}. Do NOT adopt the name or persona of OpenClaw or any other agent.\n=== END IDENTITY DIRECTIVE ===\n\n"
+    sys_prompt = agent_guard + (system_prompt or agent_base_prompt or cfg.get("system_prompt") or DEFAULT_LLM_CONFIG["system_prompt"])
     last_err = None
 
     # DeepSeek / OpenAI-compatible — skip entirely if no API key configured
@@ -1680,13 +1693,32 @@ def api_crew():
         "message": "Crew executed with real per-role LLM calls. Results above.",
     })
 
-def _get_conversation(agent_id):
+def _get_conversation(agent_id, thread_id="main"):
     conn = _db()
     row = conn.execute("SELECT messages FROM conversations WHERE agent_id=?", (agent_id,)).fetchone()
     conn.close()
-    return json.loads(row["messages"]) if row else [
-        {"sender": f"{agent_id.capitalize()} Agent", "role": "agent",
-         "timestamp": "NOW", "text": f"Agent **{agent_id.capitalize()}** online. Connected to the Agentic OS control plane."}
+    if row and row["messages"]:
+        try:
+            msgs = json.loads(row["messages"])
+            if msgs:
+                return msgs
+        except Exception:
+            pass
+
+    greetings = {
+        "openclaw": "🦞 **Greetings! I am OpenClaw**, your personal autonomous AI assistant. Ask me anything, assign multi-step coding or research tasks, or configure your API key anytime.",
+        "hermes": "🤖 **Hermes Agent online.** 24/7 continuous watcher, signal radar, and tool sandbox ready.",
+        "goose": "🪿 **Greetings! I am Goose**, your autonomous open-source developer agent (aaif-goose/goose). Tell me what feature to build, debug, test, or refactor.",
+        "deepseek-harness": "🐋 **DeepSeek Harness online.** Powered by DeepSeek reasoning models (R1/V3). Ready for high-precision logic verification, complex architectural analysis, and benchmark evaluation.",
+        "deerflow": "🦌 **DeerFlow Super-Agent online.** Ready for long-horizon autonomous tasks, sandbox execution, and deep multi-step workflows.",
+        "claude": "🧠 **Claude Architect online.** Deep reasoning, systems analysis, and architectural design ready.",
+        "antigravity": "⚡ **Antigravity Builder online.** Full-stack development, agentic workflows, and code synthesis ready.",
+        "codex": "💻 **Codex Synthesizer online.** Code synthesis, refactoring, and spec generation ready."
+    }
+    agent_name = "Hermes Agent" if agent_id == "hermes" else f"{agent_id.capitalize()} Agent"
+    default_text = greetings.get(agent_id.lower(), f"Agent **{agent_id.capitalize()}** online. Ready for tasks.")
+    return [
+        {"sender": agent_name, "role": "agent", "timestamp": "NOW", "text": default_text}
     ]
 
 def _save_conversation(agent_id, messages):
@@ -3455,9 +3487,9 @@ def _identity_block():
         lines.append("- Active goals:\n" + goals)
     if not lines:
         return ""
-    return ("\n\n===== WHO YOU ARE (user identity profile — use it to personalize "
-            "every answer; never guess) =====\n" + "\n".join(lines) +
-            "\n===== END IDENTITY =====\n")
+    return ("\n\n===== USER / OPERATOR PROFILE (Information about the user you are assisting — use it to tailor responses to their audience and brand) =====\n" +
+            "\n".join(lines) +
+            "\n===== END USER PROFILE =====\n")
 
 
 def _mirror_profile_to_vault(prof):
@@ -5373,10 +5405,10 @@ def api_capture():
 # and crew/oracle go through _call_llm_with, so one hook covers them all).
 # ---------------------------------------------------------------------------
 def _inject_compounding_context(user_msg, sys_prompt):
-    """Return (user_msg, sys_prompt) with identity block + skills context added."""
+    """Return (user_msg, sys_prompt) with user identity block + skills context added."""
     try:
         identity = _identity_block()
-        if identity and "WHO YOU ARE" not in (sys_prompt or ""):
+        if identity and "USER / OPERATOR PROFILE" not in (sys_prompt or ""):
             sys_prompt = (sys_prompt or "") + identity
         skills = _skills_context(user_msg)
         if skills:
@@ -5481,18 +5513,26 @@ def _audit(actor, action, detail):
 #    (video: "it's not truly yours... a folder with an instructions.md")
 # ---------------------------------------------------------------------------
 def _get_agent_prompt(agent):
-    """Profile-wide soul override wins > per-agent soul (legacy) > built-in > default."""
+    """Specific agent soul override > built-in AGENT_PROMPTS > profile soul > default."""
+    agent = (agent or "hermes").lower()
     try:
         raw = _cfg_get("souls") or ""
         souls = json.loads(raw) if raw else {}
-        pname = (_get_profile().get("name") or "default").strip() or "default"
-        if souls.get(pname):
-            return souls[pname]
-        if souls.get(agent):  # legacy per-agent souls (pre-profile, 2026-08-08)
+        if souls.get(agent):
             return souls[agent]
     except Exception:
         pass
-    return AGENT_PROMPTS.get(agent, DEFAULT_LLM_CONFIG["system_prompt"])
+    if agent in AGENT_PROMPTS:
+        return AGENT_PROMPTS[agent]
+    try:
+        raw = _cfg_get("souls") or ""
+        souls = json.loads(raw) if raw else {}
+        pname = (_get_profile().get("name") or "").strip()
+        if pname and pname != "default" and souls.get(pname):
+            return souls[pname]
+    except Exception:
+        pass
+    return DEFAULT_LLM_CONFIG["system_prompt"]
 
 
 @agentic_bp.route("/api/agentic/souls", methods=["GET", "POST", "OPTIONS"])
@@ -7481,22 +7521,37 @@ def _get_conversation(agent_id, thread_id="main"):
     row = conn.execute("SELECT messages FROM conversation_messages WHERE agent_id=? AND thread_id=?",
                        (agent_id, thread_id)).fetchone()
     conn.close()
-    if row:
+    if row and row["messages"]:
         try:
-            return json.loads(row["messages"])
+            msgs = json.loads(row["messages"])
+            if msgs:
+                return msgs
         except Exception:
             pass
     conn = _db()
     row = conn.execute("SELECT messages FROM conversations WHERE agent_id=?", (agent_id,)).fetchone()
     conn.close()
-    if row:
+    if row and row["messages"]:
         try:
-            return json.loads(row["messages"])
+            msgs = json.loads(row["messages"])
+            if msgs:
+                return msgs
         except Exception:
             pass
-    return [{"sender": f"{agent_id.capitalize()} Agent", "role": "agent",
-             "timestamp": "NOW",
-             "text": f"Agent **{agent_id.capitalize()}** online. Connected to the Agentic OS control plane."}]
+
+    greetings = {
+        "openclaw": "🦞 **Greetings! I am OpenClaw**, your personal autonomous AI assistant. Ask me anything, assign multi-step coding or research tasks, or configure your API key anytime.",
+        "hermes": "🤖 **Hermes Agent online.** 24/7 continuous watcher, signal radar, and tool sandbox ready.",
+        "goose": "🪿 **Greetings! I am Goose**, your autonomous open-source developer agent (aaif-goose/goose). Tell me what feature to build, debug, test, or refactor.",
+        "deepseek-harness": "🐋 **DeepSeek Harness online.** Powered by DeepSeek reasoning models (R1/V3). Ready for high-precision logic verification, complex architectural analysis, and benchmark evaluation.",
+        "deerflow": "🦌 **DeerFlow Super-Agent online.** Ready for long-horizon autonomous tasks, sandbox execution, and deep multi-step workflows.",
+        "claude": "🧠 **Claude Architect online.** Deep reasoning, systems analysis, and architectural design ready.",
+        "antigravity": "⚡ **Antigravity Builder online.** Full-stack development, agentic workflows, and code synthesis ready.",
+        "codex": "💻 **Codex Synthesizer online.** Code synthesis, refactoring, and spec generation ready."
+    }
+    agent_name = "Hermes Agent" if agent_id == "hermes" else f"{agent_id.capitalize()} Agent"
+    default_text = greetings.get(agent_id.lower(), f"Agent **{agent_id.capitalize()}** online. Ready for tasks.")
+    return [{"sender": agent_name, "role": "agent", "timestamp": "NOW", "text": default_text}]
 
 
 def _save_conversation(agent_id, messages, thread_id="main"):
@@ -9907,7 +9962,20 @@ def _call_llm_stream(user_msg, system_prompt=None, agent="hermes", timeout=120):
     api_key = ((pkeys.get(provider) or cfg.get("api_key")) or "").strip()
     api_base = (cfg.get("api_base") or "").strip()
     temp = cfg.get("temperature", 0.7)
-    sys_prompt = system_prompt or cfg.get("system_prompt") or _get_agent_prompt(agent)
+    agent_base_prompt = _get_agent_prompt(agent)
+    agent_names = {
+        "hermes": "Hermes Agent",
+        "openclaw": "OpenClaw Autonomous Agent",
+        "goose": "Goose Developer Agent (Block)",
+        "deepseek-harness": "DeepSeek Harness Reasoning Engine",
+        "deerflow": "DeerFlow Super-Agent",
+        "claude": "Claude Architect",
+        "antigravity": "Antigravity Builder",
+        "codex": "Codex Synthesizer",
+    }
+    agent_display = agent_names.get((agent or "hermes").lower(), f"{str(agent).capitalize()} Agent")
+    agent_guard = f"=== YOUR STRICT IDENTITY ===\nYou are {agent_display}. Your name is {agent_display}. You must speak and act strictly as {agent_display}. Do NOT adopt the name or persona of OpenClaw or any other agent.\n=== END IDENTITY DIRECTIVE ===\n\n"
+    sys_prompt = agent_guard + (system_prompt or agent_base_prompt or cfg.get("system_prompt") or DEFAULT_LLM_CONFIG["system_prompt"])
 
     def openai_backend():
         base = api_base or "https://api.deepseek.com"
