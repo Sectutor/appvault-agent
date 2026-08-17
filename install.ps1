@@ -271,8 +271,9 @@ if (& $docker ps -a --filter "name=^/appvault-agent$" --format '{{.Names}}' 2>$n
     & $docker rm appvault-agent 2>$null | Out-Null
 }
 
-# Windows named pipe or unix socket mount
-$sockMount = if ($IsWindows -or $env:OS -like "*Windows*") { "//./pipe/docker_engine://./pipe/docker_engine" } else { "/var/run/docker.sock:/var/run/docker.sock" }
+# Windows named pipe → map to the standard Unix socket path inside the container
+# so the docker CLI finds it without needing DOCKER_HOST.
+$sockMount = if ($IsWindows -or $env:OS -like "*Windows*") { "//./pipe/docker_engine:/var/run/docker.sock" } else { "/var/run/docker.sock:/var/run/docker.sock" }
 
 # Start agent (Unauthenticated for local desktop — zero API key friction)
 Write-Host "  Starting AppVault Agent on port 8086..."
