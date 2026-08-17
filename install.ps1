@@ -1,8 +1,8 @@
-﻿<#
-.AppVault Installer for Windows
-Detects, validates, and installs everything needed to run AppVault locally.
-Usage: irm https://appvault.airepoindex.com/install.ps1 | iex
-#>
+﻿# ==============================================================================
+# AppVault Installer for Windows
+# Detects, validates, and installs everything needed to run AppVault locally.
+# Usage: irm https://appvault.airepoindex.com/install.ps1 | iex
+# ==============================================================================
 
 $ErrorActionPreference = "Stop"
 $STEP = 0
