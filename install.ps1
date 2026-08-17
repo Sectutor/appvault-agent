@@ -29,7 +29,15 @@ function Fail($msg) {
 function CheckAdmin() {
     $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     if (-not $admin) {
-        Fail "Administrator rights required. Right-click PowerShell and 'Run as Administrator'."
+        Write-Host "  🔄 Requesting administrator privileges (UAC prompt)..." -ForegroundColor Yellow
+        $url = "https://appvault.airepoindex.com/install.ps1"
+        $cmd = "try { iex (irm '$url') } catch { Write-Host '  ❌ Install failed in elevated session.' -ForegroundColor Red; Read-Host 'Press Enter to close' }"
+        try {
+            Start-Process powershell.exe -Verb RunAs -Wait -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $cmd)
+            exit
+        } catch {
+            Fail "Administrator rights required. Right-click PowerShell and 'Run as Administrator'."
+        }
     }
     Success "Administrator rights confirmed"
 }
@@ -251,7 +259,7 @@ try {
 Step "Starting AppVault Agent"
 Write-Host "  Pulling AppVault images..."
 & $docker pull ghcr.io/sectutor/appvault-agent:latest 2>&1 | Out-Null
-& $docker pull ghcr.io/sectutor/appvault-releases:v67 2>&1 | Out-Null
+& $docker pull ghcr.io/sectutor/appvault-releases:v69 2>&1 | Out-Null
 
 # Create data directory
 mkdir "$env:USERPROFILE\.appvault\data" -Force | Out-Null
@@ -299,7 +307,7 @@ Remove-Item "$env:USERPROFILE\.appvault\heimdall-config\www" -Recurse -Force -Er
   -e PUID=1000 `
   -e PGID=1000 `
   -e TZ=Etc/UTC `
-  ghcr.io/sectutor/appvault-releases:v67
+  ghcr.io/sectutor/appvault-releases:v69
 
 # Register auto-start scheduled task so containers launch on Windows boot
 Step "Configuring Windows Startup Task"
