@@ -271,9 +271,11 @@ if (& $docker ps -a --filter "name=^/appvault-agent$" --format '{{.Names}}' 2>$n
     & $docker rm appvault-agent 2>$null | Out-Null
 }
 
-# Windows named pipe → map to the standard Unix socket path inside the container
-# so the docker CLI finds it without needing DOCKER_HOST.
-$sockMount = if ($IsWindows -or $env:OS -like "*Windows*") { "//./pipe/docker_engine:/var/run/docker.sock" } else { "/var/run/docker.sock:/var/run/docker.sock" }
+# Docker socket mount - the Linux VM path works on Linux, macOS, AND Windows
+# Docker Desktop (the engine runs in a Linux utility VM; the Windows named pipe
+# cannot be bind-mounted into a Linux container, which left installs failing
+# with "Docker unavailable" despite Docker being detected on the host).
+$sockMount = "/var/run/docker.sock:/var/run/docker.sock"
 
 # Start agent (Unauthenticated for local desktop — zero API key friction)
 Write-Host "  Starting AppVault Agent on port 8086..."
