@@ -1,0 +1,30 @@
+# LiteLLM config for AppVault Premium Agents — Windows
+# Routes LLM calls to Ollama on the Windows host by default.
+# Add cloud API keys here (OpenAI, Anthropic, etc.) to use them instead.
+
+model_list:
+  - model_name: llama3
+    litellm_params:
+      model: ollama/llama3
+      api_base: http://host.docker.internal:11434
+      api_key: "not-needed"
+
+  - model_name: deepseek-chat
+    litellm_params:
+      model: ollama/deepseek-chat
+      api_base: http://host.docker.internal:11434
+      api_key: "not-needed"
+
+  # ── Uncomment to use cloud APIs instead of/in addition to Ollama ──
+  # - model_name: gpt-4
+  #   litellm_params:
+  #     model: gpt-4
+  #     api_key: sk-your-openai-key
+  #
+  # - model_name: claude-3-sonnet
+  #   litellm_params:
+  #     model: claude-3-sonnet-20240229
+  #     api_key: sk-your-anthropic-key
+
+general_settings:
+  master_key: "sk-litellm-master-key"

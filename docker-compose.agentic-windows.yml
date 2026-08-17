@@ -1,0 +1,81 @@
+version: '3.8'
+
+# AppVault Premium Agents — Windows
+# One-click deploy: Hermes + CrewAI + Memory MCP + LiteLLM gateway
+#
+# All images are pre-built on ghcr.io — no build context needed.
+# Paths are relative: Docker creates them on first run.
+# User can move ./vault to their Obsidian folder later by editing this file.
+
+services:
+  litellm:
+    image: ghcr.io/berriai/litellm:main-v1.30.0
+    container_name: appvault-litellm
+    labels:
+      - "appvault.app=litellm"
+    ports:
+      - "4000:4000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - XAI_API_KEY=${XAI_API_KEY:-}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - OLLAMA_API_BASE=${OLLAMA_API_BASE:-http://host.docker.internal:11434}
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:-sk-litellm-master-key}
+    volumes:
+      - ./litellm_config.yaml:/app/config.yaml
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    restart: always
+
+  hermes-agent:
+    image: ghcr.io/sectutor/appvault-hermes-agent:latest
+    container_name: appvault-hermes-agent
+    labels:
+      - "appvault.app=hermes-agent"
+    ports:
+      - "8095:8095"
+    environment:
+      - OPENAI_API_BASE=http://litellm:4000/v1
+      - OPENAI_API_KEY=${LITELLM_MASTER_KEY:-sk-litellm-master-key}
+      - OBSIDIAN_VAULT_PATH=/vault
+      - AGENT_API_URL=http://host.docker.internal:8086
+      - OLLAMA_API_BASE=${OLLAMA_API_BASE:-http://host.docker.internal:11434}
+    volumes:
+      - ./vault:/vault
+      - ./logs/hermes:/logs
+    depends_on:
+      - litellm
+    restart: always
+
+  crewai-runner:
+    image: ghcr.io/sectutor/appvault-crewai-runner:latest
+    container_name: appvault-crewai-runner
+    labels:
+      - "appvault.app=crewai-runner"
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_BASE=http://litellm:4000/v1
+      - OPENAI_API_KEY=${LITELLM_MASTER_KEY:-sk-litellm-master-key}
+      - OBSIDIAN_VAULT_PATH=/vault
+      - AGENT_API_URL=http://host.docker.internal:8086
+    volumes:
+      - ./vault:/vault
+      - ./logs/crewai:/logs
+    depends_on:
+      - litellm
+    restart: always
+
+  memory-mcp:
+    image: ghcr.io/sectutor/appvault-memory-mcp:latest
+    container_name: appvault-memory-mcp
+    labels:
+      - "appvault.app=memory-mcp"
+    ports:
+      - "3001:3001"
+    environment:
+      - AGENT_API_URL=http://host.docker.internal:8086
+      - OBSIDIAN_VAULT_PATH=/vault
+    volumes:
+      - ./vault:/vault
+    restart: always
