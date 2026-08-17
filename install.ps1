@@ -249,8 +249,6 @@ try {
 # STEP 9: Pull AppVault Agent and start
 # ═══════════════════════════════════════════
 Step "Starting AppVault Agent"
-# Shared API key for agent + store proxy
-$apiKey = -join ((48..57)+(65..90)+(97..122) | Get-Random -Count 32 | ForEach-Object {[char]$_})
 Write-Host "  Pulling AppVault images..."
 & $docker pull ghcr.io/sectutor/appvault-agent:latest 2>&1 | Out-Null
 & $docker pull ghcr.io/sectutor/appvault-releases:v67 2>&1 | Out-Null
@@ -268,7 +266,7 @@ if (& $docker ps -a --filter "name=^/appvault-agent$" --format '{{.Names}}' 2>$n
 # Windows named pipe or unix socket mount
 $sockMount = if ($IsWindows -or $env:OS -like "*Windows*") { "//./pipe/docker_engine://./pipe/docker_engine" } else { "/var/run/docker.sock:/var/run/docker.sock" }
 
-# Start agent
+# Start agent (Unauthenticated for local desktop — zero API key friction)
 Write-Host "  Starting AppVault Agent on port 8086..."
 & $docker run -d `
   --name appvault-agent `
@@ -278,7 +276,6 @@ Write-Host "  Starting AppVault Agent on port 8086..."
   -v "$env:USERPROFILE\.appvault\data:/data" `
   -v "$env:USERPROFILE\.appvault\apps:/data/apps" `
   -e AGENT_PORT=8086 `
-  -e API_KEY=$apiKey `
   -e CENTRAL_URL=https://appvault.airepoindex.com `
   -e AGENT_NAME="$env:COMPUTERNAME-agent" `
   -e STORAGE_PATH=/data `
@@ -298,7 +295,6 @@ Remove-Item "$env:USERPROFILE\.appvault\heimdall-config\www" -Recurse -Force -Er
   --restart unless-stopped `
   -p 8085:80 `
   -v "$env:USERPROFILE\.appvault\heimdall-config:/config" `
-  -e API_KEY=$apiKey `
   -e CENTRAL_URL=https://appvault.airepoindex.com `
   -e PUID=1000 `
   -e PGID=1000 `
@@ -354,12 +350,11 @@ Write-Host "==================================" -ForegroundColor Green
 Write-Host "✅ AppVault is ready!" -ForegroundColor Green
 Write-Host "==================================" -ForegroundColor Green
 Write-Host "`n"
-Write-Host "  📦 App Store:  http://localhost:8085/?setup=$apiKey" -ForegroundColor Cyan
+Write-Host "  📦 App Store:  http://localhost:8085/" -ForegroundColor Cyan
 Write-Host "  ⚙️  Dashboard:  http://localhost:8085/index.php" -ForegroundColor Cyan
-Write-Host "  🔑 API Key:    $apiKey" -ForegroundColor Yellow
 Write-Host "`n"
 if ($Host.UI.RawUI -and $Host.Name -notlike "*NonInteractive*") {
     Write-Host "  Press any key to open the App Store..."
     try { $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") } catch {}
 }
-try { Start-Process "http://localhost:8085/?setup=$apiKey" } catch {}
+try { Start-Process "http://localhost:8085/" } catch {}
