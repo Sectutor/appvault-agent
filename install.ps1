@@ -1,4 +1,4 @@
-<#
+﻿<#
 .AppVault Installer for Windows
 Detects, validates, and installs everything needed to run AppVault locally.
 Usage: irm https://appvault.airepoindex.com/install.ps1 | iex
@@ -354,11 +354,12 @@ Write-Host "==================================" -ForegroundColor Green
 Write-Host "✅ AppVault is ready!" -ForegroundColor Green
 Write-Host "==================================" -ForegroundColor Green
 Write-Host "`n"
-Write-Host "  📦 App Store:  http://localhost:8085/" -ForegroundColor Cyan
+Write-Host "  📦 App Store:  http://localhost:8085/?setup=$apiKey" -ForegroundColor Cyan
 Write-Host "  ⚙️  Dashboard:  http://localhost:8085/index.php" -ForegroundColor Cyan
+Write-Host "  🔑 API Key:    $apiKey" -ForegroundColor Yellow
 Write-Host "`n"
 if ($Host.UI.RawUI -and $Host.Name -notlike "*NonInteractive*") {
     Write-Host "  Press any key to open the App Store..."
     try { $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") } catch {}
 }
-try { Start-Process "http://localhost:8085/" } catch {}
+try { Start-Process "http://localhost:8085/?setup=$apiKey" } catch {}

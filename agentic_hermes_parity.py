@@ -673,11 +673,28 @@ def _roster_sessions_map():
         pass
     conn = _db()
     rows = conn.execute("SELECT id, agent, title, message_count, updated FROM agent_threads ORDER BY updated DESC").fetchall()
-    conn.close()
     for r in rows:
         out.setdefault(r["agent"], []).append({
             "id": r["id"], "title": r["title"], "message_count": r["message_count"],
             "updated": r["updated"] or ""})
+    try:
+        main_rows = conn.execute("SELECT agent_id, messages, updated FROM conversation_messages WHERE thread_id='main'").fetchall()
+        for mr in main_rows:
+            ag = mr["agent_id"]
+            ag_list = out.setdefault(ag, [])
+            if not any(x["id"] == "main" for x in ag_list):
+                cnt = 0
+                try:
+                    cnt = len(json.loads(mr["messages"]))
+                except Exception:
+                    pass
+                ag_list.insert(0, {
+                    "id": "main", "title": "Main Chat",
+                    "message_count": cnt, "updated": mr["updated"] or ""
+                })
+    except Exception:
+        pass
+    conn.close()
     return out
 
 
@@ -700,11 +717,29 @@ def api_roster_sessions():
     return jsonify({"status": "ok", "sessions": _roster_sessions_map()})
 
 
-@agentic_bp.route("/api/agentic/roster/sessions/<agent>/<thread_id>", methods=["GET", "DELETE", "OPTIONS"])
+@agentic_bp.route("/api/agentic/roster/sessions/<agent>/<thread_id>", methods=["GET", "PUT", "PATCH", "DELETE", "OPTIONS"])
 def api_roster_thread(agent, thread_id):
     if request.method == "OPTIONS":
         return jsonify({"status": "ok"})
     agent = agent.lower()
+    if request.method in ("PUT", "PATCH"):
+        data = request.get_json() or {}
+        new_title = (data.get("title") or "").strip()
+        if not new_title:
+            return jsonify({"error": "title cannot be empty"}), 400
+        if agent == "hermes":
+            sess = _get_session(thread_id)
+            if sess:
+                _save_session(thread_id, new_title, sess.get("messages", []))
+                return jsonify({"status": "ok", "title": new_title})
+            return jsonify({"error": "session not found"}), 404
+        else:
+            conn = _db()
+            conn.execute("UPDATE agent_threads SET title=?, updated=? WHERE agent=? AND id=?",
+                         (new_title, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), agent, thread_id))
+            conn.commit()
+            conn.close()
+            return jsonify({"status": "ok", "title": new_title})
     if request.method == "DELETE":
         if agent == "hermes":
             conn = _db()
@@ -713,8 +748,11 @@ def api_roster_thread(agent, thread_id):
             conn.close()
         else:
             conn = _db()
-            conn.execute("DELETE FROM agent_threads WHERE id=?", (thread_id,))
-            conn.execute("DELETE FROM conversation_messages WHERE agent_id=? AND thread_id=?", (agent, thread_id))
+            if thread_id == "main":
+                conn.execute("DELETE FROM conversation_messages WHERE agent_id=? AND thread_id='main'", (agent,))
+            else:
+                conn.execute("DELETE FROM agent_threads WHERE id=?", (thread_id,))
+                conn.execute("DELETE FROM conversation_messages WHERE agent_id=? AND thread_id=?", (agent, thread_id))
             conn.commit()
             conn.close()
         _audit("store", "session.delete", f"'{agent}' {thread_id}")
@@ -729,6 +767,6 @@ def api_roster_thread(agent, thread_id):
         conn = _db()
         t = conn.execute("SELECT id FROM agent_threads WHERE id=?", (thread_id,)).fetchone()
         conn.close()
-        if not t:
+        if not t and thread_id != "main":
             return jsonify({"error": "thread not found"}), 404
     return jsonify({"status": "ok", "messages": msgs})

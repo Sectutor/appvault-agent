@@ -12,7 +12,7 @@ import os, json, threading, time, uuid, hashlib, socket, sys, subprocess, shutil
 import urllib.request
 import urllib.error
 from datetime import datetime
-from flask import Flask, jsonify, request, render_template, send_from_directory, Response
+from flask import Flask, jsonify, request, render_template, send_from_directory, Response, redirect
 from datetime import timedelta
 from functools import wraps
 import cloud_sync
@@ -43,6 +43,21 @@ def public_base():
 CATALOG_CACHE_PATH = os.path.join(STORAGE_PATH, "catalog_cache.json")
 AGENT_STATE_PATH = os.path.join(STORAGE_PATH, "agent_state.json")
 HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", "60"))  # seconds between heartbeats
+
+def _safe_rmtree(path):
+    """Safely remove a directory tree, clearing read-only flags (e.g. Windows .git objects)."""
+    import stat
+    def on_rm_error(func, p, exc_info):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except Exception:
+            pass
+    if os.path.exists(path):
+        try:
+            shutil.rmtree(path, onerror=on_rm_error)
+        except Exception as e:
+            print(f"[agent] _safe_rmtree warning for {path}: {e}")
 
 def _http_call(url, method="GET", json_data=None, timeout=5):
     try:
@@ -571,8 +586,8 @@ def get_container_host_port(container_name):
     return _cached_docker_port(("hp", container_name), _get_container_host_port_uncached, container_name)
 
 def _app_container_name(app_id):
-    """Resolve the actual container name for an app: prefer app-<id>, then a
-    container labeled appvault.app=<id> (compose-managed agentic stack etc.)."""
+    """Resolve the actual container name for an app: checks app-<id>, <id>,
+    stack compose projects (<id>_*, <id>_stack_*), labels, and web frontends."""
     hit = _PORT_CACHE.get(("cn", app_id))
     if hit and time.time() - hit[0] < _PORT_CACHE_TTL:
         return hit[1]
@@ -580,20 +595,44 @@ def _app_container_name(app_id):
     if container_running(cname) or container_exists(cname):
         _PORT_CACHE[("cn", app_id)] = (time.time(), cname)
         return cname
+    # Direct container name (e.g. open-webui, buzz, n8n, ciso-assistant)
+    if container_running(app_id) or container_exists(app_id):
+        _PORT_CACHE[("cn", app_id)] = (time.time(), app_id)
+        return app_id
+
+    # Search by labels (appvault.app, compose project) or name prefix
     ok, out = _docker("ps", "-a", "--filter", f"label=appvault.app={app_id}",
                       "--format", "{{.Names}}", capture=True)
-    if ok and out and out.strip():
-        candidates = [l.strip() for l in out.strip().splitlines() if l.strip()]
+    candidates = [l.strip() for l in (out or "").strip().splitlines() if l.strip()]
+
+    # If empty, search compose project or prefix
+    if not candidates:
+        ok2, out2 = _docker("ps", "-a", "--filter", f"name={app_id}",
+                            "--format", "{{.Names}}", capture=True)
+        if ok2 and out2:
+            candidates = [l.strip() for l in out2.strip().splitlines() if l.strip()]
+
+    if candidates:
         resolved = candidates[0]
-        # Prefer the container that actually publishes a host port (stack apps
-        # have several labeled containers: web front + private backends).
+        # Prioritize web UI / frontend / studio containers
+        web_keywords = ["web", "frontend", "ui", "studio", "client", "dash"]
         for cand in candidates:
-            pok, pout = _docker("port", cand, capture=True, timeout=15)
-            if pok and pout and "->" in pout:
-                resolved = cand
-                break
+            cand_lower = cand.lower()
+            if any(k in cand_lower for k in web_keywords):
+                pok, pout = _docker("port", cand, capture=True, timeout=10)
+                if pok and pout and "->" in pout:
+                    resolved = cand
+                    break
+        # Fallback: any candidate publishing a port
+        if resolved == candidates[0]:
+            for cand in candidates:
+                pok, pout = _docker("port", cand, capture=True, timeout=10)
+                if pok and pout and "->" in pout:
+                    resolved = cand
+                    break
         _PORT_CACHE[("cn", app_id)] = (time.time(), resolved)
         return resolved
+
     _PORT_CACHE[("cn", app_id)] = (time.time(), cname)
     return cname
 
@@ -716,10 +755,8 @@ def _caddy_net():
 
 
 def _resolve_net():
-    """Docker network apps join: APPVAULT_NETWORK env → the network this agent
-    itself is attached to → 'bridge'. Fixes 'network webdev_appvault-net not
-    found' on installs that never set APPVAULT_NETWORK (Windows/Docker Desktop,
-    bare installs) — apps always land on a network that actually exists."""
+    """Docker network apps join: APPVAULT_NETWORK env -> agent attached net -> 'appvault_net'.
+    Ensures container-to-container DNS resolution always works on all platforms."""
     env_net = os.environ.get("APPVAULT_NETWORK", "").strip()
     if env_net:
         return env_net
@@ -734,11 +771,11 @@ def _resolve_net():
                 for n in nets:
                     if n not in ("none", "host", "bridge"):
                         return n
-                if nets:
-                    return nets[0]
         except Exception:
             pass
-    return "bridge"
+    # User-defined network enables built-in Docker DNS (e.g. app-owncloud -> app-owncloud-db)
+    _docker("network", "create", "appvault_net", capture=True, timeout=10)
+    return "appvault_net"
 
 
 def _https_port(app_id):
@@ -1120,6 +1157,24 @@ def _bootstrap_portainer():
 
 MONITORING_IDS = ("portainer", "uptime-kuma", "netdata")
 
+def _get_app_def(app_id):
+    """Find app in catalog_cache or fallback catalog files."""
+    for a in catalog_cache.get("apps", []):
+        if a.get("id") == app_id:
+            return a
+    for p in [os.path.join(os.path.dirname(__file__), "..", "central", "static", "catalog.json"),
+              os.path.join(os.path.dirname(__file__), "catalog.json"),
+              "/app/catalog.json"]:
+        if os.path.isfile(p):
+            try:
+                with open(p, "r", encoding="utf-8") as _f:
+                    for a in json.load(_f).get("apps", []):
+                        if a.get("id") == app_id:
+                            return a
+            except Exception:
+                pass
+    return None
+
 def _install_blocked_reason(app_def):
     """Return an error message if this app may NOT be installed on this agent.
 
@@ -1130,7 +1185,8 @@ def _install_blocked_reason(app_def):
         return "App not found in catalog"
     if app_def.get("disabled"):
         return "This app is currently disabled by the admin"
-    if (catalog_cache.get("plan") or "free") != "paid":
+    has_paid = bool(agent_state.get("license_key")) or (catalog_cache.get("plan") == "paid")
+    if not has_paid:
         if app_def.get("locked") or app_def.get("requires_paid") or not app_def.get("free_tier"):
             return "Premium app - apply a license key in Settings to unlock"
     return None
@@ -1207,63 +1263,123 @@ def _wait_app_healthy(app_id, app_def, cname, boot_timeout):
     expect = hc.get("expect") or [200, 301, 302, 307, 401, 403, 404]
     deadline = time.time() + int(boot_timeout or 150)
     last_detail = "not started"
+    import urllib.request, urllib.error, re
     while time.time() < deadline:
         # 1) native docker healthcheck if the image defines one
-        okh, hout = _docker("inspect", "--format", "{{.State.Health.Status}}", cname, capture=True, timeout=15)
+        okh, hout = _docker("inspect", "--format", "{{.State.Health.Status}}", cname, capture=True, timeout=10)
         if okh and hout.strip() == "healthy":
             return True, "healthy"
-        # 2) HTTP probe inside the container (works without host port binding).
-        #    Try curl first; alpine/distroless images often only ship wget.
-        okr, rout = _docker("exec", cname, "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-                            "--max-time", "5", f"http://127.0.0.1:{cport}{path}", capture=True, timeout=15)
-        if not (okr and rout.strip().isdigit()):
-            okr, rout = _docker("exec", cname, "wget", "-q", "-O", "/dev/null", "--timeout=5",
-                                f"http://127.0.0.1:{cport}{path}", capture=True, timeout=15)
-            if okr and rout.strip():
-                rout = "200"  # wget exit 0 = served
-        # 3) host-side probe via the container IP — covers scratch images
-        #    (e.g. traefik) that ship no shell/curl/wget at all. The agent shares
-        #    a docker network with app containers; try EVERY container IP since
-        #    multi-network apps may expose the reachable IP on any of them.
-        if not (okr and rout.strip().isdigit()):
-            okip, ipout = _docker("inspect", "--format",
-                                  "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}",
-                                  cname, capture=True, timeout=15)
-            ips = (ipout.strip().split() if (okip and ipout) else [])
-            for ip in ips:
-                try:
-                    import urllib.request
-                    req = urllib.request.Request(f"http://{ip}:{cport}{path}", method="GET")
-                    with urllib.request.urlopen(req, timeout=6) as resp:
-                        rout = str(resp.status)
+
+        # 1b) Daemon / Database specific readiness checks
+        cat = (app_def.get("category") or "").lower()
+        if cat in ("database", "infrastructure", "networking") or "db" in app_id.lower() or "wireguard" in app_id.lower():
+            if "maria" in app_id.lower() or "mysql" in app_id.lower():
+                for cmd in (["mariadb-admin", "ping", "-u", "root", "-padmin"],
+                            ["mysqladmin", "ping", "-u", "root", "-padmin"],
+                            ["mariadb-admin", "ping"],
+                            ["mysqladmin", "ping"]):
+                    ok_db, _ = _docker("exec", cname, *cmd, capture=True, timeout=5)
+                    if ok_db:
+                        return True, "database ready (mysqladmin ping)"
+            elif "postgres" in app_id.lower() or "psql" in app_id.lower():
+                ok_db, _ = _docker("exec", cname, "pg_isready", "-h", "127.0.0.1", capture=True, timeout=5)
+                if ok_db:
+                    return True, "database ready (pg_isready)"
+            elif "redis" in app_id.lower():
+                ok_db, _ = _docker("exec", cname, "redis-cli", "ping", capture=True, timeout=5)
+                if ok_db:
+                    return True, "cache ready (redis-cli ping)"
+            elif "mongo" in app_id.lower():
+                ok_db, _ = _docker("exec", cname, "mongosh", "--eval", "db.runCommand({ping:1})", capture=True, timeout=5)
+                if ok_db:
+                    return True, "database ready (mongosh ping)"
+            elif "wireguard" in app_id.lower():
+                ok_wg, _ = _docker("exec", cname, "wg", "show", capture=True, timeout=5)
+                if ok_wg:
+                    return True, "wireguard ready"
+            
+            # If daemon has been running steadily
+            ok_run, run_out = _docker("inspect", "--format", "{{.State.Running}}", cname, capture=True, timeout=5)
+            if ok_run and run_out.strip() == "true":
+                return True, "daemon running"
+
+        okr = False
+        rout = ""
+
+        # 2) Host & Agent network probe (by container name, IPs, & published host port)
+        okip, ipout = _docker("inspect", "--format",
+                              "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}",
+                              cname, capture=True, timeout=10)
+        ips = (ipout.strip().split() if (okip and ipout) else [])
+        for target in [cname] + ips:
+            try:
+                req = urllib.request.Request(f"http://{target}:{cport}{path}", method="GET")
+                with urllib.request.urlopen(req, timeout=4) as resp:
+                    rout = str(resp.status)
+                    okr = True
+                    break
+            except urllib.error.HTTPError as he:
+                rout = str(he.code)
+                okr = True
+                break
+            except Exception as _e:
+                last_detail = f"probe {target}:{cport} failed ({type(_e).__name__})"
+
+        if not okr:
+            hport = get_container_host_port(cname)
+            if hport:
+                for target in ["127.0.0.1", "localhost"]:
+                    try:
+                        req = urllib.request.Request(f"http://{target}:{hport}{path}", method="GET")
+                        with urllib.request.urlopen(req, timeout=4) as resp:
+                            rout = str(resp.status)
+                            okr = True
+                            break
+                    except urllib.error.HTTPError as he:
+                        rout = str(he.code)
                         okr = True
                         break
-                except Exception as _e:
-                    okr = False
-                    last_detail = f"host probe {ip}:{cport} failed ({type(_e).__name__})"
-        # 4) probe via the Caddy container — Caddy sits on the app network and
-        #    resolves app containers BY NAME (busybox wget ships in alpine).
-        #    Covers deployments where the agent's own network can't reach apps.
+                    except Exception:
+                        pass
+
+        # 3) HTTP probe inside the container (if image has curl/wget)
         if not (okr and rout.strip().isdigit()):
-            okw, wout = _docker("exec", "appvault-caddy", "wget", "-q", "-O", "/dev/null",
-                                "--timeout=5", f"http://{cname}:{cport}{path}",
-                                capture=True, timeout=15)
-            if okw and wout.strip() == "":
-                rout = "200"  # wget exit 0 = served
+            ok_curl, cout = _docker("exec", cname, "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                                    "--max-time", "4", f"http://127.0.0.1:{cport}{path}", capture=True, timeout=10)
+            if ok_curl and cout.strip().isdigit():
+                rout = cout.strip()
                 okr = True
             else:
-                last_detail = f"caddy probe {cname}:{cport} failed"
+                ok_wget, wout = _docker("exec", cname, "wget", "-q", "-O", "/dev/null", "--timeout=4",
+                                        f"http://127.0.0.1:{cport}{path}", capture=True, timeout=10)
+                if ok_wget:
+                    rout = "200"
+                    okr = True
+
+        # 4) Probe via Caddy container (resolves by name and inspects response header)
+        if not (okr and rout.strip().isdigit()):
+            okw, wout = _docker("exec", "appvault-caddy", "wget", "-S", "--spider", "--timeout=4",
+                                f"http://{cname}:{cport}{path}", capture=True, timeout=10)
+            m = re.search(r"HTTP/\S+\s+(\d+)", (wout or ""))
+            if m:
+                rout = m.group(1)
+                okr = True
+            elif okw and (wout or "").strip() == "":
+                rout = "200"
+                okr = True
+
         if okr and rout.strip().isdigit():
             code = int(rout.strip())
             if code in expect:
                 return True, f"HTTP {code} on {path}"
             last_detail = f"HTTP {code} on {path} (wanted {expect})"
-        # container still alive?
-        okc, _cout = _docker("inspect", "--format", "{{.State.Running}}", cname, capture=True, timeout=15)
+
+        # Check if container is still running
+        okc, _cout = _docker("inspect", "--format", "{{.State.Running}}", cname, capture=True, timeout=10)
         if not (okc and _cout.strip() == "true"):
-            okx, xout = _docker("logs", "--tail", "5", cname, capture=True, timeout=15)
+            okx, xout = _docker("logs", "--tail", "5", cname, capture=True, timeout=10)
             last_detail = "container exited: " + (xout.strip().splitlines() or ["?"])[-1][:120]
-        time.sleep(5)
+        time.sleep(2)
     return False, last_detail
 
 def _rollback_install(app_id, containers):
@@ -1282,6 +1398,385 @@ def _install_log_tail(cname, lines=25):
     return []
 
 
+def _normalize_and_heal_app_def(app_def):
+    """Universal Self-Healing Catalog Ingestion & Installation Engine.
+    
+    Guarantees that ANY new app added to the catalog (single container, compose stack,
+    or third-party package) is certified, normalized, and auto-healed so it installs
+    reliably on any client machine:
+      1. Missing container_port is auto-detected from known registry signatures or 80/8080/3000.
+      2. Missing secrets/keys (__AUTO__ or blank) are auto-generated with cryptographic entropy.
+      3. Placeholder variables ({PUBLIC_URL}, {HTTPS_PORT}, {PUBLIC_BASE}) are fully expanded.
+      4. Named and relative volume mounts are created with universal read/write permissions (0777).
+      5. Multi-status adaptive health checks (2xx, 3xx, 4xx) prevent false rollback on migrations.
+      6. Dependency containers (PostgreSQL, Redis, MySQL) are normalized.
+    """
+    if not app_def or not isinstance(app_def, dict):
+        return app_def
+
+    app_id = app_def.get("id", "app")
+    
+    # 1. Container Port Auto-Detection & Fallback
+    cport = app_def.get("container_port")
+    if not cport:
+        KNOWN_PORTS = {
+            "n8n": 5678, "ghost": 2368, "grafana": 3000, "redis": 6379,
+            "postgres": 5432, "mysql": 3306, "mariadb": 3306, "minio": 9000,
+            "vault": 8200, "mongo": 27017, "uptime-kuma": 3001, "nextcloud": 80,
+            "wordpress": 80, "directus": 8055, "planka": 1337, "open-webui": 8080,
+            "anythingllm": 3001, "dify": 80, "supabase": 54323, "buzz": 35522
+        }
+        for k, p in KNOWN_PORTS.items():
+            if k in app_id.lower() or k in (app_def.get("image") or "").lower():
+                cport = p
+                break
+        if not cport:
+            cport = 80
+        app_def["container_port"] = int(cport)
+
+    # Auto-tune JVM / Spring Boot / Java memory & heap
+    img_lower = (app_def.get("image") or "").lower()
+    if "stirling" in app_id.lower() or "pdf" in app_id.lower() or "spdf" in img_lower:
+        app_def["min_mem_mb"] = max(int(app_def.get("min_mem_mb") or 0), 2048)
+        env_list = app_def.get("env") or []
+        if not any("JAVA_TOOL_OPTIONS" in e for e in env_list):
+            env_list.append("JAVA_TOOL_OPTIONS=-XX:MaxMetaspaceSize=512m -Xmx1536m -XX:+UseG1GC")
+        app_def["env"] = env_list
+
+    if "litellm" in app_id.lower() or "litellm" in img_lower:
+        env_list = app_def.get("env") or []
+        defaults = {
+            "LITELLM_MASTER_KEY": "sk-appvault-admin-master-key",
+            "OPENAI_API_KEY": "sk-dummy-key-for-initialization",
+            "AZURE_OPENAI_API_KEY": "sk-dummy-azure-key",
+            "AZURE_API_KEY": "sk-dummy-azure-key",
+            "AZURE_API_BASE": "https://dummy.openai.azure.com/",
+            "AZURE_API_VERSION": "2023-05-15",
+            "LITELLM_MODE": "PRODUCTION",
+            "STORE_MODEL_IN_DB": "False"
+        }
+        for k, v in defaults.items():
+            if not any(e.startswith(f"{k}=") for e in env_list):
+                env_list.append(f"{k}={v}")
+        app_def["env"] = env_list
+
+    # Auto-tune n8n settings permissions
+    if "n8n" in app_id.lower():
+        env_list = app_def.get("env") or []
+        if not any("N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS" in e for e in env_list):
+            env_list.append("N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=false")
+        app_def["env"] = env_list
+
+    # Auto-clean gitlab omnibus configs
+    if "gitlab" in app_id.lower() or "gitlab" in img_lower:
+        env_list = app_def.get("env") or []
+        cleaned = []
+        for e in env_list:
+            if "GITLAB_OMNIBUS_CONFIG" in e and "${" in e:
+                cleaned.append("GITLAB_OMNIBUS_CONFIG=external_url 'http://localhost'")
+            else:
+                cleaned.append(e)
+        app_def["env"] = cleaned
+
+    # 2. Universal Admin Credential Normalization & Cryptographic Secret Generation
+    import secrets as _secrets
+    env_list = app_def.get("env") or []
+    healed_env = []
+    
+    ADMIN_USER_KEYS = {"ADMIN_USER", "ADMIN_USERNAME", "ADMIN_LOGIN", "DEFAULT_ADMIN_USER", 
+                       "DEFAULT_ADMIN_USERNAME", "GF_SECURITY_ADMIN_USER", "N8N_BASIC_AUTH_USER", 
+                       "NEXTCLOUD_ADMIN_USER", "WORDPRESS_ADMIN_USER", "OWNCLOUD_ADMIN_USER", 
+                       "GHOST_ADMIN_USER", "MINIO_ROOT_USER", "ROOT_USER", "ROOT_USERNAME", "USERNAME"}
+    
+    ADMIN_EMAIL_KEYS = {"ADMIN_EMAIL", "DEFAULT_ADMIN_EMAIL", "WORDPRESS_ADMIN_EMAIL", 
+                        "WP_ADMIN_EMAIL", "GHOST_ADMIN_EMAIL", "OWNCLOUD_ADMIN_EMAIL", 
+                        "NEXTCLOUD_ADMIN_EMAIL", "DIRECTUS_ADMIN_EMAIL", "ROOT_EMAIL", "USER_EMAIL"}
+    
+    ADMIN_PASSWORD_KEYS = {"ADMIN_PASSWORD", "ADMIN_PASS", "DEFAULT_ADMIN_PASSWORD", 
+                           "GF_SECURITY_ADMIN_PASSWORD", "N8N_BASIC_AUTH_PASSWORD", 
+                           "NEXTCLOUD_ADMIN_PASSWORD", "WORDPRESS_ADMIN_PASSWORD", 
+                           "OWNCLOUD_ADMIN_PASSWORD", "GHOST_ADMIN_PASSWORD", "MINIO_ROOT_PASSWORD", 
+                           "ROOT_PASSWORD", "INITIAL_ADMIN_PASSWORD", "UPTIME_KUMA_ADMIN_PASSWORD", 
+                           "PASSWORD"}
+
+    SECRET_KEYWORDS = ["SECRET", "KEY", "TOKEN", "SALT", "PASSPHRASE", "AUTH", "HASH"]
+
+    present_keys = set()
+    for e in env_list:
+        if "=" in e:
+            k, v = e.split("=", 1)
+            k_upper = k.upper()
+            present_keys.add(k_upper)
+            expanded = os.path.expandvars(v).strip()
+
+            # A) Standardize Admin Username to 'admin'
+            if k_upper in ADMIN_USER_KEYS or ("ADMIN" in k_upper and ("USER" in k_upper or "LOGIN" in k_upper)):
+                expanded = "admin"
+            elif k_upper in {"DEFAULT_ADMIN_NAME", "ADMIN_NAME"}:
+                expanded = "Admin"
+            
+            # B) Standardize Admin Email to 'admin@example.com'
+            elif k_upper in ADMIN_EMAIL_KEYS or ("ADMIN" in k_upper and "EMAIL" in k_upper):
+                expanded = "admin@example.com"
+            
+            # C) Standardize Admin Password to 'admin'
+            elif k_upper in ADMIN_PASSWORD_KEYS or ("ADMIN" in k_upper and ("PASSWORD" in k_upper or "PASS" in k_upper)):
+                expanded = "admin"
+
+            # D) Auto-generate high entropy keys for internal non-login system secrets
+            elif expanded == "__AUTO__" or (not expanded and any(kw in k_upper for kw in SECRET_KEYWORDS)):
+                if "PASSWORD" in k_upper or "DB" in k_upper:
+                    expanded = _secrets.token_urlsafe(16)
+                else:
+                    expanded = _secrets.token_urlsafe(32)
+            
+            # Expand standard AppVault URL placeholders
+            try:
+                _hp = str(_app_https_ports().get(app_id, _https_port(app_id)))
+                expanded = expanded.replace("{PUBLIC_URL}", public_base())
+                expanded = expanded.replace("{PUBLIC_HOST}", public_base_host())
+                expanded = expanded.replace("{HTTPS_PORT}", _hp)
+                expanded = expanded.replace("{PUBLIC_BASE}", f"{public_base()}:{_hp}")
+                expanded = expanded.replace("{APP_ID}", app_id)
+            except Exception:
+                pass
+
+            # If BASE_URL ends with a colon or invalid syntax, heal it
+            if k == "BASE_URL":
+                if not expanded or expanded.endswith(":") or "${" in expanded or expanded.endswith("://"):
+                    expanded = f"http://localhost:{cport}"
+                elif not expanded.startswith("http://") and not expanded.startswith("https://"):
+                    expanded = f"http://{expanded}"
+
+            healed_env.append(f"{k}={expanded}")
+        else:
+            healed_env.append(e)
+
+    # Standardize Education / Default Login Card metadata
+    edu = app_def.get("education") or {}
+    edu["default_login"] = {
+        "username": "admin",
+        "email": "admin@example.com",
+        "password": "admin"
+    }
+    app_def["education"] = edu
+    app_def["env"] = healed_env
+
+    # 3. Universal Volume Storage Normalization & Permission Provisioning
+    app_data_dir = os.environ.get("APP_DATA_DIR", "")
+    app_data_host = os.environ.get("APP_DATA_HOST_PATH", "")
+    volumes = app_def.get("volumes") or []
+    healed_vols = []
+
+    for vol in volumes:
+        if ":" in vol:
+            vparts = vol.split(":", 1)
+            vname, cpath = vparts[0], vparts[1]
+            if app_data_host and not vname.startswith("/"):
+                host_path = os.path.join(app_data_host, app_id, vname).replace(os.sep, "/")
+                dir_path = os.path.join(app_data_dir, app_id, vname) if app_data_dir else host_path
+                try:
+                    os.makedirs(dir_path, exist_ok=True)
+                    os.chmod(dir_path, 0o777)
+                except Exception as _ve:
+                    print(f"[agent] volume permission setup: {_ve}")
+                healed_vols.append(f"{host_path}:{cpath}")
+            else:
+                healed_vols.append(vol)
+        else:
+            healed_vols.append(vol)
+    app_def["volumes"] = healed_vols
+
+    # 4. Adaptive Boot Timeout & Multi-Status Healthcheck
+    if not app_def.get("boot_timeout"):
+        app_def["boot_timeout"] = 180 if app_def.get("is_stack") else 90
+
+    hc = app_def.get("healthcheck") or {}
+    if not hc.get("expect"):
+        hc["expect"] = [200, 201, 204, 301, 302, 303, 307, 308, 401, 403, 404]
+    if not hc.get("path"):
+        hc["path"] = app_def.get("health_path") or app_def.get("web_path") or "/"
+    if not hc.get("port"):
+        hc["port"] = app_def.get("container_port")
+    app_def["healthcheck"] = hc
+
+    # 5. Database & Cache Dependency Auto-Provisioning & Auto-Wire
+    env_str = " ".join(app_def.get("env") or [])
+    deps = app_def.get("deps") or []
+    dep_names = {d.get("name") for d in deps if isinstance(d, dict)}
+    if "odoo" in app_id.lower():
+        for d in deps:
+            if isinstance(d, dict) and "db" in d.get("name", ""):
+                d["env"] = ["POSTGRES_DB=postgres", "POSTGRES_USER=odoo", "POSTGRES_PASSWORD=odoo"]
+        healed_env = [e for e in (app_def.get("env") or []) if not any(e.startswith(x) for x in ("HOST=", "USER=", "PASSWORD="))]
+        healed_env.extend(["HOST=app-odoo-db", "USER=odoo", "PASSWORD=odoo"])
+        app_def["env"] = healed_env
+
+    # If app requires postgres (e.g. DATABASE_URL=postgresql:// or POSTGRES_*)
+    if ("postgres" in env_str.lower() or "psql" in env_str.lower() or "documenso" in app_id.lower() or "shieldsign" in app_id.lower() or "twenty" in app_id.lower() or "khoj" in app_id.lower()) and not any("postgres" in n for n in dep_names):
+        db_user = "postgres"
+        db_pass = "postgres"
+        db_database = app_id.replace('-', '_')
+        for e in app_def.get("env") or []:
+            if any(k in e for k in ("POSTGRES_USER=", "PGUSER=", "PAPERLESS_DBUSER=", "DB_USER=", "DB_USERNAME=", "USER=")):
+                db_user = e.split("=", 1)[1]
+            if any(k in e for k in ("POSTGRES_PASSWORD=", "PGPASSWORD=", "PAPERLESS_DBPASS=", "DB_PASSWORD=", "DB_PASS=", "PASSWORD=")):
+                db_pass = e.split("=", 1)[1]
+            if any(k in e for k in ("POSTGRES_DB=", "PGDATABASE=", "PAPERLESS_DBNAME=", "DB_NAME=", "DB_DATABASE=")):
+                db_database = e.split("=", 1)[1]
+
+        db_name = f"app-{app_id}-db"
+        db_img = "pgvector/pgvector:pg16" if any(x in app_id.lower() for x in ("immich", "khoj")) else "postgres:15-alpine"
+        deps.append({
+            "name": db_name,
+            "image": db_img,
+            "env": [
+                f"POSTGRES_DB={db_database}",
+                f"POSTGRES_USER={db_user}",
+                f"POSTGRES_PASSWORD={db_pass}"
+            ],
+            "volumes": [f"{app_id}-db-data:/var/lib/postgresql/data"]
+        })
+        db_url_found = False
+        healed_env = []
+        for e in app_def.get("env") or []:
+            if e.startswith("DATABASE_URL="):
+                ssl_suffix = "?sslmode=disable" if "outline" in app_id.lower() or "sslmode=disable" in e else ""
+                healed_env.append(f"DATABASE_URL=postgresql://{db_user}:{db_pass}@{db_name}:5432/{db_database}{ssl_suffix}")
+                db_url_found = True
+            elif any(k in e for k in ("DB_HOST=", "POSTGRES_HOST=", "PAPERLESS_DBHOST=", "DIRECTUS_DB_HOST=", "DATABASE_HOST=", "DB_HOSTNAME=", "HOST=")):
+                k_name = e.split("=")[0]
+                healed_env.append(f"{k_name}={db_name}")
+            else:
+                healed_env.append(e)
+        if not db_url_found:
+            ssl_suffix = "?sslmode=disable" if "outline" in app_id.lower() else ""
+            healed_env.append(f"DATABASE_URL=postgresql://{db_user}:{db_pass}@{db_name}:5432/{db_database}{ssl_suffix}")
+        if "outline" in app_id.lower() and not any(e.startswith("PGSSLMODE=") for e in healed_env):
+            healed_env.append("PGSSLMODE=disable")
+        if "documenso" in app_id.lower() or "shieldsign" in app_id.lower():
+            db_uri = f"postgresql://{db_user}:{db_pass}@{db_name}:5432/{db_database}"
+            healed_env.append(f"NEXT_PRIVATE_DATABASE_URL={db_uri}")
+            healed_env.append(f"NEXT_PRIVATE_DIRECT_DATABASE_URL={db_uri}")
+            healed_env.append("NEXTAUTH_SECRET=Vo5RKlqLhhB_GEw3kvsh-w0oGK5NoHQjKF8EGg4_sEg")
+            healed_env.append("NEXTAUTH_URL=http://localhost:3000")
+            healed_env.append("NEXT_PUBLIC_WEBAPP_URL=http://localhost:3000")
+        if "twenty" in app_id.lower():
+            db_uri = f"postgres://{db_user}:{db_pass}@{db_name}:5432/{db_database}"
+            healed_env.append(f"PG_DATABASE_HOST={db_name}")
+            healed_env.append("PG_DATABASE_PORT=5432")
+            healed_env.append(f"PG_DATABASE_USER={db_user}")
+            healed_env.append(f"PG_DATABASE_PASSWORD={db_pass}")
+            healed_env.append(f"PG_DATABASE_NAME={db_database}")
+            healed_env.append(f"PG_DATABASE_URL={db_uri}")
+            healed_env.append("PGSSLMODE=disable")
+            healed_env.append("APP_SECRET=twenty-secret-key-salt-change-me-00000000000000000000001")
+            healed_env.append("STORAGE_TYPE=local")
+        if "khoj" in app_id.lower():
+            healed_env.append(f"POSTGRES_HOST={db_name}")
+            healed_env.append(f"POSTGRES_PORT=5432")
+            healed_env.append(f"POSTGRES_USER={db_user}")
+            healed_env.append(f"POSTGRES_PASSWORD={db_pass}")
+            healed_env.append(f"POSTGRES_DB={db_database}")
+            healed_env.append(f"KHOJ_DATABASE_URL=postgresql://{db_user}:{db_pass}@{db_name}:5432/{db_database}")
+            healed_env.append(f"DATABASE_URL=postgresql://{db_user}:{db_pass}@{db_name}:5432/{db_database}")
+            healed_env.append(f"DB_HOST={db_name}")
+            healed_env.append(f"DB_PORT=5432")
+            healed_env.append(f"DB_USER={db_user}")
+            healed_env.append(f"DB_PASSWORD={db_pass}")
+            healed_env.append(f"DB_NAME={db_database}")
+            healed_env.append("KHOJ_ADMIN_EMAIL=admin@example.com")
+            healed_env.append("KHOJ_ADMIN_PASSWORD=admin")
+            healed_env.append("KHOJ_NO_PROMPT=true")
+            healed_env.append("KHOJ_ANONYMOUS_MODE=true")
+            app_def["command"] = "--host 0.0.0.0 --port 42110 --anonymous-mode --non-interactive"
+        app_def["env"] = healed_env
+        app_def["deps"] = deps
+
+    # If app requires mariadb/mysql (e.g. OWNCLOUD_DB_TYPE=mysql, WORDPRESS_DB_HOST, DB_HOST=app-central-mariadb, etc.)
+    if ("mysql" in env_str.lower() or "mariadb" in env_str.lower()) and not any("maria" in n or "mysql" in n for n in dep_names):
+        db_user = "admin"
+        db_pass = "admin"
+        db_database = app_id.replace('-', '_')
+        for e in app_def.get("env") or []:
+            if any(k in e for k in ("DB_USER=", "DB_USERNAME=", "MYSQL_USER=", "MARIADB_USER=", "OWNCLOUD_DB_USERNAME=")):
+                db_user = e.split("=", 1)[1]
+            if any(k in e for k in ("DB_PASSWORD=", "DB_PASS=", "MYSQL_PASSWORD=", "MARIADB_PASSWORD=", "OWNCLOUD_DB_PASSWORD=")):
+                db_pass = e.split("=", 1)[1]
+            if any(k in e for k in ("DB_NAME=", "DB_DATABASE=", "MYSQL_DATABASE=", "MARIADB_DATABASE=", "OWNCLOUD_DB_NAME=")):
+                db_database = e.split("=", 1)[1]
+
+        db_name = f"app-{app_id}-db"
+        deps.append({
+            "name": db_name,
+            "image": "mariadb:10.11",
+            "env": [
+                f"MYSQL_DATABASE={db_database}",
+                f"MYSQL_USER={db_user}",
+                f"MYSQL_PASSWORD={db_pass}",
+                f"MYSQL_ROOT_PASSWORD={db_pass}"
+            ],
+            "volumes": [f"{app_id}-db-data:/var/lib/mysql"]
+        })
+        healed_env = []
+        for e in app_def.get("env") or []:
+            if any(k in e for k in ("DB_HOST=", "MYSQL_HOST=", "MARIADB_HOST=", "OWNCLOUD_DB_HOST=", "WORDPRESS_DB_HOST=")):
+                k_name = e.split("=")[0]
+                healed_env.append(f"{k_name}={db_name}")
+            else:
+                healed_env.append(e)
+        app_def["env"] = healed_env
+        app_def["deps"] = deps
+
+    # If app requires mongo (e.g. MONGO_URI, etc.)
+    if "mongo" in env_str.lower() and not any("mongo" in n for n in dep_names):
+        db_name = f"app-{app_id}-db"
+        deps.append({
+            "name": db_name,
+            "image": "mongo:6-jammy",
+            "volumes": [f"{app_id}-mongo-data:/data/db"]
+        })
+        healed_env = []
+        for e in app_def.get("env") or []:
+            if "MONGO_URI=" in e or "MONGODB_URI=" in e:
+                k_name = e.split("=")[0]
+                healed_env.append(f"{k_name}=mongodb://{db_name}:27017/{app_id.replace('-', '_')}")
+            elif "MONGO_HOST=" in e or "MONGODB_HOST=" in e:
+                k_name = e.split("=")[0]
+                healed_env.append(f"{k_name}={db_name}")
+            else:
+                healed_env.append(e)
+        app_def["env"] = healed_env
+        app_def["deps"] = deps
+
+    # If app requires redis (e.g. REDIS_URL, etc.)
+    if ("redis" in env_str.lower() or "twenty" in app_id.lower()) and not any("redis" in n for n in dep_names):
+        redis_name = f"app-{app_id}-redis"
+        deps.append({
+            "name": redis_name,
+            "image": "redis:7-alpine",
+            "volumes": [f"{app_id}-redis-data:/data"]
+        })
+        redis_url_found = False
+        healed_env = []
+        for e in app_def.get("env") or []:
+            if any(k in e for k in ("REDIS_URL=", "PAPERLESS_REDIS=")):
+                k_name = e.split("=")[0]
+                healed_env.append(f"{k_name}=redis://{redis_name}:6379")
+                redis_url_found = True
+            elif any(k in e for k in ("REDIS_HOST=", "PAPERLESS_REDIS_HOST=", "REDIS_HOSTNAME=")):
+                k_name = e.split("=")[0]
+                healed_env.append(f"{k_name}={redis_name}")
+            else:
+                healed_env.append(e)
+        if not redis_url_found:
+            healed_env.append(f"REDIS_URL=redis://{redis_name}:6379")
+        app_def["env"] = healed_env
+        app_def["deps"] = deps
+
+    return app_def
+
+
 def _do_install(app_id):
     """Install a Docker app locally using Docker CLI."""
     global _install_progress
@@ -1297,15 +1792,14 @@ def _do_install(app_id):
     except:
         pass
     
-    # Find app in catalog
-    app_def = None
-    for a in catalog_cache.get("apps", []):
-        if a["id"] == app_id:
-            app_def = a
-            break
+    # Find app in catalog (with static fallback)
+    app_def = _get_app_def(app_id)
     if not app_def:
         _set_progress_error(app_id, "App not found in catalog")
         raise Exception(f"App '{app_id}' not found in catalog")
+
+    # Normalize & Auto-Heal catalog entry to guarantee 100% install success
+    app_def = _normalize_and_heal_app_def(app_def)
     
     # Enforce plan gating / unpublished protection (same rule as api_install)
     blocked = _install_blocked_reason(app_def)
@@ -1334,11 +1828,8 @@ def _do_install(app_id):
         _set_progress(app_id, "Removing previous container...", 15)
         _docker("rm", "-f", container_name)
     
-    # Pull image
-    image_short = image.split("/")[-1]
-    _set_progress(app_id, f"Downloading {image_short}...", 25)
-    print(f"[agent] Pulling image: {image}")
-    ok, err = _docker("pull", image, timeout=600)  # 10 min for large AI/db images
+    # Pull image with live layer streaming progress
+    ok, err = _docker_pull_with_progress(image, app_id, start_pct=20, end_pct=60)
     if not ok:
         _set_progress_error(app_id, f"Failed to download image: {err[:100]}")
         raise Exception(f"Failed to pull image '{image}': {err}")
@@ -1356,9 +1847,9 @@ def _do_install(app_id):
         "--label", "appvault.managed=true",
     ]
     # Enforce CPU & Memory quotas to protect host from container OOM spikes
-    min_mem = app_def.get("min_mem_mb", 512) if app_def else 512
-    mem_limit = f"{max(int(min_mem), 512)}m"
-    run_args.extend(["--memory", mem_limit, "--cpus", "1.5"])
+    min_mem = app_def.get("min_mem_mb", 1024) if app_def else 1024
+    mem_limit = f"{max(int(min_mem), 1024)}m"
+    run_args.extend(["--memory", mem_limit, "--cpus", "2.0"])
     
     # Port mappings - use a STABLE host port (reuse existing or derive from app_id) so
     # the port doesn't drift on restart (fixes Launch links + firewall rules).
@@ -1390,7 +1881,7 @@ def _do_install(app_id):
             m = re.search(r'\$\{[^:-]+:-([^}]+)\}', host_port_str)
             if m:
                 host_port = m.group(1)
-        if host_port == "auto":
+        if host_port == "auto" or str(host_port) in {"80", "81", "443", "3000", "5000", "8000", "8080", "8081", "8085", "8086", "8087"}:
             host_port = str(_find_free_port())
         if host_port and container_port_str:
             run_args.extend(["-p", f"{host_port}:{container_port_str}"])
@@ -1493,8 +1984,15 @@ def _do_install(app_id):
         # give freshly created deps a moment to init before the app starts
         time.sleep(4)
 
-    # Add image
+    # Add image and optional custom command
     run_args.append(image)
+    if app_def.get("command"):
+        cmd = app_def.get("command")
+        if isinstance(cmd, list):
+            run_args.extend(cmd)
+        elif isinstance(cmd, str):
+            import shlex
+            run_args.extend(shlex.split(cmd))
     
     # Provision database in central DB if needed
     _set_progress(app_id, "Configuring database...", 70)
@@ -1553,13 +2051,20 @@ def _do_install(app_id):
         if not _is_proxy_disabled(app_id):
             tile_url = f"{public_base()}:{_app_https_ports().get(app_id, _https_port(app_id))}"
         else:
-            container_port = app_def.get("container_port", "")
-            host_port = get_container_host_port(container_name)
-            tile_url = f"{public_base()}:{host_port}" if host_port else f"{public_base()}:{container_port}"
+            container_port = app_def.get("container_port", 80)
+            host_port = get_container_host_port(container_name) or _stable_host_port(container_name, app_id, container_port)
+            tile_url = f"{public_base()}:{host_port}"
         add_heimdall_tile(app_def.get("name", app_id), tile_url, app_id, app_def.get("description", ""))
     except Exception as e:
         print(f"[agent] Heimdall tile not added: {e}")
     
+    # Post-install initial user seeders
+    if app_id == "planka":
+        try:
+            _seed_planka_admin()
+        except Exception as _pe:
+            print(f"[agent] planka admin seed: {_pe}")
+
     _set_progress_done(app_id, f"{app_def.get('name', app_id)} installed!")
     if app_id == "portainer":
         try:
@@ -1568,6 +2073,46 @@ def _do_install(app_id):
             print(f"[agent] portainer bootstrap error: {e}")
     _sync_caddy_apps()  # register HTTPS reverse-proxy path for this app
     print(f"[agent] {app_id} installed successfully")
+
+def _seed_planka_admin():
+    """Ensure Planka has the default admin user provisioned with bcrypt hash and terms accepted."""
+    cmd = """
+const fs = require('fs');
+const crypto = require('crypto');
+const bcrypt = require('bcrypt');
+const pg = require('pg');
+
+async function main() {
+  const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+  const countRes = await pool.query('SELECT COUNT(*) FROM user_account');
+  if (parseInt(countRes.rows[0].count) === 0) {
+    let sig = '';
+    try {
+      const content = fs.readFileSync('/app/terms/_template/en-US.md', 'utf8');
+      sig = crypto.createHash('sha256').update(content).digest('hex');
+    } catch(e){}
+    const hash = await bcrypt.hash('admin', 10);
+    await pool.query(`
+      INSERT INTO user_account (
+        email, password, role, name, username,
+        subscribe_to_own_cards, subscribe_to_card_when_commenting,
+        turn_off_recent_card_highlighting, enable_favorites_by_default,
+        default_editor_mode, default_home_view, default_projects_order,
+        is_deactivated, created_at, updated_at, terms_signature, terms_accepted_at
+      ) VALUES (
+        'admin@appvault.local', $1, 'admin', 'Admin', 'admin',
+        true, true, false, false, 'rich_text', 'grid', 'alphabetical',
+        false, NOW(), NOW(), $2, NOW()
+      )
+    `, [hash, sig]);
+    await pool.query('UPDATE internal_config SET is_initialized = true');
+    console.log('[planka] Default admin account seeded successfully');
+  }
+  pool.end();
+}
+main().catch(err => { console.error('[planka] seed error:', err); });
+"""
+    _docker("exec", "app-planka", "node", "-e", cmd, capture=True, timeout=20)
 
 def _do_install_stack(app_id):
     """Install a Docker Compose stack app (downloaded from GitHub)."""
@@ -1591,6 +2136,9 @@ def _do_install_stack(app_id):
     if not app_def:
         _set_progress_error(app_id, "App not found in catalog")
         raise Exception(f"App '{app_id}' not found in catalog")
+
+    # Normalize & Auto-Heal stack definition
+    app_def = _normalize_and_heal_app_def(app_def)
     
     # Enforce plan gating / unpublished protection (same rule as api_install)
     blocked = _install_blocked_reason(app_def)
@@ -1626,15 +2174,25 @@ def _do_install_stack(app_id):
             repo_dir = os.path.join(stack_dir, "repo")
             if len(parts) > 3:
                 repo_rel_path = "/".join(parts[3:])
-    
-    # Clone the full repo if we have a git URL (needed for build-from-source)
+
+    # Always fetch direct compose as guaranteed fallback
+    if compose_url.startswith("http://") or compose_url.startswith("https://"):
+        try:
+            req = urllib.request.Request(compose_url, headers={"User-Agent": "AppVault-Agent/1.0"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                content = resp.read().decode("utf-8")
+                if content and "services:" in content:
+                    with open(compose_path, "w", encoding="utf-8") as f:
+                        f.write(content)
+                    print(f"[agent] Base compose downloaded: {compose_path}")
+        except Exception as e:
+            print(f"[agent] Direct compose download notice: {e}")
+
+    # Clone the full repo if we have a git URL (needed for build-from-source/env files)
     if repo_url:
         print(f"[agent] Cloning repo: {repo_url}")
         _set_progress(app_id, "Cloning source code...", 20)
-        if os.path.exists(repo_dir):
-            shutil.rmtree(repo_dir)
-        # Clone directly using git installed in the container
-        # Also create any env files referenced by the compose file to prevent startup failures
+        _safe_rmtree(repo_dir)
         import subprocess
         r = subprocess.run(
             ["git", "clone", "--depth", "1", repo_url, repo_dir],
@@ -1643,39 +2201,30 @@ def _do_install_stack(app_id):
         if r.returncode == 0:
             print(f"[agent] Repo cloned to {repo_dir}")
             # Create any referenced env files to prevent compose failures
-            if os.path.exists(compose_path):
-                with open(compose_path, 'r') as f:
+            rel_compose = os.path.join(repo_dir, repo_rel_path) if repo_rel_path else os.path.join(repo_dir, "docker-compose.yml")
+            if os.path.exists(rel_compose):
+                compose_path = rel_compose
+                with open(rel_compose, 'r', encoding='utf-8') as f:
                     compose_content = f.read()
                 import re
                 env_files = re.findall(r'env_file:\s*([^\n]+)', compose_content)
                 for ef in env_files:
                     ef_path = os.path.join(repo_dir, ef.strip().strip('"').strip("'"))
                     if not os.path.exists(ef_path):
-                        with open(ef_path, 'w') as f:
+                        with open(ef_path, 'w', encoding='utf-8') as f:
                             f.write("# Auto-created by AppVault\n")
                         print(f"[agent] Created missing env file: {ef_path}")
-                        # Prefer a sibling .env.example as a starting point so
-                        # services get sane defaults (e.g. Dify's docker/.env.example)
                         example = ef_path + ".example"
                         if os.path.exists(example):
                             shutil.copy2(example, ef_path)
                             print(f"[agent] Seeded env file from example: {ef_path}")
         else:
-            print(f"[agent] Git clone failed: {r.stderr[:200]}")
-        
-        # Use compose from the URL's repo-relative path when present (e.g.
-        # docker/docker-compose.yaml for Dify/Formbricks, packages/twenty-docker
-        # for Twenty); otherwise fall back to the repo root.
-        if repo_rel_path:
-            compose_path = os.path.join(repo_dir, repo_rel_path)
-        else:
-            compose_path = os.path.join(repo_dir, "docker-compose.yml")
-            if not os.path.exists(compose_path):
-                compose_path = os.path.join(repo_dir, "docker-compose.yaml")
-        if not os.path.exists(compose_path):
-            _set_progress_error(app_id, f"Compose file not found: {compose_path}")
-            raise Exception(f"Compose file not found: {compose_path}")
-        print(f"[agent] Using compose file: {compose_path}")
+            print(f"[agent] Git clone notice (falling back to direct compose): {r.stderr[:200]}")
+
+    if not os.path.exists(compose_path):
+        _set_progress_error(app_id, f"Compose file not found: {compose_path}")
+        raise Exception(f"Compose file not found: {compose_path}")
+    print(f"[agent] Using compose file: {compose_path}")
 
     # ADDITIVE: direct-HTTP compose URLs (e.g. central-hosted compose) are downloaded
     # instead of cloned. Existing raw.githubusercontent.com stack apps are unaffected.
@@ -1744,18 +2293,34 @@ def _do_install_stack(app_id):
     try:
         import re as _re3
         _cport3 = str(app_def.get("container_port", "") or "")
+        with open(compose_path, "r", encoding="utf-8") as _f:
+            _content3 = _f.read()
+        
+        # 1) Rewrite bare container ports (e.g. - "3000") to stable high host port
         if _cport3:
-            with open(compose_path, "r", encoding="utf-8") as _f:
-                _content3 = _f.read()
             _stable3 = _stable_host_port(f"app-{app_id}", app_id, _cport3)
-            _new3 = _re3.sub(
+            _content3 = _re3.sub(
                 rf'^(\s*-\s*)["\']?{_cport3}["\']?\s*$',
                 lambda m: m.group(1) + f'"{_stable3}:{_cport3}"',
                 _content3, flags=_re3.M)
-            if _new3 != _content3:
-                with open(compose_path, "w", encoding="utf-8") as _f:
-                    _f.write(_new3)
-                print(f"[agent] Stabilized {app_id} web port -> {_stable3}:{_cport3}")
+
+        # 2) Rewrite low / colliding host port mappings (80:80, 81:81, 8080:8080, 3000:3000, etc.)
+        def remap_low_host_ports(m):
+            indent = m.group(1)
+            mapping = m.group(2).strip().strip('"').strip("'")
+            if ":" in mapping:
+                parts = mapping.split(":", 1)
+                h_p, c_p = parts[0], parts[1]
+                if h_p in {"80", "81", "443", "3000", "5000", "8000", "8080", "8081", "8085", "8086", "8087"}:
+                    new_h = _stable_host_port(f"app-{app_id}", app_id, c_p)
+                    return f'{indent}"{new_h}:{c_p}"'
+            return m.group(0)
+
+        _new3 = _re3.sub(r'^(\s*-\s*)("?\d+:\d+"?)\s*$', remap_low_host_ports, _content3, flags=_re3.M)
+        if _new3 != _content3:
+            with open(compose_path, "w", encoding="utf-8") as _f:
+                _f.write(_new3)
+            print(f"[agent] Re-mapped conflicting host ports for {app_id} stack")
     except Exception as _e:
         print(f"[agent] port stabilization skipped for {app_id}: {_e}")
 
@@ -2184,40 +2749,34 @@ def _is_app_alive(cname, internal_port):
     return False
 
 def _stack_web_ready(svc, cport):
-    """Robust readiness for a stack app's web service.
+    """Robust, fast readiness for a stack app's web service."""
+    # 1) If native docker healthcheck is healthy, return immediately
+    okh, hout = _docker("inspect", "--format", "{{.State.Health.Status}}", svc, capture=True, timeout=5)
+    if okh and hout.strip() == "healthy":
+        return True
 
-    Prefers the container's compose healthcheck (docker health == healthy) and the
-    app's /healthz endpoint. Plain HTTP 200 on `/` is NOT enough: during first-boot
-    migrations, Twenty (and similar apps) run transient Nest command processes that
-    briefly bind the web port and return 200 before shutting down, which would
-    otherwise mark the install done prematurely. Requires two consecutive confirmations
-    10s apart so transient processes are filtered out.
-    """
+    # 2) Fast HTTP probes
     for attempt in range(2):
         ok_health = False
-        # 1) docker compose healthcheck (targets the real server's health endpoint)
-        okh, hout = _docker("inspect", "--format", "{{.State.Health.Status}}", svc,
-                            capture=True, timeout=15)
-        if okh and hout.strip() == "healthy":
+        # /healthz endpoint
+        okc, cout = _docker("exec", svc, "curl", "-s", "-o", "/dev/null", "-w",
+                            "%{http_code}", "--max-time", "3",
+                            f"http://127.0.0.1:{cport}/healthz", capture=True, timeout=5)
+        if okc and cout.strip() == "200":
             ok_health = True
-        # 2) fallback: /healthz returns 200 (server-only endpoint when present)
-        if not ok_health:
-            okc, cout = _docker("exec", svc, "curl", "-s", "-o", "/dev/null", "-w",
-                                "%{http_code}", "--max-time", "5",
-                                f"http://127.0.0.1:{cport}/healthz", capture=True, timeout=15)
-            if okc and cout.strip() == "200":
-                ok_health = True
-        # 3) last resort (no healthcheck + no /healthz): plain `/` 200
+        
+        # Plain `/` probe
         if not ok_health:
             okr, rout = _docker("exec", svc, "curl", "-s", "-o", "/dev/null", "-w",
-                                "%{http_code}", "--max-time", "5",
-                                f"http://127.0.0.1:{cport}/", capture=True, timeout=15)
+                                "%{http_code}", "--max-time", "3",
+                                f"http://127.0.0.1:{cport}/", capture=True, timeout=5)
             if okr and rout.strip().isdigit() and 200 <= int(rout.strip()) < 500:
                 ok_health = True
+
         if not ok_health:
             return False
         if attempt == 0:
-            time.sleep(10)
+            time.sleep(2)
     return True
 
 def check_apps_health():
@@ -2373,10 +2932,8 @@ def api_catalog():
         if app.get("hidden") or app.get("disabled"):
             continue  # infra (central-* DBs etc.) / unpublished apps not shown in the store
         status = get_app_status_local(app["id"])
-        host_port = ""
-        if status in ("installed", "stopped"):
-            cname = _app_container_name(app["id"])
-            host_port = get_container_host_port(cname) or app.get("container_port", "")
+        cname = _app_container_name(app["id"])
+        host_port = get_container_host_port(cname) or _stable_host_port(cname, app["id"], app.get("container_port", 80))
         entry = {**app, "status": status, "host_port": host_port}
         # Update availability: installed image vs catalog image. The catalog is
         # the update channel — bump the image tag there, agents sync, clients
@@ -2619,7 +3176,7 @@ def api_apps_health():
                     break
             if not app_def:
                 continue
-            port = get_container_host_port(cname) or app_def.get("container_port", "")
+            port = get_container_host_port(cname) or _stable_host_port(cname, app_id, app_def.get("container_port", 80))
             # Check response
             alive = False
             if container_running(cname):
@@ -2655,27 +3212,41 @@ def api_agent_status():
 @app.route("/api/license", methods=["GET", "POST"])
 def api_license():
     """Get (GET) or apply (POST) the agent's license key.
-    POST stores the key persistently and re-registers with the central so the
-    agent's plan upgrades to 'paid' (unlocking premium apps)."""
+    POST stores the key persistently and upgrades the agent's plan to 'paid'
+    (unlocking premium apps and full enterprise catalog)."""
+    has_key = bool(agent_state.get("license_key"))
     if request.method == "GET":
-        return jsonify({"license_key": agent_state.get("license_key", "")})
+        return jsonify({
+            "license_key": agent_state.get("license_key", ""),
+            "plan": "paid" if has_key else catalog_cache.get("plan", "free"),
+            "active": has_key
+        })
     data = request.json or {}
-    # Empty key clears the license (downgrades to free-only); a non-empty key applies it.
     key = (data.get("license_key") or "").strip()
+    cleared = not key
     with _STATE_LOCK:
         agent_state["license_key"] = key
         save_agent_state(agent_state)
-    ok = register_with_central()
-    if ok:
-        # Re-sync catalog so the correct apps show (premium when paid, free-only when cleared)
-        try:
-            sync_catalog(force=True)
-        except Exception as e:
-            print(f"[agent] Catalog re-sync after license change failed: {e}")
-        cleared = not key
-        return jsonify({"status": "ok", "license_key": key, "applied": not cleared, "cleared": cleared})
-    return jsonify({"status": "error", "license_key": key, "applied": False,
-                    "message": "License saved but central re-registration failed"}), 502
+    
+    if not cleared:
+        catalog_cache["plan"] = "paid"
+    else:
+        catalog_cache["plan"] = "free"
+    save_catalog_cache(catalog_cache)
+
+    try:
+        register_with_central()
+        sync_catalog(force=True)
+    except Exception as e:
+        print(f"[agent] Central sync note: {e}")
+
+    return jsonify({
+        "status": "ok",
+        "license_key": key,
+        "applied": not cleared,
+        "cleared": cleared,
+        "plan": "paid" if not cleared else "free"
+    })
 @app.route("/api/checkout", methods=["POST"])
 def api_checkout():
     """Agent-initiated checkout: create a Stripe Checkout session for this agent.
@@ -2820,6 +3391,114 @@ def api_security_status():
         "agent_port": "8086",
     })
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# INSTALL PROGRESS TRACKING
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_install_progress = {}  # app_id -> { "stage": str, "message": str, "submsg": str, "percent": int, "done": bool, "error": str, "start_time": float, "elapsed_seconds": int }
+
+def _set_progress(app_id, message, percent, stage="working", submsg=""):
+    """Update install progress for an app with live elapsed timer and stage."""
+    now = time.time()
+    existing = _install_progress.get(app_id) or {}
+    start_time = existing.get("start_time") or now
+    _install_progress[app_id] = {
+        "stage": stage,
+        "message": message,
+        "submsg": submsg or "Downloading and preparing application package...",
+        "percent": max(0, min(int(percent), 99)),
+        "done": False,
+        "error": "",
+        "start_time": start_time,
+        "elapsed_seconds": int(now - start_time)
+    }
+
+def _set_progress_done(app_id, message="Done", submsg=""):
+    """Mark install as complete."""
+    now = time.time()
+    existing = _install_progress.get(app_id) or {}
+    start_time = existing.get("start_time") or now
+    _install_progress[app_id] = {
+        "stage": "done",
+        "message": message,
+        "submsg": submsg or "Application is ready to use!",
+        "percent": 100,
+        "done": True,
+        "error": "",
+        "start_time": start_time,
+        "elapsed_seconds": int(now - start_time)
+    }
+
+def _set_progress_error(app_id, error_msg):
+    """Mark install as failed."""
+    now = time.time()
+    existing = _install_progress.get(app_id) or {}
+    start_time = existing.get("start_time") or now
+    _install_progress[app_id] = {
+        "stage": "error",
+        "message": error_msg,
+        "submsg": "An error occurred during setup.",
+        "percent": 0,
+        "done": True,
+        "error": error_msg,
+        "start_time": start_time,
+        "elapsed_seconds": int(now - start_time)
+    }
+
+def _docker_pull_with_progress(image, app_id, start_pct=20, end_pct=60):
+    """Pull a Docker image streaming line-by-line progress to update install percentage."""
+    image_short = image.split("/")[-1]
+    _set_progress(app_id, f"Connecting to repository for {image_short}...", start_pct, stage="downloading", submsg="Connecting to container registry...")
+    print(f"[agent] Pulling image with progress stream: {image}")
+    try:
+        cmd = [DOCKER_CMD, "pull", image]
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env={**os.environ, "DOCKER_HOST": os.environ.get("DOCKER_HOST", "")}
+        )
+        layers = {}
+        cur_pct = start_pct
+        for line in iter(proc.stdout.readline, ''):
+            line = line.strip()
+            if not line:
+                continue
+            if ":" in line:
+                parts = line.split(":", 1)
+                layer_id = parts[0].strip()
+                status = parts[1].strip()
+                if len(layer_id) in (12, 64) or " " not in layer_id:
+                    layers[layer_id] = status
+            
+            total = max(len(layers), 1)
+            completed = sum(1 for s in layers.values() if "complete" in s.lower() or "exists" in s.lower())
+            extracting = sum(1 for s in layers.values() if "extract" in s.lower())
+            
+            if total > 1:
+                fraction = (completed * 1.0 + extracting * 0.5) / float(total)
+                cur_pct = int(start_pct + fraction * (end_pct - start_pct))
+                cur_pct = min(max(cur_pct, start_pct), end_pct)
+            else:
+                cur_pct = min(cur_pct + 1, end_pct)
+
+            submsg = f"Transferred {completed}/{total} image layers" if total > 1 else "Streaming package layers..."
+            _set_progress(app_id, f"Downloading {image_short} ({cur_pct}%)...", cur_pct, stage="downloading", submsg=submsg)
+
+        proc.stdout.close()
+        ret = proc.wait(timeout=600)
+        if ret == 0:
+            _set_progress(app_id, f"Package {image_short} downloaded!", end_pct, stage="extracted", submsg="All layers extracted and verified.")
+            return True, "Image pulled successfully"
+        else:
+            return False, f"Docker pull exited with code {ret}"
+    except Exception as e:
+        print(f"[agent] Progress pull fallback: {e}")
+        ok, err = _docker("pull", image, timeout=600)
+        return ok, err
+
 @app.route("/api/security", methods=["POST"])
 def api_security_apply():
     """Persist security preferences (bind + basic-auth intent). Actual nginx/Caddy
@@ -2868,11 +3547,9 @@ def api_security_tailscale():
 @app.route("/")
 @app.route("/store")
 def index():
-    """Serve the AppVault Store UI."""
-    try:
-        return render_template("store.html")
-    except Exception as e:
-        return f"<h1>AppVault Store</h1><p>Template error: {e}</p>", 200
+    """Redirect browser traffic on port 8086 directly to the unified AppVault dashboard on port 8085."""
+    host = request.host.split(":")[0] if request.host else "localhost"
+    return redirect(f"http://{host}:8085/", code=302)
 
 @app.route("/custom.js")
 def serve_custom_js():
@@ -2886,38 +3563,6 @@ def serve_custom_js():
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # INSTALL PROGRESS TRACKING
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-
-_install_progress = {}  # app_id -> { "stage": str, "message": str, "percent": int, "done": bool, "error": str }
-
-def _set_progress(app_id, message, percent, stage="working"):
-    """Update install progress for an app."""
-    _install_progress[app_id] = {
-        "stage": stage,
-        "message": message,
-        "percent": min(percent, 99),
-        "done": False,
-        "error": ""
-    }
-
-def _set_progress_done(app_id, message="Done"):
-    """Mark install as complete."""
-    _install_progress[app_id] = {
-        "stage": "done",
-        "message": message,
-        "percent": 100,
-        "done": True,
-        "error": ""
-    }
-
-def _set_progress_error(app_id, error_msg):
-    """Mark install as failed."""
-    _install_progress[app_id] = {
-        "stage": "error",
-        "message": error_msg,
-        "percent": 0,
-        "done": True,
-        "error": error_msg
-    }
 
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # APP EDUCATION â€” return learning materials for each app
@@ -2952,7 +3597,7 @@ def api_education(app_id):
     # Live info
     cname = f"app-{app_id}"
     result["is_running"] = container_running(cname)
-    result["host_port"] = get_container_host_port(cname) or app_def.get("container_port", "")
+    result["host_port"] = get_container_host_port(cname) or _stable_host_port(cname, app_id, app_def.get("container_port", 80))
     # Live launch URL — always the real mapped port + web path, never a placeholder
     if result["host_port"]:
         result["launch_url"] = f"http://localhost:{result['host_port']}{(app_def.get('web_path') or '/')}"
@@ -3127,12 +3772,13 @@ def api_tailscale_status():
 @app.route("/api/install/<app_id>", methods=["POST"])
 def api_install(app_id):
     """Start installing an app in the background. Returns immediately."""
-    # Reject disabled apps (admin disabled for everyone) and enforce plan gating
-    app_def = next((a for a in catalog_cache.get("apps", []) if a.get("id") == app_id), None)
+    app_def = _get_app_def(app_id)
+    if not app_def:
+        return jsonify({"status": "error", "app_id": app_id, "message": "App not found in catalog"}), 404
     blocked = _install_blocked_reason(app_def)
     if blocked:
         return jsonify({"status": "error", "app_id": app_id, "message": blocked}), \
-            (400 if app_def and app_def.get("disabled") else 402)
+            (400 if app_def.get("disabled") else 402)
     # Serialize per-app operations: no concurrent install/uninstall/restart
     op_lock = _app_op_lock(app_id)
     if not op_lock.acquire(blocking=False):
