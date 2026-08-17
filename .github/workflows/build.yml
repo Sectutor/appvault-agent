@@ -1,7 +1,7 @@
-# Build & push appvault-agent to ghcr on every push (and on v* tags).
+# Build & push appvault-agent to ghcr on every push (and on v* tags), then auto-deploy to Coolify.
 # Push to main/master  -> ghcr.io/sectutor/appvault-agent:{latest, sha-<short>}
 # Push a v* tag        -> ghcr.io/sectutor/appvault-agent:<tag>
-# No secrets needed: the built-in GITHUB_TOKEN can write packages for the owner.
+# GHCR_PAT secret must be a PAT with write:packages (GITHUB_TOKEN cannot write to unlinked packages).
 name: build-agent-image
 on:
   push:
@@ -22,8 +22,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Log in to ghcr
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+      - name: Log in to ghcr (PAT)
+        run: echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u Sectutor --password-stdin
       - name: Build & push
         run: |
           IMG=ghcr.io/sectutor/appvault-agent
@@ -35,3 +35,21 @@ jobs:
             docker tag "$IMG:latest" "$IMG:${GITHUB_REF#refs/tags/}"
             docker push "$IMG:${GITHUB_REF#refs/tags/}"
           fi
+      - name: Trigger Coolify redeploy
+        if: always()
+        env:
+          COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+        run: |
+          if [ -z "$COOLIFY_URL" ] || [ -z "$COOLIFY_TOKEN" ]; then
+            echo "⚠️ COOLIFY_URL/COOLIFY_TOKEN secrets not set — skipping Coolify deploy"
+            exit 0
+          fi
+          for UUID in ${{ vars.COOLIFY_APP_UUIDS }}; do
+            echo "→ Deploying app $UUID on Coolify"
+            curl -sf -X POST \
+              -H "Authorization: Bearer $COOLIFY_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"uuid\": \"$UUID\", \"force\": true}" \
+              "$COOLIFY_URL/api/v1/deploy" || echo "  (deploy failed or UUID unknown — check Coolify)"
+          done
