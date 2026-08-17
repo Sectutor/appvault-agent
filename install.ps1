@@ -271,6 +271,13 @@ if (& $docker ps -a --filter "name=^/appvault-agent$" --format '{{.Names}}' 2>$n
     & $docker rm appvault-agent 2>$null | Out-Null
 }
 
+# Wipe stale agent identity so it re-registers with current central
+$stateFile = "$env:USERPROFILE\.appvault\data\agent_state.json"
+if (Test-Path $stateFile) {
+    Remove-Item $stateFile -Force
+    Success "Cleared stale agent identity — will re-register on start"
+}
+
 # Docker socket mount - the Linux VM path works on Linux, macOS, AND Windows
 # Docker Desktop (the engine runs in a Linux utility VM; the Windows named pipe
 # cannot be bind-mounted into a Linux container, which left installs failing
