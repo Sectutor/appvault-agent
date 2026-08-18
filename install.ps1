@@ -425,6 +425,34 @@ try {
     Warn "Dashboard setup failed (non-critical): $($_.Exception.Message)"
 }
 
+# ═══════════════════════════════════════════
+# STEP: Auto-update — watchtower
+# The team pushes new agent images to ghcr :latest; watchtower polls hourly
+# and recreates the agent (and store) containers automatically. The agent
+# keeps its /data volume, so its identity and catalog survive the update.
+# ═══════════════════════════════════════════
+Step "Installing Auto-Update (watchtower)"
+try {
+    if (& $docker ps -a --filter "name=^/appvault-watchtower$" --format '{{.Names}}' 2>$null | Select-String -Quiet "appvault-watchtower") {
+        & $docker rm -f appvault-watchtower 2>$null | Out-Null
+    }
+    & $docker pull containrrr/watchtower:latest 2>$null | Out-Null
+    & $docker run -d --name appvault-watchtower --restart unless-stopped `
+      -v /var/run/docker.sock:/var/run/docker.sock `
+      -e WATCHTOWER_CLEANUP=true `
+      -e WATCHTOWER_POLL_INTERVAL=3600 `
+      -e WATCHTOWER_INCLUDE_STOPPED=false `
+      -e DOCKER_API_VERSION=1.40 `
+      containrrr/watchtower:latest appvault-agent appvault-heimdall 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Success "Auto-update enabled — checks hourly for new agent/store images"
+    } else {
+        Warn "Auto-update setup failed (non-critical). Update manually: docker rm -f appvault-agent && re-run this installer"
+    }
+} catch {
+    Warn "Auto-update setup failed (non-critical): $($_.Exception.Message)"
+}
+
 # Register auto-start scheduled task so containers launch on Windows boot
 Step "Configuring Windows Startup Task"
 try {
