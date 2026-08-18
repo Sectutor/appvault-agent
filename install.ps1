@@ -270,13 +270,35 @@ if (-not (Test-Path $docker) -and -not (Get-Command $docker -ErrorAction Silentl
 $dockerEAP = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 
-& $docker pull ghcr.io/sectutor/appvault-agent:latest 2>$null
-$pullExit = $LASTEXITCODE
-& $docker pull ghcr.io/sectutor/appvault-releases:v69 2>$null
-if ($pullExit -eq 0) { $pullExit = $LASTEXITCODE }
+# Re-check the engine right before pulling (it may have dropped since step 6).
+if (-not (Test-DockerEngine)) {
+    $ErrorActionPreference = $dockerEAP
+    Fail "Docker engine is not running. Launch Docker Desktop, wait for 'Engine running', then run this installer again."
+}
+
+# Pull with retry + visible error text (transient network failures are common
+# on the first large pulls; a bare exit code hides the real reason).
+$script:lastPullError = ""
+function Pull-Image([string]$image) {
+    for ($try = 1; $try -le 3; $try++) {
+        $out = & $docker pull $image 2>&1
+        $code = $LASTEXITCODE
+        if ($code -eq 0) { return 0 }
+        $script:lastPullError = (($out | ForEach-Object { "$($_.ToString())" }) -join " ")
+        $script:lastPullError = $script:lastPullError -replace "\x1b\[[0-9;]*m", ""
+        if ($try -lt 3) {
+            Write-Host "  ⚠️  docker pull failed (exit $code) — retrying in 5s..." -ForegroundColor Yellow
+            Start-Sleep -Seconds 5
+        }
+    }
+    return 1
+}
+
+$pullExit = Pull-Image "ghcr.io/sectutor/appvault-agent:latest"
+if ($pullExit -eq 0) { $pullExit = Pull-Image "ghcr.io/sectutor/appvault-releases:v69" }
 if ($pullExit -ne 0) {
     $ErrorActionPreference = $dockerEAP
-    Fail "Could not pull the AppVault images (docker exit code $pullExit). Make sure Docker Desktop is running, then run this installer again."
+    Fail "Could not pull the AppVault images (exit $pullExit). Docker said: $script:lastPullError Make sure Docker Desktop is running and you have internet access, then run this installer again."
 }
 
 # Create data directory
