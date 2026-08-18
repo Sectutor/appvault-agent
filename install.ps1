@@ -241,10 +241,10 @@ try {
     if ($LASTEXITCODE -eq 0) {
         Success "Docker is running"
     } else {
-        Fail "Docker failed to start. Launch Docker Desktop manually, accept the license, and rerun this installer."
+        Write-Host "  Docker daemon not responding in this session — will try anyway..." -ForegroundColor Yellow
     }
 } catch {
-    Fail "Docker failed to start. Launch Docker Desktop manually, accept the license, and rerun this installer."
+    Write-Host "  Docker CLI not accessible — will try anyway..." -ForegroundColor Yellow
 }
 
 # ═══════════════════════════════════════════
