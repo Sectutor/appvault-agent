@@ -213,36 +213,55 @@ try {
 } catch {}
 
 if (-not $dockerOK) {
-    Write-Host "  Docker daemon not reachable — checking if Docker Desktop is running..." -ForegroundColor Yellow
+    Write-Host "  Docker daemon not reachable — attempting to start..." -ForegroundColor Yellow
     
-    # Check if Docker Desktop process is running
-    $ddProcess = Get-Process "Docker Desktop" -ErrorAction SilentlyContinue
-    if ($ddProcess) {
-        Write-Host "  Docker Desktop is running but daemon not responding. Restarting..." -ForegroundColor Yellow
-        # Restart Docker Desktop
-        Stop-Process -Name "Docker Desktop" -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 5
+    # Method 1: Start Docker Desktop service directly (works from elevated session)
+    $dockerService = Get-Service -Name "Docker Desktop Service" -ErrorAction SilentlyContinue
+    if ($dockerService -and $dockerService.Status -ne "Running") {
+        Write-Host "  Starting Docker Desktop Service..." -ForegroundColor Yellow
+        try {
+            Start-Service -Name "Docker Desktop Service" -ErrorAction Stop
+            Start-Sleep -Seconds 10
+        } catch {
+            Write-Host "  Could not start service directly: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
     }
     
-    # Try to find and start Docker Desktop
-    if (-not $dockerDesktopExe) {
-        $dockerDesktopExe = @(
-            "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe",
-            "$env:LOCALAPPDATA\Docker\Docker\Docker Desktop.exe",
-            (Get-ItemProperty "HKLM:\SOFTWARE\Docker Inc.\Docker Desktop" -ErrorAction SilentlyContinue).AppPath
-        ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
-    }
+    # Method 2: If service didn't help, try launching Docker Desktop GUI
+    try {
+        $info = & $docker info 2>&1
+        $dockerOK = $LASTEXITCODE -eq 0
+    } catch {}
     
-    if ($dockerDesktopExe -and (Test-Path $dockerDesktopExe)) {
-        Write-Host "  Starting Docker Desktop..." -ForegroundColor Yellow
-        Start-Process $dockerDesktopExe
-    } else {
-        Write-Host "  Docker Desktop GUI not found. Please start it manually from the Start menu." -ForegroundColor Yellow
+    if (-not $dockerOK) {
+        # Check if Docker Desktop process is running
+        $ddProcess = Get-Process "Docker Desktop" -ErrorAction SilentlyContinue
+        if ($ddProcess) {
+            Write-Host "  Docker Desktop is running but daemon not responding. Restarting..." -ForegroundColor Yellow
+            Stop-Process -Name "Docker Desktop" -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 5
+        }
+        
+        # Try to find and start Docker Desktop
+        if (-not $dockerDesktopExe) {
+            $dockerDesktopExe = @(
+                "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe",
+                "$env:LOCALAPPDATA\Docker\Docker\Docker Desktop.exe",
+                (Get-ItemProperty "HKLM:\SOFTWARE\Docker Inc.\Docker Desktop" -ErrorAction SilentlyContinue).AppPath
+            ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+        }
+        
+        if ($dockerDesktopExe -and (Test-Path $dockerDesktopExe)) {
+            Write-Host "  Starting Docker Desktop..." -ForegroundColor Yellow
+            Start-Process $dockerDesktopExe
+        } else {
+            Write-Host "  Docker Desktop GUI not found. Please start it manually from the Start menu." -ForegroundColor Yellow
+        }
+        
+        # Update WSL kernel (common cause of daemon not starting)
+        Write-Host "  Updating WSL kernel..." -ForegroundColor Yellow
+        try { wsl --update 2>$null | Out-Null } catch {}
     }
-    
-    # Update WSL kernel (common cause of daemon not starting)
-    Write-Host "  Updating WSL kernel..." -ForegroundColor Yellow
-    try { wsl --update 2>$null | Out-Null } catch {}
     
     Write-Host "  Waiting for the Docker engine (up to 5 minutes)..." -ForegroundColor Yellow
     Write-Host "  ⚠️  If a dialog appears (license, WSL update, sign-in), accept it — the installer keeps waiting." -ForegroundColor Yellow
