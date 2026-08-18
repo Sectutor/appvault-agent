@@ -5,6 +5,8 @@
 # ==============================================================================
 
 $ErrorActionPreference = "Stop"
+# Windows PowerShell 5.1 defaults to TLS 1.0/1.1, which modern HTTPS servers reject.
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
 $STEP = 0
 
 function Step($msg) {
@@ -102,12 +104,12 @@ $features = @(
 foreach ($f in $features) {
     # Use dism.exe — Get-WindowsOptionalFeature is Windows PowerShell 5.1 only
     # and fails with "Class not registered" under PowerShell 7.
-    $out = & dism.exe /online /Get-FeatureInfo /FeatureName:$($f.Name) 2>$null | Out-String
+    try { $out = & dism.exe /online /Get-FeatureInfo /FeatureName:$($f.Name) 2>$null | Out-String } catch { $out = "" }
     if ($out -match "State\s*:\s*Enabled") {
         Success "$($f.Label) — already enabled"
     } else {
         Warn "$($f.Label) — not enabled, installing..."
-        & dism.exe /online /Enable-Feature /FeatureName:$($f.Name) /All /NoRestart 2>$null | Out-Null
+        try { & dism.exe /online /Enable-Feature /FeatureName:$($f.Name) /All /NoRestart 2>$null | Out-Null } catch {}
         $needsReboot = $true
         Success "$($f.Label) — installed (reboot pending)"
     }
@@ -117,8 +119,14 @@ foreach ($f in $features) {
 # STEP 5: Install WSL kernel update if needed
 # ═══════════════════════════════════════════
 Step "Setting WSL2 as default and RAM safety limits"
-wsl --set-default-version 2 2>$null
-if ($LASTEXITCODE -eq 0) {
+try {
+    wsl --set-default-version 2 2>$null
+    $wslDefault2 = ($LASTEXITCODE -eq 0)
+} catch {
+    # PS 5.1 turns redirected native stderr into a terminating error
+    $wslDefault2 = $false
+}
+if ($wslDefault2) {
     Success "WSL2 set as default"
 } else {
     Warn "WSL kernel update may be needed."
@@ -159,7 +167,7 @@ $dockerCandidates = @(
     "$env:LOCALAPPDATA\Docker\Docker\resources\bin\docker.exe",
     (Get-Command docker -ErrorAction SilentlyContinue).Source
 ) | Where-Object { $_ -and (Test-Path $_) }
-$docker = if ($dockerCandidates) { $dockerCandidates[0] } else { "docker" }
+$docker = if ($dockerCandidates) { @($dockerCandidates)[0] } else { "docker" }
 $dockerDesktopExe = @(
     "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe",
     "$env:LOCALAPPDATA\Docker\Docker\Docker Desktop.exe"
@@ -193,7 +201,7 @@ if ($dockerExists) {
         "$env:LOCALAPPDATA\Docker\Docker\resources\bin\docker.exe",
         (Get-Command docker -ErrorAction SilentlyContinue).Source
     ) | Where-Object { $_ -and (Test-Path $_) }
-    $docker = if ($dockerCandidates) { $dockerCandidates[0] } else { "docker" }
+    $docker = if ($dockerCandidates) { @($dockerCandidates)[0] } else { "docker" }
     if ($dockerCandidates) {
         Success "Docker Desktop installed: $(& $docker --version)"
     } else {
@@ -252,8 +260,25 @@ try {
 # ═══════════════════════════════════════════
 Step "Starting AppVault Agent"
 Write-Host "  Pulling AppVault images..."
-& $docker pull ghcr.io/sectutor/appvault-agent:latest 2>&1 | Out-Null
-& $docker pull ghcr.io/sectutor/appvault-releases:v69 2>&1 | Out-Null
+
+# Windows PowerShell 5.1 turns redirected native stderr into a terminating
+# error when $ErrorActionPreference="Stop", and docker writes to stderr
+# whenever the daemon isn't up yet. Relax EAP around the docker calls and
+# check $LASTEXITCODE explicitly instead.
+if (-not (Test-Path $docker) -and -not (Get-Command $docker -ErrorAction SilentlyContinue)) {
+    Fail "Docker CLI not found ($docker) — install Docker Desktop and rerun this installer."
+}
+$dockerEAP = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+
+& $docker pull ghcr.io/sectutor/appvault-agent:latest 2>$null
+$pullExit = $LASTEXITCODE
+& $docker pull ghcr.io/sectutor/appvault-releases:v69 2>$null
+if ($pullExit -eq 0) { $pullExit = $LASTEXITCODE }
+if ($pullExit -ne 0) {
+    $ErrorActionPreference = $dockerEAP
+    Fail "Could not pull the AppVault images (docker exit code $pullExit). Make sure Docker Desktop is running, then run this installer again."
+}
 
 # Create data directory
 mkdir "$env:USERPROFILE\.appvault\data" -Force | Out-Null
@@ -292,6 +317,7 @@ Write-Host "  Starting AppVault Agent on port 8086..."
   -e AGENT_NAME="$env:COMPUTERNAME-agent" `
   -e STORAGE_PATH=/data `
   ghcr.io/sectutor/appvault-agent:latest
+$agentRunExit = $LASTEXITCODE
 
 Write-Host "  Starting App Store on port 8085..."
 if (& $docker ps -a --filter "name=^/appvault-heimdall$" --format '{{.Names}}' 2>$null | Select-String -Quiet "appvault-heimdall") {
@@ -312,6 +338,12 @@ Remove-Item "$env:USERPROFILE\.appvault\heimdall-config\www" -Recurse -Force -Er
   -e PGID=1000 `
   -e TZ=Etc/UTC `
   ghcr.io/sectutor/appvault-releases:v69
+$storeRunExit = $LASTEXITCODE
+
+$ErrorActionPreference = $dockerEAP
+
+if ($agentRunExit -ne 0) { Fail "Could not start the AppVault Agent container (docker exit code $agentRunExit)." }
+if ($storeRunExit -ne 0) { Fail "Could not start the App Store container (docker exit code $storeRunExit)." }
 
 # Register auto-start scheduled task so containers launch on Windows boot
 Step "Configuring Windows Startup Task"
