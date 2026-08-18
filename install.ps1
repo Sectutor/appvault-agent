@@ -237,13 +237,9 @@ if (-not $dockerOK) {
         # Check if Docker Desktop process is running
         $ddProcess = Get-Process "Docker Desktop" -ErrorAction SilentlyContinue
         if ($ddProcess) {
-            Write-Host "  Docker Desktop is running but daemon not responding. Restarting..." -ForegroundColor Yellow
-            Stop-Process -Name "Docker Desktop" -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 5
-        }
-        
-        # Try to find and start Docker Desktop
-        if (-not $dockerDesktopExe) {
+            Write-Host "  Docker Desktop is running — waiting for daemon to respond..." -ForegroundColor Yellow
+            # DON'T kill it — just wait. Killing it makes things worse.
+        } else {
             $dockerDesktopExe = @(
                 "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe",
                 "$env:LOCALAPPDATA\Docker\Docker\Docker Desktop.exe",
