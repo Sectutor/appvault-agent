@@ -496,18 +496,30 @@ def execute_job(job):
         print(f"[agent] Job #{job_id} failed: {e}")
 
 _PORT_CACHE = {}
-_PORT_CACHE_TTL = 15  # seconds; docker port lookups are expensive (~300ms each via CLI)
+_PORT_CACHE_TTL = 60  # seconds; docker port lookups are expensive (~300ms each via CLI)
 _BULK_CACHE_TS = 0
-_BULK_CACHE_TTL = 10  # seconds
+_BULK_CACHE_TTL = 60  # seconds — status/host-port info is refreshed from a single docker ps
+_BULK_NAMES = set()  # every container name seen in the last bulk ps (fast membership checks)
+_BULK_LABELS = {}    # appvault.app=<id> label -> container name (from the bulk snapshot)
+_BULK_PROJECTS = set()  # compose project prefixes (<id>_*) seen in the bulk snapshot
+_CATALOG_RESP_CACHE = None
+_CATALOG_RESP_TS = 0.0
+_APPS_HEALTH_CACHE = None
+_APPS_HEALTH_TS = 0.0
+_STATS_CACHE = None
+_STATS_TS = 0.0
 
 def _refresh_bulk_container_state():
     """Populate _PORT_CACHE in a single bulk docker ps command for all containers."""
-    global _BULK_CACHE_TS
+    global _BULK_CACHE_TS, _BULK_NAMES, _BULK_LABELS, _BULK_PROJECTS
     now = time.time()
     if now - _BULK_CACHE_TS < _BULK_CACHE_TTL:
         return
     _BULK_CACHE_TS = now
-    ok, out = _docker("ps", "-a", "--format", "{{.Names}}\t{{.State}}\t{{.Ports}}\t{{.Image}}\t{{.Labels}}", capture=True)
+    _BULK_NAMES = set()
+    _BULK_LABELS = {}
+    _BULK_PROJECTS = set()
+    ok, out = _docker("ps", "-a", "--format", "{{.Names}}\t{{.State}}\t{{.Ports}}\t{{.Image}}\t{{.Labels}}\t{{.Status}}", capture=True)
     if not ok or not out:
         return
 
@@ -516,10 +528,18 @@ def _refresh_bulk_container_state():
         if len(parts) < 4:
             continue
         cname = parts[0].strip()
+        _BULK_NAMES.add(cname)
         state = parts[1].strip().lower()  # e.g., 'running', 'exited'
         ports_str = parts[2].strip()
         image = parts[3].strip()
         labels = parts[4].strip() if len(parts) > 4 else ""
+        status_str = parts[5].strip() if len(parts) > 5 else ""
+
+        # Docker health state embedded in the status column ("Up 2m (healthy)")
+        if "(healthy)" in status_str:
+            _PORT_CACHE[("h", cname)] = (now, "healthy")
+        elif "(unhealthy)" in status_str:
+            _PORT_CACHE[("h", cname)] = (now, "unhealthy")
 
         is_running = (state == "running")
         status_val = "installed" if is_running else "stopped"
@@ -536,6 +556,12 @@ def _refresh_bulk_container_state():
                     app_id = l.strip().split("=", 1)[1]
                     break
 
+        # Bulk indexes for label- and compose-project-based resolution
+        if app_id and "appvault.app=" in labels:
+            _BULK_LABELS[app_id] = cname
+        if "_" in cname:
+            _BULK_PROJECTS.add(cname.split("_", 1)[0])
+
         if app_id:
             _PORT_CACHE[("st", app_id)] = (now, status_val)
             # Several containers can carry the same app label (stack front +
@@ -548,6 +574,10 @@ def _refresh_bulk_container_state():
                 _PORT_CACHE[("cn", app_id)] = (now, cname)
             if image:
                 _PORT_CACHE[("img", app_id)] = (now, image)
+
+        # Per-container image (also for containers without a derivable app_id)
+        if image:
+            _PORT_CACHE[("imgc", cname)] = (now, image)
 
         if is_running and "->" in ports_str:
             for mapping in ports_str.split(","):
@@ -584,7 +614,9 @@ def _cached_docker_port(key, fn, *args):
     return val
 
 def get_container_host_port(container_name):
-    """Get the first host port mapped to a container (cached 15s)."""
+    """Get the first host port mapped to a container (cached 60s)."""
+    if not container_name:
+        return None
     return _cached_docker_port(("hp", container_name), _get_container_host_port_uncached, container_name)
 
 def _app_container_name(app_id):
@@ -594,6 +626,30 @@ def _app_container_name(app_id):
     if hit and time.time() - hit[0] < _PORT_CACHE_TTL:
         return hit[1]
     cname = f"app-{app_id}"
+    # Fast path: resolve from the bulk snapshot (no docker subprocess)
+    if cname in _BULK_NAMES:
+        _PORT_CACHE[("cn", app_id)] = (time.time(), cname)
+        return cname
+    if app_id in _BULK_NAMES:
+        _PORT_CACHE[("cn", app_id)] = (time.time(), app_id)
+        return app_id
+    # Label-based containers (from the bulk snapshot)
+    lbl = _BULK_LABELS.get(app_id)
+    if lbl:
+        _PORT_CACHE[("cn", app_id)] = (time.time(), lbl)
+        return lbl
+    # Compose project containers (from the bulk snapshot): <id>_*
+    if app_id in _BULK_PROJECTS:
+        prefix = app_id + "_"
+        for n in _BULK_NAMES:
+            if n.startswith(prefix):
+                _PORT_CACHE[("cn", app_id)] = (time.time(), n)
+                return n
+    # The bulk snapshot is authoritative: the app is not installed. Never
+    # spawn docker per app just to rediscover that.
+    if _BULK_CACHE_TS > 0 and (time.time() - _BULK_CACHE_TS < _BULK_CACHE_TTL):
+        _PORT_CACHE[("cn", app_id)] = (time.time(), "")
+        return ""
     if container_running(cname) or container_exists(cname):
         _PORT_CACHE[("cn", app_id)] = (time.time(), cname)
         return cname
@@ -652,7 +708,9 @@ def _get_container_host_port_uncached(container_name):
     return None
 
 def get_container_port_host(container_name, container_port):
-    """Get the host port mapped to a specific container port (cached 15s)."""
+    """Get the host port mapped to a specific container port (cached 60s)."""
+    if not container_name:
+        return None
     return _cached_docker_port(("ph", container_name, container_port), _get_container_port_host_uncached, container_name, container_port)
 
 def _get_container_port_host_uncached(container_name, container_port):
@@ -2726,6 +2784,13 @@ def _is_app_alive(cname, internal_port):
     bounced every ~3 min while perfectly healthy).
     """
     url = f"http://127.0.0.1:{internal_port}/"
+    # 0) bulk-snapshot health verdict (no docker subprocess)
+    hhit = _PORT_CACHE.get(("h", cname))
+    if hhit and time.time() - hhit[0] < _PORT_CACHE_TTL:
+        if hhit[1] == "healthy":
+            return True
+        if hhit[1] == "unhealthy":
+            return False
     # 1) native docker healthcheck — the image's own probe is authoritative
     okh, hout = _docker("inspect", "--format", "{{.State.Health.Status}}", cname, capture=True, timeout=15)
     if okh and hout.strip() == "healthy":
@@ -2904,6 +2969,11 @@ def get_app_status_local(app_id):
 
 def _get_app_status_local_uncached(app_id):
     if _BULK_CACHE_TS > 0 and (time.time() - _BULK_CACHE_TS < _BULK_CACHE_TTL):
+        # Derive status from the bulk snapshot — zero extra docker calls.
+        for cand in (f"app-{app_id}", app_id):
+            if cand in _BULK_NAMES:
+                hit = _PORT_CACHE.get(("cr", cand))
+                return "installed" if (hit and hit[1]) else "stopped"
         return "available"
     cname = f"app-{app_id}"
     if container_running(cname):
@@ -2918,8 +2988,16 @@ def _get_app_status_local_uncached(app_id):
     return "available"
 
 def _get_app_image_uncached(app_id):
-    """Installed image string for an app (cached 15s), e.g. 'n8nio/n8n:latest'."""
-    ok, out = _docker("inspect", "--format", "{{.Config.Image}}", f"app-{app_id}", capture=True, timeout=15)
+    """Installed image string for an app (cached 60s), e.g. 'n8nio/n8n:latest'."""
+    hit = _PORT_CACHE.get(("img", app_id))
+    if hit and time.time() - hit[0] < _PORT_CACHE_TTL:
+        return hit[1]
+    cname = _app_container_name(app_id)
+    if cname:
+        hit = _PORT_CACHE.get(("imgc", cname))
+        if hit and time.time() - hit[0] < _PORT_CACHE_TTL:
+            return hit[1]
+    ok, out = _docker("inspect", "--format", "{{.Config.Image}}", cname or f"app-{app_id}", capture=True, timeout=15)
     return out.strip() if (ok and out and out.strip()) else ""
 
 def get_app_image(app_id):
@@ -2927,7 +3005,11 @@ def get_app_image(app_id):
 
 @app.route("/api/catalog")
 def api_catalog():
-    """Return the catalog with live local status and host ports."""
+    """Return the catalog with live local status and host ports (response cached)."""
+    global _CATALOG_RESP_CACHE, _CATALOG_RESP_TS
+    now = time.time()
+    if _CATALOG_RESP_CACHE is not None and now - _CATALOG_RESP_TS < _BULK_CACHE_TTL:
+        return Response(_CATALOG_RESP_CACHE, mimetype="application/json")
     _refresh_bulk_container_state()
     result = []
     for app in catalog_cache.get("apps", []):
@@ -2978,13 +3060,16 @@ def api_catalog():
                     break
         result.append(entry)
     
-    return jsonify({
+    body = json.dumps({
         "apps": result,
         "version": catalog_cache.get("version", 0),
         "agent_id": agent_state.get("agent_id", ""),
         "central": CENTRAL_URL,
         "plan": catalog_cache.get("plan", "free"),
-    })
+    }, ensure_ascii=False)
+    _CATALOG_RESP_CACHE = body
+    _CATALOG_RESP_TS = now
+    return Response(body, mimetype="application/json")
 
 @app.route("/api/health")
 def api_health():
@@ -3010,7 +3095,12 @@ def api_health():
 
 @app.route("/api/stats")
 def api_stats():
-    """System + per-app memory/disk stats for the sidebar."""
+    """System + per-app memory/disk stats for the sidebar (response cached 30s —
+    docker stats --no-stream is ~2s and the sidebar polls this often)."""
+    global _STATS_CACHE, _STATS_TS
+    now = time.time()
+    if _STATS_CACHE is not None and now - _STATS_TS < 30:
+        return Response(_STATS_CACHE, mimetype="application/json")
     import shutil as _shutil
     mem = {}
     try:
@@ -3056,12 +3146,15 @@ def api_stats():
                     stopped += 1
     except Exception:
         pass
-    return jsonify({
+    body = json.dumps({
         "memory": mem,
         "disk": disk,
         "containers": {"running": running, "stopped": stopped},
         "apps_memory": apps_mem,
     })
+    _STATS_CACHE = body
+    _STATS_TS = now
+    return Response(body, mimetype="application/json")
 
 @app.route("/api/info")
 def api_info():
@@ -3164,7 +3257,12 @@ def api_monitoring():
 
 @app.route("/api/apps/health")
 def api_apps_health():
-    """Check and report health of all installed apps."""
+    """Check and report health of all installed apps (response cached 15s —
+    the per-app probes are expensive; the sidebar doesn't need them fresh)."""
+    global _APPS_HEALTH_CACHE, _APPS_HEALTH_TS
+    now = time.time()
+    if _APPS_HEALTH_CACHE is not None and now - _APPS_HEALTH_TS < 15:
+        return Response(_APPS_HEALTH_CACHE, mimetype="application/json")
     results = []
     ok, out = _docker("ps", "--filter", "name=app-", "--format", "{{.Names}}", capture=True)
     if ok and out:
@@ -3179,9 +3277,11 @@ def api_apps_health():
             if not app_def:
                 continue
             port = get_container_host_port(cname) or _stable_host_port(cname, app_id, app_def.get("container_port", 80))
-            # Check response
+            # Check response (running state from the bulk snapshot — no docker call)
+            cr = _PORT_CACHE.get(("cr", cname))
+            is_running = bool(cr and cr[1]) if cr else container_running(cname)
             alive = False
-            if container_running(cname):
+            if is_running:
                 if app_def.get("category", "").lower() != "database":
                     internal_port = _get_internal_port(cname)
                     alive = _is_app_alive(cname, internal_port)
@@ -3190,11 +3290,14 @@ def api_apps_health():
             results.append({
                 "id": app_id,
                 "name": app_def.get("name", app_id),
-                "status": "running" if container_running(cname) else "stopped",
+                "status": "running" if is_running else "stopped",
                 "port": port,
                 "responsive": alive
             })
-    return jsonify({"apps": results, "total": len(results), "healthy": sum(1 for r in results if r["responsive"])})
+    body = json.dumps({"apps": results, "total": len(results), "healthy": sum(1 for r in results if r["responsive"])})
+    _APPS_HEALTH_CACHE = body
+    _APPS_HEALTH_TS = now
+    return Response(body, mimetype="application/json")
 
 @app.route("/api/agent/status")
 def api_agent_status():
@@ -4177,5 +4280,11 @@ if __name__ == "__main__":
     print(f"[agent] Starting AppVault Agent on port {port}")
     print(f"[agent] Central server: {CENTRAL_URL}")
     print(f"[agent] Agent name: {AGENT_NAME}")
+    # Warm the bulk container snapshot so the FIRST /api/catalog load is fast.
+    try:
+        _refresh_bulk_container_state()
+        print(f"[agent] Bulk container state warmed ({len(_BULK_NAMES)} containers)")
+    except Exception as e:
+        print(f"[agent] Warm-up failed: {e}")
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
 
