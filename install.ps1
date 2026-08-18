@@ -337,6 +337,7 @@ Write-Host "  Starting AppVault Agent on port 8086..."
   -e CENTRAL_URL=https://appvault.airepoindex.com `
   -e AGENT_NAME="$env:COMPUTERNAME-agent" `
   -e STORAGE_PATH=/data `
+  -e AGENT_CORS_ORIGINS=http://localhost:8090 `
   ghcr.io/sectutor/appvault-agent:latest
 $agentRunExit = $LASTEXITCODE
 
@@ -384,6 +385,45 @@ while ((Get-Date) -lt $verifyDeadline) {
 }
 if ($agentUp) { Success "AppVault Agent is online (http://localhost:8086/)" } else { Warn "Agent did not answer yet — check: docker logs appvault-agent" }
 if ($storeUp) { Success "App Store is online (http://localhost:8085/)" } else { Warn "App Store did not answer yet — check: docker logs appvault-heimdall" }
+
+# ═══════════════════════════════════════════
+# STEP: Install the AppVault User Dashboard (:8090)
+# The full user UI — Apps, Agentic OS, Missions, Memory, Crews, etc. Served
+# from a tiny nginx container (no Python requirement on the host).
+# ═══════════════════════════════════════════
+Step "Installing AppVault User Dashboard (localhost:8090)"
+try {
+    $dashDir = "$env:USERPROFILE\.appvault\dashboard"
+    New-Item -ItemType Directory -Path $dashDir -Force | Out-Null
+    $dashBase = "https://raw.githubusercontent.com/Sectutor/appvault-agent/main/dashboard"
+    $idxPath = Join-Path $dashDir "index.html"
+    $fontPath = Join-Path $dashDir "msr.woff2"
+
+    Invoke-WebRequest "$dashBase/index.html" -OutFile $idxPath -UseBasicParsing
+    Invoke-WebRequest "$dashBase/msr.woff2" -OutFile $fontPath -UseBasicParsing
+
+    # Point the dashboard at the local agent by default (overridable in the UI)
+    $html = [System.IO.File]::ReadAllText($idxPath, [System.Text.Encoding]::UTF8)
+    $html = $html.Replace("var API = localStorage.getItem('appvault_api') || '';",
+                          "var API = localStorage.getItem('appvault_api') || 'http://localhost:8086';")
+    [System.IO.File]::WriteAllText($idxPath, $html, (New-Object System.Text.UTF8Encoding($false)))
+
+    if (& $docker ps -a --filter "name=^/appvault-dashboard$" --format '{{.Names}}' 2>$null | Select-String -Quiet "appvault-dashboard") {
+        & $docker rm -f appvault-dashboard 2>$null | Out-Null
+    }
+    & $docker pull nginx:alpine 2>$null | Out-Null
+    & $docker run -d --name appvault-dashboard --restart unless-stopped `
+      -p 8090:80 `
+      -v "${dashDir}:/usr/share/nginx/html:ro" `
+      nginx:alpine 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Success "User Dashboard online at http://localhost:8090/"
+    } else {
+        Warn "Dashboard container failed to start (non-critical — the store still works). Check: docker logs appvault-dashboard"
+    }
+} catch {
+    Warn "Dashboard setup failed (non-critical): $($_.Exception.Message)"
+}
 
 # Register auto-start scheduled task so containers launch on Windows boot
 Step "Configuring Windows Startup Task"
@@ -434,11 +474,12 @@ Write-Host "==================================" -ForegroundColor Green
 Write-Host "✅ AppVault is ready!" -ForegroundColor Green
 Write-Host "==================================" -ForegroundColor Green
 Write-Host "`n"
-Write-Host "  📦 App Store:  http://localhost:8085/" -ForegroundColor Cyan
-Write-Host "  ⚙️  Dashboard:  http://localhost:8085/index.php" -ForegroundColor Cyan
+Write-Host "  🚀 AppVault Dashboard:  http://localhost:8090/" -ForegroundColor Cyan
+Write-Host "  📦 App Store:           http://localhost:8085/" -ForegroundColor Cyan
+Write-Host "  ⚙️  Agent API:           http://localhost:8086/" -ForegroundColor Cyan
 Write-Host "`n"
 if ($Host.UI.RawUI -and $Host.Name -notlike "*NonInteractive*") {
-    Write-Host "  Press any key to open the App Store..."
+    Write-Host "  Press any key to open AppVault..."
     try { $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") } catch {}
 }
-try { Start-Process "http://localhost:8085/" } catch {}
+try { Start-Process "http://localhost:8090/" } catch {}
