@@ -32,10 +32,11 @@ function CheckAdmin() {
     $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     if (-not $admin) {
         Write-Host "  🔄 Requesting administrator privileges (UAC prompt)..." -ForegroundColor Yellow
-        $url = "https://appvault.airepoindex.com/install.ps1"
-        $cmd = "try { iex (irm '$url') } catch { Write-Host '  ❌ Install failed in elevated session.' -ForegroundColor Red; Read-Host 'Press Enter to close' }"
+        # Re-run from the canonical GitHub source in the elevated session (the
+        # website copy may be stale or redirect; GitHub raw is always current).
+        $bootstrap = "irm 'https://raw.githubusercontent.com/Sectutor/appvault-agent/main/install.ps1' | iex"
         try {
-            Start-Process powershell.exe -Verb RunAs -Wait -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $cmd)
+            Start-Process powershell.exe -Verb RunAs -Wait -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $bootstrap)
             exit
         } catch {
             Fail "Administrator rights required. Right-click PowerShell and 'Run as Administrator'."
@@ -192,7 +193,7 @@ if ($dockerExists) {
     Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing
     
     Write-Host "  Installing Docker Desktop (may take 5 minutes)..."
-    Start-Process $installer -Wait -ArgumentList "install", "--quiet"
+    Start-Process $installer -Wait -ArgumentList "install", "--quiet", "--accept-license"
     
     # Verify installation (PATH refresh again — the installer updates PATH)
     $env:Path = [Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [Environment]::GetEnvironmentVariable("Path","User")
@@ -211,48 +212,46 @@ if ($dockerExists) {
 }
 
 # ═══════════════════════════════════════════
-# STEP 8: Check Docker is accessible
+# STEP 8: Start Docker if needed and wait for the engine
 # ═══════════════════════════════════════════
 Step "Checking Docker"
-$dockerOK = $false
-try {
-    $info = & $docker info 2>&1
-    $dockerOK = $LASTEXITCODE -eq 0
-} catch {}
-
-if (-not $dockerOK) {
-    Write-Host "  Docker daemon not responding — checking Docker Desktop..." -ForegroundColor Yellow
-    
-    $ddProcess = Get-Process "Docker Desktop" -ErrorAction SilentlyContinue
-    if ($ddProcess) {
-        Write-Host "  Docker Desktop process is running. The elevated session may not see the user-mode daemon." -ForegroundColor Yellow
-        Write-Host "  Attempting to proceed anyway (Docker often works despite this)..." -ForegroundColor Yellow
-    }
-    
-    # Try starting the Docker Desktop service
-    $dockerService = Get-Service -Name "Docker Desktop Service" -ErrorAction SilentlyContinue
-    if ($dockerService -and $dockerService.Status -ne "Running") {
-        try { Start-Service -Name "Docker Desktop Service" -ErrorAction Stop } catch {}
-        Start-Sleep -Seconds 5
-    }
-    
-    # Update WSL kernel if needed
-    try { wsl --update 2>$null | Out-Null } catch {}
-    
-    # Don't wait — try to proceed. If Docker truly isn't working,
-    # the next step (pulling images) will fail with a clear error.
-    Write-Host "  Proceeding with installation..." -ForegroundColor Yellow
+function Test-DockerEngine {
+    try { & $docker info 2>&1 | Out-Null; return ($LASTEXITCODE -eq 0) } catch { return $false }
 }
 
-try {
-    & $docker info 2>&1 | Out-Null
-    if ($LASTEXITCODE -eq 0) {
-        Success "Docker is running"
-    } else {
-        Write-Host "  Docker daemon not responding in this session — will try anyway..." -ForegroundColor Yellow
+$dockerOK = Test-DockerEngine
+if (-not $dockerOK) {
+    Write-Host "  Docker daemon not responding — starting Docker Desktop..." -ForegroundColor Yellow
+    
+    # Start the Docker Desktop GUI (the user-mode engine lives there)
+    if (-not $dockerDesktopExe) {
+        $dockerDesktopExe = (Get-ItemProperty "HKLM:\SOFTWARE\Docker Inc.\Docker Desktop" -ErrorAction SilentlyContinue).AppPath
     }
-} catch {
-    Write-Host "  Docker CLI not accessible — will try anyway..." -ForegroundColor Yellow
+    if ($dockerDesktopExe -and (Test-Path $dockerDesktopExe)) {
+        Start-Process $dockerDesktopExe -ErrorAction SilentlyContinue
+    } else {
+        Start-Process "shell:AppsFolder\Docker Desktop" -ErrorAction SilentlyContinue
+    }
+    # An outdated WSL kernel is the #1 reason the engine stays down while the
+    # Docker Desktop GUI is up — update it proactively.
+    try { wsl --update 2>$null | Out-Null } catch {}
+    
+    Write-Host "  Waiting for the Docker engine (up to 5 minutes)..."
+    Write-Host "  ⚠️  If a dialog appears (license, WSL update, sign-in), accept it — the installer keeps waiting."
+    $maxWait = 300
+    $waited = 0
+    while ($waited -lt $maxWait) {
+        if (Test-DockerEngine) { $dockerOK = $true; break }
+        Start-Sleep -Seconds 3
+        $waited += 3
+        if ($waited % 30 -eq 0) { Write-Host "  ... still waiting ($waited seconds)" }
+    }
+}
+
+if ($dockerOK) {
+    Success "Docker is running"
+} else {
+    Fail "Docker failed to start. Launch Docker Desktop manually, accept the license, and rerun this installer."
 }
 
 # ═══════════════════════════════════════════
@@ -331,9 +330,11 @@ Remove-Item "$env:USERPROFILE\.appvault\heimdall-config\www" -Recurse -Force -Er
 & $docker run -d `
   --name appvault-heimdall `
   --restart unless-stopped `
-  -p 8085:80 `
+  -p 8085:8080 `
+  -v /var/run/docker.sock:/var/run/docker.sock `
   -v "$env:USERPROFILE\.appvault\heimdall-config:/config" `
   -e CENTRAL_URL=https://appvault.airepoindex.com `
+  -e REMOTE_CATALOG_URL=http://host.docker.internal:8086/api/catalog `
   -e PUID=1000 `
   -e PGID=1000 `
   -e TZ=Etc/UTC `
@@ -344,6 +345,23 @@ $ErrorActionPreference = $dockerEAP
 
 if ($agentRunExit -ne 0) { Fail "Could not start the AppVault Agent container (docker exit code $agentRunExit)." }
 if ($storeRunExit -ne 0) { Fail "Could not start the App Store container (docker exit code $storeRunExit)." }
+
+# Verify both services actually answer before declaring success.
+Step "Verifying services"
+$agentUp = $false; $storeUp = $false
+$verifyDeadline = (Get-Date).AddSeconds(90)
+while ((Get-Date) -lt $verifyDeadline) {
+    if (-not $agentUp) {
+        try { $h = Invoke-WebRequest "http://localhost:8086/api/health" -UseBasicParsing -TimeoutSec 4; if ($h.StatusCode -eq 200) { $agentUp = $true } } catch {}
+    }
+    if (-not $storeUp) {
+        try { $s = Invoke-WebRequest "http://localhost:8085/" -UseBasicParsing -TimeoutSec 4; if ($s.StatusCode -eq 200) { $storeUp = $true } } catch {}
+    }
+    if ($agentUp -and $storeUp) { break }
+    Start-Sleep -Seconds 5
+}
+if ($agentUp) { Success "AppVault Agent is online (http://localhost:8086/)" } else { Warn "Agent did not answer yet — check: docker logs appvault-agent" }
+if ($storeUp) { Success "App Store is online (http://localhost:8085/)" } else { Warn "App Store did not answer yet — check: docker logs appvault-heimdall" }
 
 # Register auto-start scheduled task so containers launch on Windows boot
 Step "Configuring Windows Startup Task"
