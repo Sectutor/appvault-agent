@@ -13437,6 +13437,58 @@ def api_openclaw_info():
         }
     })
 
+@agentic_bp.route("/api/agentic/openclaw/start", methods=["POST", "OPTIONS"])
+def api_openclaw_start():
+    """Start the OpenClaw gateway for the user (docker run on the shared socket).
+    A simple user never needs to touch docker — AppVault starts it and the
+    console reloads once the gateway answers on :18789. Returns quickly and
+    lets the client poll /api/agentic/openclaw/status."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    import subprocess
+    # Already running?
+    status, _ = _probe_port("18789/")
+    if status == "online":
+        return jsonify({"status": "ok", "gateway_status": "online", "message": "OpenClaw is already running."})
+    # Container exists but stopped?
+    r = subprocess.run(["docker", "ps", "-a", "--filter", "name=openclaw-gateway", "--format", "{{.Names}}"],
+                       capture_output=True, text=True, timeout=20)
+    if r.returncode == 0 and r.stdout.strip():
+        rc = subprocess.run(["docker", "start", "openclaw-gateway"], capture_output=True, text=True, timeout=60)
+        ok, err = rc.returncode == 0, (rc.stderr or rc.stdout or "").strip()
+        if not ok:
+            return jsonify({"status": "error", "error": err or "docker start failed"}), 500
+    else:
+        # Pull + run fresh. A brand-new gateway has no config and refuses to
+        # start ("Missing config") and, in a container, refuses 0.0.0.0 binds
+        # without auth. We write a minimal config (gateway.mode=local,
+        # bind=auto, token auth) into a mounted dir so the gateway boots, binds
+        # all interfaces (Docker NAT can forward it), and serves its Studio UI.
+        cfg_dir = "/app/openclaw-config"
+        try:
+            os.makedirs(cfg_dir, exist_ok=True)
+            with open(os.path.join(cfg_dir, "openclaw.json"), "w") as f:
+                f.write('{"gateway":{"mode":"local","bind":"auto","auth":{"mode":"token","token":"appvault-local"}}}')
+        except Exception as e:
+            return jsonify({"status": "error", "error": "could not write config: " + str(e)}), 500
+        cmd = ["docker", "run", "-d", "--name", "openclaw-gateway", "--restart", "unless-stopped",
+               "-p", "18789:18789",
+               "-v", cfg_dir + ":/home/node/.openclaw",
+               "ghcr.io/openclaw/openclaw:latest"]
+        rc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if rc.returncode != 0:
+            return jsonify({"status": "error", "error": (rc.stderr or rc.stdout or "docker run failed").strip()}), 500
+    return jsonify({"status": "starting", "gateway_status": "starting",
+                    "message": "OpenClaw is starting — the console will load once it's ready (a minute on first run)."})
+
+@agentic_bp.route("/api/agentic/openclaw/status", methods=["GET", "OPTIONS"])
+def api_openclaw_status():
+    """Lightweight poll target for the OpenClaw console: gateway online/offline."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    status, _ = _probe_port("18789/")
+    return jsonify({"gateway_status": status, "online": status == "online"})
+
 @agentic_bp.route("/api/agentic/openclaw/dispatch", methods=["POST", "OPTIONS"])
 def api_openclaw_dispatch():
     """Dispatch a Hermes Agent instruction/task to OpenClaw runner."""
