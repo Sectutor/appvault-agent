@@ -2442,6 +2442,8 @@ function showInstallModal(id, name) {
           if (close) close.style.display = 'block';
           // Show education/getting started guide
           showPostInstallGuide(id, name);
+          // Take the user to My Apps so they can open what they just installed
+          try { nav('home'); } catch(e) {}
           // Refresh views
           showHome();
           showList();
@@ -7664,8 +7666,25 @@ function renderDesktopTab(c) {
 }
 
 function startDesktopHelper() {
+  // Kick the OS protocol handler (starts the helper host-side), then poll
+  // until it answers so the button gives real feedback instead of silence.
+  var status = document.getElementById('desktop-helper-status');
+  if (status) status.innerHTML = '<span style="color:#f59e0b;">starting helper…</span>';
   try { window.location.href = 'appvault://start'; } catch(e) {}
-  setTimeout(function(){ renderStore(); }, 1500);
+  var tries = 0;
+  var iv = setInterval(function(){
+    tries++;
+    fetch('http://localhost:8791/health').then(function(r){ return r.json(); }).then(function(h){
+      if (h && h.ok === true) {
+        clearInterval(iv);
+        if (status) status.innerHTML = '<span style="color:#22c55e;">● helper online</span>';
+        renderStore();
+      } else if (tries >= 8) {
+        clearInterval(iv);
+        if (status) status.innerHTML = '<span style="color:#ef4444;">helper still offline — try again</span>';
+      }
+    }).catch(function(){ if (tries >= 8) { clearInterval(iv); if (status) status.innerHTML = '<span style="color:#ef4444;">helper still offline — try again</span>'; } });
+  }, 1000);
 }
 
 function desktopLaunch(id) {
