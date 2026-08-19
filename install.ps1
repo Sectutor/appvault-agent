@@ -431,10 +431,36 @@ try {
     if (& $docker ps -a --filter "name=^/appvault-dashboard$" --format '{{.Names}}' 2>$null | Select-String -Quiet "appvault-dashboard") {
         & $docker rm -f appvault-dashboard 2>$null | Out-Null
     }
+    # nginx config: static dashboard + same-origin /hermes/ proxy to the
+    # hermes-agent (:8095) so the "Hermes (Full)" console embeds cleanly.
+    $nginxConf = "$env:USERPROFILE\.appvault\dashboard-nginx.conf"
+    @'
+server {
+    listen       80;
+    listen  [::]:80;
+    server_name  localhost;
+    location / {
+        root   /usr/share/nginx/html;
+        index  index.html index.htm;
+    }
+    location /hermes/ {
+        proxy_pass http://host.docker.internal:8095/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+    error_page 500 502 503 504 /50x.html;
+    location = /50x.html { root /usr/share/nginx/html; }
+}
+'@ | Out-File -Encoding ascii $nginxConf
     & $docker pull nginx:alpine 2>$null | Out-Null
     & $docker run -d --name appvault-dashboard --restart unless-stopped `
       -p 8090:80 `
       -v "${dashDir}:/usr/share/nginx/html:ro" `
+      -v "$env:USERPROFILE\.appvault\dashboard-nginx.conf:/etc/nginx/conf.d/default.conf:ro" `
       nginx:alpine 2>$null | Out-Null
     if ($LASTEXITCODE -eq 0) {
         Success "User Dashboard online at http://localhost:8090/"

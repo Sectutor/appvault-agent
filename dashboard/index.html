@@ -1076,7 +1076,8 @@ var NAV_SECTIONS = [
     ]}
   ]},
   { id: 'automation', title: 'Automation', defaultPinned: true, items: [
-    { id: 'n8n', route: 'n8n', label: 'n8n Automation', subtitle: 'Workflows & triggers', icon: 'bolt', color: '#ff6d5a' }
+    { id: 'n8n', route: 'n8n', label: 'n8n Automation', subtitle: 'Workflows & triggers', icon: 'bolt', color: '#ff6d5a' },
+    { id: 'hermes-full', route: 'hermes-full', label: 'Hermes (Full)', subtitle: 'Complete Hermes API console', icon: 'terminal', color: '#22d3ee' }
   ]},
   { id: 'pipeline', title: 'Pipeline', items: [
     { id: 'crews', route: 'crews', label: 'Crews', subtitle: 'Agent teams', icon: 'groups', color: '#fb923c' },
@@ -2898,6 +2899,7 @@ function nav(page) {
   else if (page === 'n8n' || page === 'automation') showN8nPage();
   else if (page === 'memory') showMemoryPage();
   else if (page === 'crews') showCrewsLauncher();
+  else if (page === 'hermes-full') showHermesFull();
   else if (page === 'health') showHealthPage();
   else if (page === 'help') showHelpPage();
   else if (page === 'config') { showAgenticConfig(); decorateConfigTools(); }
@@ -2909,6 +2911,28 @@ function nav(page) {
 }
 
 // ── DEDICATED AGENT WORKSTATION (HERMES, OPENCLAW, GOOSE, DEEPSEEK-HARNESS, DEERFLOW, CLAUDE, ANTIGRAVITY, CODEX) ──
+// Full Hermes console — same-origin embed of the complete Hermes agent API
+// (Swagger UI) proxied through the dashboard nginx at /hermes/docs.
+function showHermesFull() {
+  var c = $('content');
+  c.innerHTML = `
+    <div class="agentic-wrap">
+      <div class="agentic-subbar">
+        <div class="agentic-status-group">
+          <span class="agentic-badge-live" style="background:rgba(34,211,238,0.15);color:#22d3ee;border-color:rgba(34,211,238,0.4);">● HERMES — FULL AGENT CONSOLE</span>
+          <span style="font-size:11px;color:#94a3b8;">Complete Hermes agent API: sessions, chat, stream, tools, telemetry, config</span>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <a class="agentic-btn" target="_blank" href="/hermes/docs" style="text-decoration:none;background:#0ea5e9;padding:6px 12px;font-size:11px;">↗ Open in New Tab</a>
+          <button class="agentic-btn-secondary" onclick="nav('agentic')">← Back to Agentic OS</button>
+        </div>
+      </div>
+      <div style="flex:1;min-height:calc(100vh - 200px);border:1px solid var(--border);border-radius:12px;overflow:hidden;">
+        <iframe id="hermes-full-frame" src="/hermes/docs" style="width:100%;height:calc(100vh - 205px);border:0;display:block;" title="Hermes Full Agent"></iframe>
+      </div>
+    </div>`;
+}
+
 function showAgentPage(agentId) {
   agentId = (agentId || 'hermes').toLowerCase();
   currentAgentWorkspace = agentId;
@@ -2936,6 +2960,7 @@ function showAgentPage(agentId) {
           <button class="agentic-btn" style="background:#0ea5e9;padding:6px 12px;font-size:11px;" onclick="previewRecentWork()">👁️ Live Preview</button>
           <button class="agentic-btn-secondary" onclick="showOracleStudio()">🔮 Oracle Feeds</button>
           <button class="agentic-btn" onclick="nav('config')">⚙️ LLM & API Keys</button>
+          ${agentId === 'hermes' ? '<button class="agentic-btn" style="background:#22d3ee;padding:6px 12px;font-size:11px;" onclick="nav(\'hermes-full\')">🚀 Full Hermes</button>' : ''}
         </div>
       </div>
 
