@@ -3145,6 +3145,24 @@ function hermesTelemetryTab(body) {
   });
 }
 
+// Hermes power panel — tools / config / telemetry rendered right inside the
+// Agentic OS workspace (reuses the full-console renderers).
+function hermesWorkspacePanel(tab) {
+  var panel = $('hermes-panel');
+  var title = $('hermes-panel-title');
+  var body = $('hermes-panel-body');
+  if (!panel || !body) return;
+  panel.style.display = '';
+  if (tab === 'tools') { if (title) title.textContent = '🛠 HERMES TOOLS'; hermesToolsTab(body); }
+  else if (tab === 'config') { if (title) title.textContent = '⚙️ HERMES CONFIG'; hermesConfigTab(body); }
+  else if (tab === 'telemetry') { if (title) title.textContent = '📊 HERMES TELEMETRY'; hermesTelemetryTab(body); }
+  try { panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } catch (e) {}
+}
+function hermesClosePanel() {
+  var panel = $('hermes-panel');
+  if (panel) panel.style.display = 'none';
+}
+
 function showAgentPage(agentId) {
   agentId = (agentId || 'hermes').toLowerCase();
   currentAgentWorkspace = agentId;
@@ -3172,8 +3190,19 @@ function showAgentPage(agentId) {
           <button class="agentic-btn" style="background:#0ea5e9;padding:6px 12px;font-size:11px;" onclick="previewRecentWork()">👁️ Live Preview</button>
           <button class="agentic-btn-secondary" onclick="showOracleStudio()">🔮 Oracle Feeds</button>
           <button class="agentic-btn" onclick="nav('config')">⚙️ LLM & API Keys</button>
-          ${agentId === 'hermes' ? '<button class="agentic-btn" style="background:#22d3ee;padding:6px 12px;font-size:11px;" onclick="nav(\'hermes-full\')">🚀 Full Hermes</button>' : ''}
+          ${agentId === 'hermes' ? '<button class="agentic-btn-secondary" style="font-size:11px;padding:6px 10px;" onclick="hermesWorkspacePanel(\'tools\')">🛠 Tools</button><button class="agentic-btn-secondary" style="font-size:11px;padding:6px 10px;" onclick="hermesWorkspacePanel(\'config\')">⚙️ Hermes Config</button><button class="agentic-btn-secondary" style="font-size:11px;padding:6px 10px;" onclick="hermesWorkspacePanel(\'telemetry\')">📊 Telemetry</button><button class="agentic-btn" style="background:#22d3ee;padding:6px 12px;font-size:11px;" onclick="nav(\'hermes-full\')">🚀 Full Hermes</button>' : ''}
         </div>
+      </div>
+
+      <!-- HERMES POWER PANEL (tools / config / telemetry inside the workspace) -->
+      <div id="hermes-panel" class="agentic-card" style="display:none;margin-bottom:16px;">
+        <div class="agentic-card-header" style="flex-wrap:wrap;gap:8px;">
+          <span id="hermes-panel-title">🛠 HERMES TOOLS</span>
+          <span style="margin-left:auto;display:flex;gap:6px;align-items:center;">
+            <button class="agentic-btn-secondary" style="padding:2px 10px;font-size:10px;" onclick="hermesClosePanel()" title="Close">▲ Close</button>
+          </span>
+        </div>
+        <div id="hermes-panel-body" style="padding:0 12px 12px;"></div>
       </div>
 
       <!-- ORACLE STUDIO: configurable feeds -> multi-source sweep -> article -> n8n schedule -->
