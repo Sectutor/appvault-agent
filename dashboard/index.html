@@ -3392,6 +3392,12 @@ function agenticTopicItems(agentId) {
   return items.concat(extras);
 }
 
+// Return to the chat window the user came from (remembers the active agent).
+function agenticBackToChat() {
+  var agent = currentAgentWorkspace || 'hermes';
+  nav(agent === 'hermes' ? 'agentic' : agent);
+}
+
 function showAgentPage(agentId) {
   agentId = (agentId || 'hermes').toLowerCase();
   currentAgentWorkspace = agentId;
@@ -4432,7 +4438,8 @@ function showAgenticConfig() {
           <span style="font-size:11px;color:#94a3b8;margin-left:8px;">One place for every API key & model setting. No .env or yaml editing.</span>
         </div>
       </div>
-      <div style="display:flex;gap:6px;">
+      <div style="display:flex;gap:6px;align-items:center;">
+        <button class="agentic-btn-secondary" style="padding:5px 12px;font-size:11px;" onclick="agenticBackToChat()" title="Return to the chat window you came from">← Back to Chat</button>
         <span id="cfg-page-status" style="font-size:11px;color:#22c55e;background:rgba(34,197,94,0.15);padding:4px 10px;border-radius:6px;">● Hub Online</span>
       </div>
     </div>
@@ -4521,7 +4528,7 @@ function showAgenticConfig() {
 
       <div style="display:flex;justify-content:flex-end;gap:10px;align-items:center;">
         <span id="cfg-test-result" style="font-size:11px;color:#94a3b8;"></span>
-        <button class="agentic-btn-secondary" style="padding:6px 14px;font-size:11px;" onclick="nav('agentic')">← Back to Agentic OS</button>
+        <button class="agentic-btn-secondary" style="padding:6px 14px;font-size:11px;" onclick="agenticBackToChat()">← Back to Chat</button>
         <button class="agentic-btn-secondary" id="cfg-test-btn" style="padding:6px 16px;font-size:11px;" onclick="testAgenticConfig()">🧪 Test</button>
         <button class="agentic-btn" style="padding:6px 20px;font-size:12px;" onclick="saveAgenticConfig()">💾 Save All Configuration</button>
       </div>
