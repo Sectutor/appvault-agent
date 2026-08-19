@@ -1265,7 +1265,7 @@ table.data-table tbody tr:last-child td { border-bottom: none; }
         <div class="stat-row"><span class="msr">storage</span><span>Disk</span><span id="stat-disk">&ndash;</span></div>
         <div class="stat-bar"><div id="stat-disk-bar"></div></div>
         <div class="stat-row"><span class="msr">apps</span><span>Apps</span><span id="stat-apps">&ndash;</span></div>
-        <div id="appvault-build-stamp" style="margin-top:10px;padding:6px 8px;font-size:9.5px;color:#475569;border-top:1px solid rgba(51,65,85,0.4);text-align:center;cursor:default;" title="AppVault dashboard build">build 2026.08.19-h5</div>
+        <div id="appvault-build-stamp" style="margin-top:10px;padding:6px 8px;font-size:9.5px;color:#475569;border-top:1px solid rgba(51,65,85,0.4);text-align:center;cursor:default;" title="AppVault dashboard build">build 2026.08.19-h6</div>
       </div>
     </div>
     <div id="nav-backdrop" class="nav-backdrop" style="display:none;"></div>
@@ -3168,58 +3168,258 @@ function dashboardOrigin() {
 }
 var _dashOrigin = dashboardOrigin();
 
-// ── DEDICATED AGENT WORKSTATION (HERMES, OPENCLAW, GOOSE, DEEPSEEK-HARNESS, DEERFLOW, CLAUDE, ANTIGRAVITY, CODEX) ──
-// FULL HERMES CONSOLE — embed the REAL open-source Hermes Agent web dashboard
-// Hermes full console — clean DeepSeek-style page. Hermes itself is a headless
-// FastAPI daemon (no web UI), so the "full console" embeds its real Swagger UI
-// (sessions, chat, tools, config, telemetry — the whole API) through the
-// same-origin nginx /hermes/ proxy. Same pattern as DeepSeek Harness / OpenClaw.
-function hermesUiUrl() {
-  try { return localStorage.getItem('appvault_hermes_ui_url') || (_dashOrigin + '/hermes/docs'); } catch (e) { return _dashOrigin + '/hermes/docs'; }
-}
-var HERMES_UI_URL = hermesUiUrl();
+// ── FULL HERMES CONSOLE — a real user-facing console (clean, DeepSeek-style).
+// Hermes itself is a headless FastAPI daemon with no web UI, so we build the
+// console in the dashboard: sessions, chat (with SSE streaming), tools, config
+// and telemetry all call the live Hermes API through the /hermes/ proxy.
+var _hermesFullTab = 'chat';
+var _hermesSessions = [];
+var _hermesActiveSession = null;
 
 function showHermesFull() {
+  _hermesFullTab = 'chat';
   var c = $('content');
   c.innerHTML = `
     <div class="agentic-wrap">
       <div class="agentic-subbar">
         <div class="agentic-status-group">
-          <span class="agentic-badge-live">● Hermes — Full Console</span>
-          <span id="hermes-console-status" style="font-size:11px;color:#64748b;">loading…</span>
+          <span class="agentic-badge-live">● Hermes — Full Agent Console</span>
+          <span id="hermes-console-status" style="font-size:11px;color:#64748b;">checking…</span>
         </div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-          <button class="agentic-btn" style="padding:6px 12px;font-size:11px;" onclick="hermesOpenExternal()" title="Open the Hermes dashboard in a new tab">↗ New Tab</button>
+          <div class="agentic-seg">
+            <button class="seg-btn active" id="hf-tab-chat" onclick="hermesFullTab('chat')">💬 Chat</button>
+            <button class="seg-btn" id="hf-tab-tools" onclick="hermesFullTab('tools')">🛠 Tools</button>
+            <button class="seg-btn" id="hf-tab-config" onclick="hermesFullTab('config')">⚙️ Config</button>
+            <button class="seg-btn" id="hf-tab-telemetry" onclick="hermesFullTab('telemetry')">📊 Telemetry</button>
+          </div>
+          <button class="agentic-btn" style="padding:6px 12px;font-size:11px;" onclick="window.open(_dashOrigin + '/hermes/docs', '_blank')" title="Open the Hermes API reference in a new tab">↗ API Docs</button>
           <button class="agentic-btn-secondary" style="font-size:11px;padding:6px 10px;" onclick="nav('agentic')">← Back to Agentic OS</button>
         </div>
       </div>
-      <div id="hermes-console-frame" style="flex:1;min-height:calc(100vh - 130px);background:#0b0f19;border:1px solid rgba(51,65,85,0.5);border-radius:12px;overflow:hidden;position:relative;">
-        <div id="hermes-loading" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#0b0f19;z-index:1;overflow:auto;padding:24px;">
-          <div style="text-align:center;">
-            <div class="skeleton" style="width:140px;height:12px;border-radius:6px;margin:0 auto 14px;"></div>
-            <div style="font-size:12px;color:#94a3b8;" id="hermes-loading-msg">Loading the full Hermes console (real API · sessions · chat · tools · config)…</div>
-          </div>
-        </div>
-        <iframe id="hermes-iframe" src="${escapeHtml(HERMES_UI_URL)}" style="width:100%;height:100%;min-height:calc(100vh - 140px);border:none;display:block;" title="Hermes Agent dashboard" allow="clipboard-read; clipboard-write" onload="hermesFrameLoaded()"></iframe>
-      </div>
+      <div id="hermes-console-body" style="flex:1;min-height:0;"></div>
     </div>`;
+  hermesFullTab('chat');
   hermesProbeStatus();
 }
-function hermesFrameLoaded() {
-  var ld = $('hermes-loading');
-  if (ld) { ld.style.display = 'none'; }
+
+function hermesApi(path, opts) {
+  return fetch(_dashOrigin + '/hermes/api/v1' + path, Object.assign({}, opts || {}, {
+    headers: Object.assign({ 'Content-Type': 'application/json' }, (opts || {}).headers || {})
+  })).then(function(r){
+    return r.json().catch(function(){ return { status: 'error', error: 'non-JSON response HTTP ' + r.status }; });
+  });
 }
-function hermesOpenExternal() {
-  window.open(HERMES_UI_URL, '_blank');
-}
+
 function hermesProbeStatus() {
   var el = $('hermes-console-status');
   if (!el) return;
-  fetch(_dashOrigin + '/hermes/api/v1/config').then(function(r){
-    if (r.ok) el.textContent = '● online — real Hermes API (sessions · chat · tools · config)';
-    else el.textContent = '○ Hermes API not responding';
+  hermesApi('/config').then(function(d){
+    if (el) el.textContent = '● online — sessions · chat · tools · config · telemetry';
   }).catch(function(){
-    el.textContent = '○ Hermes API not responding — is the hermes-agent container running?';
+    if (el) el.textContent = '○ offline — is the hermes-agent container running?';
+  });
+}
+
+function hermesFullTab(tab) {
+  _hermesFullTab = tab;
+  var body = $('hermes-console-body');
+  if (!body) return;
+  ['chat','tools','config','telemetry'].forEach(function(t){
+    var b = $('hf-tab-' + t);
+    if (b) b.classList.toggle('active', t === tab);
+  });
+  if (tab === 'chat') hermesChatTab(body);
+  else if (tab === 'tools') hermesToolsTab(body);
+  else if (tab === 'config') hermesConfigTab(body);
+  else if (tab === 'telemetry') hermesTelemetryTab(body);
+}
+
+// ── CHAT (sessions sidebar + messages + streaming) ──
+function hermesChatTab(body) {
+  body.innerHTML = `<div style="display:grid;grid-template-columns:260px 1fr;gap:14px;min-height:calc(100vh - 235px);">
+    <div class="agentic-card" style="display:flex;flex-direction:column;padding:0;">
+      <div class="agentic-card-header" style="padding:10px 12px;border-bottom:1px solid rgba(51,65,85,0.4);">
+        <span style="font-size:12px;font-weight:600;color:#e2e8f0;">Sessions</span>
+        <button class="agentic-btn" style="padding:3px 10px;font-size:10.5px;" onclick="hermesNewSession()">＋ New</button>
+      </div>
+      <div id="hermes-sessions-list" style="flex:1;overflow-y:auto;padding:6px;"></div>
+    </div>
+    <div class="agentic-card" style="display:flex;flex-direction:column;padding:0;">
+      <div class="agentic-card-header" id="hermes-chat-title" style="padding:10px 12px;border-bottom:1px solid rgba(51,65,85,0.4);">💬 Chat</div>
+      <div id="hermes-chat-messages" style="flex:1;overflow-y:auto;padding:12px;font-size:13px;line-height:1.55;max-height:calc(100vh - 300px);"></div>
+      <div style="display:flex;gap:8px;padding:10px;border-top:1px solid rgba(51,65,85,0.4);">
+        <input id="hermes-chat-input" placeholder="Message Hermes… (web search, vault, python, signals)" style="flex:1;padding:9px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-hover);color:var(--text-primary);" onkeydown="if(event.key==='Enter')hermesSend()">
+        <button class="agentic-btn" onclick="hermesSend()">Send</button>
+      </div>
+    </div>
+  </div>`;
+  hermesLoadSessions();
+}
+
+function hermesLoadSessions() {
+  hermesApi('/sessions').then(function(d){
+    _hermesSessions = (d && d.sessions) || [];
+    _hermesActiveSession = (d && d.active_session) || (_hermesSessions[0] && _hermesSessions[0].id) || null;
+    var list = $('hermes-sessions-list');
+    if (!list) return;
+    list.innerHTML = _hermesSessions.length ? _hermesSessions.map(function(s){
+      var act = s.id === _hermesActiveSession;
+      return `<div onclick="hermesOpenSession('${s.id}')" style="padding:8px 10px;border-radius:8px;margin-bottom:4px;cursor:pointer;background:${act ? 'rgba(56,189,248,0.12)' : 'transparent'};border:1px solid ${act ? 'rgba(56,189,248,0.4)' : 'transparent'};">
+        <div style="font-size:12px;color:var(--text-primary);font-weight:600;">${escapeHtml(s.title || s.id)}</div>
+        <div style="font-size:10px;color:var(--text-muted);">${s.message_count || 0} msgs · ${escapeHtml(String(s.last_message || '').slice(0, 40))}</div>
+        <div style="font-size:9px;color:#ef4444;text-align:right;cursor:pointer;" onclick="event.stopPropagation();hermesDeleteSession('${s.id}')">🗑</div>
+      </div>`;
+    }).join('') : '<div style="font-size:12px;color:var(--text-muted);padding:8px;">No sessions</div>';
+    if (_hermesActiveSession) hermesLoadChat(_hermesActiveSession);
+  });
+}
+
+function hermesNewSession() {
+  hermesApi('/sessions', { method: 'POST', body: JSON.stringify({ title: 'New Session' }) }).then(function(d){
+    if (d && d.session_id) { _hermesActiveSession = d.session_id; hermesLoadSessions(); }
+  });
+}
+function hermesDeleteSession(id) {
+  if (!confirm('Delete this session?')) return;
+  hermesApi('/sessions/' + id, { method: 'DELETE' }).then(function(){ _hermesActiveSession = null; hermesLoadSessions(); });
+}
+function hermesOpenSession(id) { _hermesActiveSession = id; hermesLoadSessions(); }
+
+function hermesLoadChat(id) {
+  hermesApi('/sessions/' + id).then(function(d){
+    var sess = d && d.session;
+    var title = $('hermes-chat-title');
+    if (title) title.textContent = '💬 ' + (sess && sess.title ? sess.title : 'Chat');
+    var msgs = (sess && sess.messages) || [];
+    var box = $('hermes-chat-messages'); if (!box) return;
+    box.innerHTML = msgs.map(function(m){
+      var isAgent = m.role === 'agent';
+      return `<div style="margin-bottom:10px;text-align:${isAgent ? 'left' : 'right'};">
+        <div style="display:inline-block;max-width:85%;padding:8px 12px;border-radius:10px;background:${isAgent ? 'rgba(30,41,59,0.9)' : 'rgba(56,189,248,0.12)'};border:1px solid ${isAgent ? 'var(--border)' : 'rgba(56,189,248,0.3)'};font-size:12.5px;white-space:pre-wrap;text-align:left;">${escapeHtml(m.text || '')}</div>
+      </div>`;
+    }).join('');
+    box.scrollTop = box.scrollHeight;
+  });
+}
+
+var _hermesSending = false;
+function hermesSend() {
+  var input = $('hermes-chat-input'); if (!input) return;
+  var prompt = input.value.trim(); if (!prompt) return;
+  if (!_hermesActiveSession) { hermesNewSession(); return; }
+  input.value = '';
+  var box = $('hermes-chat-messages');
+  if (box) {
+    box.insertAdjacentHTML('beforeend', `<div style="text-align:right;margin-bottom:10px;"><div style="display:inline-block;max-width:85%;padding:8px 12px;border-radius:10px;background:rgba(56,189,248,0.12);border:1px solid rgba(56,189,248,0.3);font-size:12.5px;white-space:pre-wrap;text-align:left;">${escapeHtml(prompt)}</div></div>`);
+    box.insertAdjacentHTML('beforeend', `<div id="hermes-thinking" style="color:#94a3b8;font-size:12px;margin-bottom:8px;">Hermes is thinking…</div>`);
+    box.scrollTop = box.scrollHeight;
+  }
+  hermesApi('/sessions/' + _hermesActiveSession + '/chat', { method: 'POST', body: JSON.stringify({ prompt: prompt }) }).then(function(d){
+    var rep = $('hermes-thinking'); if (rep) rep.remove();
+    var repBox = box;
+    if (repBox) {
+      repBox.insertAdjacentHTML('beforeend', `<div style="margin-bottom:10px;"><div style="display:inline-block;max-width:85%;padding:8px 12px;border-radius:10px;background:rgba(30,41,59,0.9);border:1px solid var(--border);font-size:12.5px;white-space:pre-wrap;">${escapeHtml((d && d.reply) || 'No response')}</div></div>`);
+      repBox.scrollTop = repBox.scrollHeight;
+    }
+    hermesLoadSessions();
+  }).catch(function(err){
+    var rep = $('hermes-thinking'); if (rep) rep.remove();
+    var repBox = box;
+    if (repBox) {
+      repBox.insertAdjacentHTML('beforeend', `<div style="color:#f87171;font-size:12px;margin-bottom:8px;">Error: ${escapeHtml(String(err))}</div>`);
+    }
+  });
+}
+
+// ── TOOLS ──
+var _hermesTools = [
+  { name: 'web_search', label: '🔎 Web Search', params: [{ k: 'query', label: 'Query', type: 'text' }] },
+  { name: 'read_vault', label: '📖 Read Vault / Memory', params: [{ k: 'query', label: 'Query (keyword or path)', type: 'text' }] },
+  { name: 'write_vault', label: '✍️ Write Vault Note', params: [{ k: 'path', label: 'Note path (e.g. 01_Inbox/note.md)', type: 'text' }, { k: 'content', label: 'Content', type: 'textarea' }] },
+  { name: 'run_python', label: '🐍 Run Python (sandbox)', params: [{ k: 'code', label: 'Code', type: 'textarea' }] },
+  { name: 'sweep_signals', label: '📡 Sweep Signals', params: [] }
+];
+function hermesToolsTab(body) {
+  body.innerHTML = `<div class="agentic-card">
+    <div class="agentic-card-header"><span>🛠 Hermes Tools</span><span style="font-size:10px;color:#94a3b8;">executed by Hermes' sandbox</span></div>
+    <div id="hermes-tools-list" style="padding:12px;display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px;"></div>
+    <div id="hermes-tools-result" style="padding:0 12px 12px;"></div>
+  </div>`;
+  var list = $('hermes-tools-list');
+  if (!list) return;
+  list.innerHTML = _hermesTools.map(function(t){
+    return `<div class="agentic-card" style="margin:0;">
+      <div style="font-size:13px;font-weight:600;color:var(--text-heading);margin-bottom:8px;">${t.label}</div>
+      ${t.params.map(function(p){
+        return p.type === 'textarea'
+          ? `<textarea id="tool-${t.name}-${p.k}" placeholder="${p.label}" style="width:100%;margin-bottom:8px;padding:7px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-hover);color:var(--text-primary);font-size:12px;min-height:60px;font-family:monospace;"></textarea>`
+          : `<input id="tool-${t.name}-${p.k}" placeholder="${p.label}" style="width:100%;margin-bottom:8px;padding:7px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-hover);color:var(--text-primary);font-size:12px;">`;
+      }).join('')}
+      <button class="agentic-btn" style="padding:5px 12px;font-size:11px;" onclick="hermesRunTool('${t.name}')">▶ Run</button>
+    </div>`;
+  }).join('');
+}
+function hermesRunTool(name) {
+  var tool = _hermesTools.find(function(t){ return t.name === name; });
+  var params = {};
+  (tool.params || []).forEach(function(p){
+    var el = document.getElementById('tool-' + name + '-' + p.k);
+    if (el) params[p.k] = el.value;
+  });
+  var res = $('hermes-tools-result');
+  if (res) res.innerHTML = '<div style="color:#94a3b8;font-size:12px;">running ' + name + '…</div>';
+  hermesApi('/tools/execute', { method: 'POST', body: JSON.stringify({ tool: name, params: params }) }).then(function(d){
+    if (res) res.innerHTML = '<div style="font-size:12px;color:var(--text-primary);background:rgba(15,23,42,0.6);border:1px solid var(--border);border-radius:8px;padding:10px;white-space:pre-wrap;font-family:monospace;max-height:380px;overflow:auto;">' + escapeHtml(JSON.stringify(d, null, 2)) + '</div>';
+  });
+}
+
+// ── CONFIG ──
+function hermesConfigTab(body) {
+  body.innerHTML = `<div class="agentic-card"><div class="agentic-card-header"><span>⚙️ Hermes Config</span></div>
+    <div id="hermes-config-form" style="padding:12px;display:grid;grid-template-columns:1fr 1fr;gap:12px;"></div></div>`;
+  hermesApi('/config').then(function(d){
+    var cfg = d && d.config ? d.config : (d || {});
+    var f = $('hermes-config-form'); if (!f) return;
+    var fields = [
+      ['provider', 'Provider', 'text'], ['model', 'Model', 'text'], ['temperature', 'Temperature', 'number'],
+      ['max_tokens', 'Max tokens', 'number'], ['api_base', 'API base', 'text'], ['api_key', 'API key', 'password'],
+      ['system_prompt', 'System prompt', 'textarea']
+    ];
+    f.innerHTML = fields.map(function(fd){
+      var val = cfg[fd[0]] != null ? cfg[fd[0]] : '';
+      return `<div style="grid-column:${fd[2] === 'textarea' ? '1 / -1' : 'auto'};">
+        <label style="font-size:11px;color:#94a3b8;">${fd[1]}</label>
+        ${fd[2] === 'textarea'
+          ? `<textarea id="hcfg-${fd[0]}" style="width:100%;margin-top:4px;padding:7px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-hover);color:var(--text-primary);font-size:12px;min-height:80px;">${escapeHtml(String(val))}</textarea>`
+          : `<input id="hcfg-${fd[0]}" type="${fd[2]}" value="${escapeHtml(String(val))}" style="width:100%;margin-top:4px;padding:7px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-hover);color:var(--text-primary);font-size:12px;">`}
+      </div>`;
+    }).join('') + '<div style="grid-column:1/-1;"><button class="agentic-btn" onclick="hermesSaveConfig()">💾 Save Config</button> <span id="hermes-cfg-status" style="font-size:11px;color:#94a3b8;"></span></div>';
+  });
+}
+function hermesSaveConfig() {
+  var cfg = {};
+  ['provider', 'model', 'temperature', 'max_tokens', 'api_base', 'api_key', 'system_prompt'].forEach(function(k){
+    var el = document.getElementById('hcfg-' + k);
+    if (el) cfg[k] = (k === 'temperature' || k === 'max_tokens') ? (el.value === '' ? null : Number(el.value)) : el.value;
+  });
+  var st = $('hermes-cfg-status');
+  if (st) st.textContent = 'saving…';
+  hermesApi('/config', { method: 'POST', body: JSON.stringify(cfg) }).then(function(d){
+    if (st) st.textContent = (d && d.status === 'ok') ? '✅ saved' : ('❌ ' + (d && d.error || 'failed'));
+  });
+}
+
+// ── TELEMETRY ──
+function hermesTelemetryTab(body) {
+  body.innerHTML = '<div class="agentic-card"><div class="agentic-card-header"><span>📊 Hermes Telemetry</span></div><div id="hermes-telemetry" style="padding:12px;"></div></div>';
+  hermesApi('/telemetry').then(function(d){
+    var el = $('hermes-telemetry'); if (!el) return;
+    var rows = Object.keys(d || {}).map(function(k){
+      var v = Array.isArray(d[k]) ? d[k].join(', ') : String(d[k]);
+      return `<div style="padding:6px 0;border-bottom:1px solid var(--border);"><span style="color:#94a3b8;font-size:11px;display:inline-block;width:170px;">${k}</span><span style="font-size:12px;">${escapeHtml(v)}</span></div>`;
+    }).join('');
+    el.innerHTML = rows;
   });
 }
 
@@ -3275,7 +3475,7 @@ function agenticSubbarItems(agentId) {
   if (agentId === 'hermes') {
     items = items.concat([
       { icon: 'terminal', label: 'Full Hermes Console', onclick: "nav('hermes-full')" },
-      { icon: 'open_in_new', label: 'Hermes API Docs (New Tab)', onclick: "hermesOpenExternal()" },
+      { icon: 'open_in_new', label: 'Hermes API Docs (New Tab)', onclick: "window.open(_dashOrigin + '/hermes/docs', '_blank')" },
       { icon: 'key', label: 'LLM & API Keys', onclick: "nav('config')" }
     ]);
   } else if (agentId === 'deepseek-harness') {
