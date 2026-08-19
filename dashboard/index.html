@@ -752,6 +752,57 @@ body ::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 4p
 .agentic-ws-title .sub { font-size: 10.5px; color: #64748b; margin-top: 2px; }
 .agentic-ws-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-wrap: wrap; }
 
+/* Roster (Agents & Topics) polish — calm category headers, clean rows, one accent */
+.agentic-roster-list { padding: 6px 8px 10px; }
+.agent-roster-cat {
+  display: flex; align-items: center; gap: 7px;
+  margin: 12px 2px 6px; padding: 0 4px 6px;
+  font-size: 10px; font-weight: 600; letter-spacing: 0.05em;
+  color: #94a3b8; border-bottom: 1px solid rgba(51, 65, 85, 0.35);
+  text-transform: none;
+}
+.agent-roster-cat::before {
+  content: ''; width: 3px; height: 11px; border-radius: 2px;
+  background: #38bdf8; opacity: 0.75; flex-shrink: 0;
+}
+.agent-roster-cat .cat-count {
+  margin-left: auto; font-size: 9px; font-weight: 600; color: #64748b;
+  background: rgba(30, 41, 59, 0.85); border: 1px solid rgba(51, 65, 85, 0.5);
+  padding: 0 7px; border-radius: 999px; line-height: 15px;
+}
+.agent-roster-avatar {
+  position: relative; width: 28px; height: 28px; flex-shrink: 0;
+  border-radius: 9px; background: rgba(30, 41, 59, 0.95);
+  border: 1px solid rgba(51, 65, 85, 0.6);
+  display: flex; align-items: center; justify-content: center;
+}
+.agent-roster-icon { font-size: 13px; line-height: 1; }
+.agent-roster-status {
+  position: absolute; right: -2px; bottom: -2px;
+  width: 9px; height: 9px; border-radius: 50%;
+  border: 2px solid #0f172a; box-sizing: content-box;
+}
+.agentic-roster-item { padding: 4px 5px; border-radius: 9px; }
+.agent-roster-head { gap: 8px; padding: 4px 4px; border-radius: 7px; }
+.agent-roster-head .agent-name { font-weight: 600; font-size: 11.5px; color: #f1f5f9; }
+.agent-roster-head .agent-role { font-size: 9.5px; color: #64748b; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-row-action {
+  border: 1px solid rgba(71, 85, 105, 0.55); background: rgba(30, 41, 59, 0.75);
+  color: #cbd5e1; font-size: 10px; font-weight: 500; padding: 3px 10px;
+  border-radius: 6px; cursor: pointer; white-space: nowrap; line-height: 1.4;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+.agent-row-action:hover { color: #7dd3fc; border-color: rgba(56,189,248,0.45); background: rgba(56,189,248,0.1); }
+.agent-row-action.primary {
+  background: linear-gradient(135deg, #0ea5e9, #0284c7); color: #fff; border: none;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.3);
+}
+.agent-row-action.primary:hover { background: linear-gradient(135deg, #0ea5e9, #0284c7); color: #fff; box-shadow: 0 2px 8px rgba(14,165,233,0.4); }
+.agent-row-status { font-size: 10px; color: #64748b; }
+.agent-sess-row { font-size: 10.5px; padding: 5px 8px; border-radius: 6px; }
+.agent-sess-row .sess-count { background: rgba(30, 41, 59, 0.8); color: #64748b; border: 1px solid rgba(51, 65, 85, 0.4); }
+.agent-sess-new { border-radius: 6px; font-size: 10.5px; }
+
 /* Focus-visible rings (interaction-design: visible affordance, keyboard first) */
 .agentic-btn:focus-visible, .agentic-btn-secondary:focus-visible,
 .agentic-icon-btn:focus-visible, .agentic-more-item:focus-visible,
@@ -5052,9 +5103,9 @@ function loadAgentRoster() {
     if ($('agent-count-badge')) $('agent-count-badge').textContent = agents.length + ' Tools & Agents';
 
     var categories = [
-      { id: 'orchestrators', title: '🎼 Agent Orchestrators', color: '#a855f7' },
-      { id: 'agents', title: '🤖 Autonomous Agents', color: '#38bdf8' },
-      { id: 'llms', title: '🧠 LLM & Memory Engines', color: '#22c55e' }
+      { id: 'orchestrators', title: 'Agent Orchestrators' },
+      { id: 'agents', title: 'Autonomous Agents' },
+      { id: 'llms', title: 'LLM & Memory Engines' }
     ];
 
     var html = '';
@@ -5065,63 +5116,65 @@ function loadAgentRoster() {
 
       if (group.length > 0) {
         html += `
-          <div style="margin-top:10px;margin-bottom:6px;font-size:11px;font-weight:700;color:${cat.color};letter-spacing:0.5px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid rgba(51,65,85,0.4);padding-bottom:4px;">
+          <div class="agent-roster-cat">
             <span>${cat.title}</span>
-            <span style="font-size:10px;opacity:0.8;background:rgba(30,41,59,0.8);padding:1px 6px;border-radius:10px;">${group.length}</span>
+            <span class="cat-count">${group.length}</span>
           </div>
         `;
 
         group.forEach(function(ag){
           var dotClass = ag.status === 'online' ? 'agentic-dot-online' : (ag.status === 'active' ? 'agentic-dot-active' : 'agentic-dot-idle');
+          var ROSTER_ICONS = {
+            'hermes': '🤖', 'openclaw': '🦞', 'buzz': '🐝', 'goose': '🪿',
+            'deepseek-harness': '🐋', 'deerflow': '🦌', 'claude': '🧠',
+            'antigravity': '⚡', 'codex': '💻', 'litellm': '⚡',
+            'onebrain': '🧠', 'memory-mcp': '🧠', 'ollama': '🐳',
+            'openwebui': '🖥️', 'anythingllm': '📚', 'crewai': '🎼',
+            'n8n': '🔀', 'mcp': '🔌', 'telegram': '📡'
+          };
+          var icon = ROSTER_ICONS[ag.id] || (ag.name ? String(ag.name).trim().charAt(0).toUpperCase() : '●');
 
           // Match against AppVault catalog containers
           var matchApp = catalogApps.find(function(a){
-            return a.name.toLowerCase().includes(ag.id.toLowerCase()) || 
+            return a.name.toLowerCase().includes(ag.id.toLowerCase()) ||
                    a.id.toLowerCase().includes(ag.id.toLowerCase()) ||
                    (ag.id === 'openclaw' && a.id.includes('openclaw'));
           });
 
           var actionBtn = '';
-          // LLM & MEMORY ENGINES are infrastructure, not chat apps — give
-          // each entry an action that actually does something useful.
           if (cat.id === 'llms') {
             if (ag.id === 'litellm') {
-              actionBtn = `<button class="agentic-btn" style="padding:3px 8px;font-size:10px;" onclick="nav('config')">⚙️ Configure</button>`;
+              actionBtn = `<button class="agent-row-action" onclick="nav('config')">Configure</button>`;
             } else if (ag.id === 'onebrain' || ag.id === 'memory-mcp') {
-              actionBtn = `<button class="agentic-btn-secondary" style="padding:3px 8px;font-size:10px;" onclick="showAgentMemoryView()">🧠 Memory</button>`;
+              actionBtn = `<button class="agent-row-action" onclick="showAgentMemoryView()">Memory</button>`;
             } else if (ag.id === 'ollama') {
-              actionBtn = `<button class="agentic-btn-secondary" style="padding:3px 8px;font-size:10px;" onclick="nav('config')">🖥 Models</button>`;
+              actionBtn = `<button class="agent-row-action" onclick="nav('config')">Models</button>`;
             } else if (ag.id === 'openwebui' || ag.id === 'anythingllm') {
-              // Real web UIs — open them directly if reachable
               var lport = (ag.id === 'openwebui') ? '3000' : (ag.id === 'anythingllm' ? '59742' : '');
-              actionBtn = `<button class="agentic-btn" style="padding:3px 8px;font-size:10px;" onclick="launch('${lport}','/','${ag.name}','','')">🚀 Open</button>`;
+              actionBtn = `<button class="agent-row-action primary" onclick="launch('${lport}','/','${ag.name}','','')">Open</button>`;
             } else {
-              actionBtn = `<span style="font-size:10px;color:#64748b;">● ${ag.status}</span>`;
+              actionBtn = `<span class="agent-row-status">● ${ag.status}</span>`;
             }
           } else if (matchApp && matchApp.status === 'installed') {
-            actionBtn = `<button class="agentic-btn-secondary" style="padding:3px 8px;font-size:10px;" onclick="launch('${matchApp.host_port||''}','${matchApp.web_path||'/'}','${matchApp.name}','${matchApp.launch_url||''}')">🚀 Open</button>`;
+            actionBtn = `<button class="agent-row-action primary" onclick="launch('${matchApp.host_port||''}','${matchApp.web_path||'/'}','${matchApp.name}','${matchApp.launch_url||''}')">Open</button>`;
           } else if (ag.id === 'openclaw') {
-            actionBtn = `<button class="agentic-btn" style="padding:3px 8px;font-size:10px;background:rgba(56,189,248,0.25);color:#38bdf8;border-color:rgba(56,189,248,0.4);" onclick="openAgentSession('openclaw')">🦞 OpenClaw</button>
-            <button class="agentic-btn-secondary" style="padding:3px 7px;font-size:10px;" onclick="event.stopPropagation();createNewAgentSession('openclaw')" title="Create new chat topic for OpenClaw">➕</button>`;
+            actionBtn = `<button class="agent-row-action primary" onclick="openAgentSession('openclaw')">OpenClaw</button>`;
           } else if (ag.id === 'openwebui' || ag.id === 'ollama') {
-            actionBtn = `<button class="agentic-btn" style="padding:3px 8px;font-size:10px;" onclick="nav('store')">📦 Install</button>`;
+            actionBtn = `<button class="agent-row-action" onclick="nav('store')">Install</button>`;
           } else if (ag.id === 'deerflow') {
-            // Plane-native agent: open the harness when online, launch it from the page when not.
             if (ag.status === 'online') {
-              actionBtn = `<button class="agentic-btn" style="padding:3px 8px;font-size:10px;" onclick="launch('2026','/','DeerFlow','','')">🚀 Open</button>`;
+              actionBtn = `<button class="agent-row-action primary" onclick="launch('2026','/','DeerFlow','','')">Open</button>`;
             } else {
-              actionBtn = `<button class="agentic-btn" style="padding:3px 8px;font-size:10px;" onclick="launchDeerFlow()">⚡ Launch</button>`;
+              actionBtn = `<button class="agent-row-action primary" onclick="launchDeerFlow()">Launch</button>`;
             }
-            actionBtn += ` <button class="agentic-btn-secondary" style="padding:3px 8px;font-size:10px;" onclick="openAgentSession('deerflow')">💬 Chat</button>
-            <button class="agentic-btn-secondary" style="padding:3px 7px;font-size:10px;" onclick="event.stopPropagation();createNewAgentSession('deerflow')" title="Create new chat topic for DeerFlow">➕</button>`;
+            actionBtn += ` <button class="agent-row-action" onclick="openAgentSession('deerflow')">Chat</button>`;
           } else {
-            actionBtn = `<button class="agentic-btn-secondary" style="padding:3px 8px;font-size:10px;" onclick="openAgentSession('${ag.id}')">💬 Chat</button>
-            <button class="agentic-btn-secondary" style="padding:3px 7px;font-size:10px;" onclick="event.stopPropagation();createNewAgentSession('${ag.id}')" title="Create new chat topic for ${escapeHtml(ag.name)}">➕</button>`;
+            actionBtn = `<button class="agent-row-action primary" onclick="openAgentSession('${ag.id}')">Chat</button>`;
           }
 
           var rowClick = (cat.id === 'llms') ? 'style="cursor:default;"' : '';
-          // Collapsible sessions (Hermes-desktop style): agent header toggles a
-          // tree of sessions; active session highlighted; + New at the bottom.
+          // Collapsible sessions: agent header toggles a tree of sessions;
+          // active session highlighted; + New at the bottom.
           var sessHtml = '';
           if (cat.id !== 'llms') {
             var agentSess = sessionMap[ag.id] || [];
@@ -5138,21 +5191,24 @@ function loadAgentRoster() {
             }).join('');
             sessHtml = `<div class="agent-sessions" id="agent-sess-${ag.id}" style="${isOpen ? '' : 'display:none;'}">
               ${sessRows || '<div style="padding:4px 8px;font-size:10px;color:#64748b;">No topic threads yet</div>'}
-              <div class="agent-sess-new" onclick="event.stopPropagation();createNewAgentSession('${ag.id}')" style="display:flex;align-items:center;gap:6px;padding:5px 8px;margin-top:3px;font-size:10.5px;color:#38bdf8;background:rgba(56,189,248,0.08);border:1px dashed rgba(56,189,248,0.3);border-radius:6px;cursor:pointer;font-weight:600;">
-                <span>➕</span> <span>New Chat Topic</span>
+              <div class="agent-sess-new" onclick="event.stopPropagation();createNewAgentSession('${ag.id}')" style="display:flex;align-items:center;gap:6px;padding:5px 8px;margin-top:3px;font-size:10.5px;color:#94a3b8;background:transparent;border:1px dashed rgba(71,85,105,0.5);border-radius:6px;cursor:pointer;font-weight:500;">
+                <span>＋</span> <span>New Chat Topic</span>
               </div>
             </div>`;
           }
           html += `
             <div class="agentic-roster-item" ${rowClick} style="align-items:stretch;">
               <div class="agent-roster-head" ${cat.id !== 'llms' ? `onclick="toggleAgentSessions('${ag.id}')"` : ''}>
-                <div class="agentic-dot ${dotClass}"></div>
-                <div style="flex:1;min-width:0;">
-                  <div style="font-weight:600;font-size:11.5px;color:#f1f5f9;">${escapeHtml(ag.name)}</div>
-                  <div style="font-size:9.5px;color:#64748b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(ag.role)}</div>
+                <div class="agent-roster-avatar">
+                  <span class="agent-roster-icon">${icon}</span>
+                  <span class="agent-roster-status ${dotClass}"></span>
                 </div>
-                <div onclick="event.stopPropagation()">${actionBtn}</div>
-                ${cat.id !== 'llms' ? `<span class="agent-roster-chevron${isOpen ? ' open' : ''}">▼</span>` : ''}
+                <div style="flex:1;min-width:0;">
+                  <div class="agent-name">${escapeHtml(ag.name)}</div>
+                  <div class="agent-role">${escapeHtml(ag.role || '')}</div>
+                </div>
+                <div onclick="event.stopPropagation()" style="display:flex;gap:4px;align-items:center;flex-shrink:0;">${actionBtn}</div>
+                ${cat.id !== 'llms' ? `<span class="agent-roster-chevron${isOpen ? ' open' : ''}">▾</span>` : ''}
               </div>
               ${sessHtml}
             </div>
