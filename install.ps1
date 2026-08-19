@@ -135,11 +135,31 @@ if ($wslDefault2) {
     Warn "  Install the .msi, then run: wsl --set-default-version 2"
 }
 
-# Create .wslconfig RAM cap if not present (prevents WSL2 VMMEM from consuming 100% host RAM)
+# Create .wslconfig RAM cap if not present (prevents WSL2 VMMEM from consuming
+# 100% host RAM). Adaptive: ~25% of host RAM (min 6GB, max 16GB) + cores, so
+# big machines (many containers) don't starve the Docker engine — a fixed 6GB
+# cap made Docker Desktop freeze on 32GB+/64GB machines with many apps.
 $wslConfigFile = "$env:USERPROFILE\.wslconfig"
+$wslTotalGB = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
+$wslCapGB = [math]::Max(6, [math]::Min(16, [math]::Floor($wslTotalGB * 0.25)))
+$wslCpuCap = [math]::Max(4, [math]::Min(12, [Environment]::ProcessorCount))
+$wslConfig = "[wsl2]`nmemory=${wslCapGB}GB`nprocessors=$wslCpuCap"
 if (-not (Test-Path $wslConfigFile)) {
-    "[wsl2]`nmemory=6GB`nprocessors=4" | Out-File -Encoding ascii $wslConfigFile
-    Success "Created .wslconfig (capped WSL2 memory to 6GB to protect host RAM)"
+    $wslConfig | Out-File -Encoding ascii $wslConfigFile
+    Success "Created .wslconfig (WSL2 capped at ${wslCapGB}GB RAM, $wslCpuCap cores)"
+} else {
+    # Upgrade an existing too-small cap (e.g. a fixed 6GB from an older
+    # installer) so the Docker engine stops freezing on larger machines.
+    $cur = Get-Content $wslConfigFile -Raw -ErrorAction SilentlyContinue
+    if ($cur -match "memory\s*=\s*(\d+)\s*GB") {
+        $curGB = [int]$matches[1]
+        if ($curGB -lt $wslCapGB) {
+            $wslConfig | Out-File -Encoding ascii $wslConfigFile
+            Success "Updated .wslconfig WSL2 cap ${curGB}GB -> ${wslCapGB}GB (takes effect after Docker/WSL restart)"
+        } else {
+            Success ".wslconfig already capped at ${curGB}GB"
+        }
+    }
 }
 
 # ═══════════════════════════════════════════
