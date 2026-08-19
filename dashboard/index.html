@@ -294,6 +294,45 @@ body ::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 4p
 .badge-premium { background: linear-gradient(135deg, rgba(250,204,21,0.2), rgba(245,158,11,0.2)); color: #fbbf24; border: 1px solid rgba(250,204,21,0.4); }
 .badge-premium-ok { background: rgba(34,197,94,0.15); color: #22c55e; border: 1px solid rgba(34,197,94,0.35); }
 
+/* ── Global polish — taste-skill · ui-craft · interaction-design · shadcn ──
+   Keyboard-first focus rings, reduced motion, loading skeletons, consistent
+   empty states, dashboard table refinement, and the pulse-dot signature. */
+:focus-visible { outline: 2px solid rgba(56, 189, 248, 0.7); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
+  .tile:hover { transform: none; }
+  .card:hover { transform: none; }
+}
+/* Loading skeleton: shimmer blocks instead of bare "Loading..." text */
+.skeleton { border-radius: 8px; background: linear-gradient(90deg, rgba(51,65,85,0.35) 25%, rgba(71,85,105,0.5) 50%, rgba(51,65,85,0.35) 75%); background-size: 200% 100%; animation: skeleton-shimmer 1.3s ease-in-out infinite; }
+.skeleton-line { height: 12px; margin: 8px 0; border-radius: 6px; }
+.skeleton-tile { height: 118px; border-radius: 14px; }
+.skeleton-card { height: 150px; border-radius: 12px; }
+@keyframes skeleton-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+/* Consistent empty state */
+.empty-state { text-align: center; padding: 44px 20px; color: var(--text-muted); font-size: 13px; line-height: 1.7; }
+.empty-state .empty-icon { font-size: 26px; display: block; margin-bottom: 8px; opacity: 0.7; }
+.empty-state a { color: var(--accent-from); text-decoration: none; font-weight: 600; }
+.empty-state a:hover { text-decoration: underline; }
+/* Dashboard / table refinement (ui-craft recipe-dashboard) */
+table.data-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+table.data-table thead th {
+  text-align: left; font-size: 10.5px; font-weight: 600; letter-spacing: 0.04em;
+  color: var(--text-muted); text-transform: none;
+  padding: 8px 12px; border-bottom: 1px solid rgba(51,65,85,0.5);
+}
+table.data-table tbody td { padding: 9px 12px; border-bottom: 1px solid rgba(51,65,85,0.25); color: var(--text-primary); vertical-align: middle; }
+table.data-table tbody tr { transition: background 0.12s ease; }
+table.data-table tbody tr:hover { background: rgba(56, 189, 248, 0.05); }
+table.data-table tbody tr:last-child td { border-bottom: none; }
+/* Pulse-dot signature: live status dot with soft ring (used on tiles/roster/subbar) */
+.pulse-dot { position: relative; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
+.pulse-dot::after { content: ''; position: absolute; inset: -3px; border-radius: 50%; border: 1px solid rgba(34,197,94,0.55); animation: pulse-ring 1.8s ease-out infinite; }
+.pulse-dot.amber { background: var(--amber); }
+.pulse-dot.amber::after { border-color: rgba(245,158,11,0.5); }
+@keyframes pulse-ring { 0% { transform: scale(0.6); opacity: 1; } 100% { transform: scale(1.4); opacity: 0; } }
+
+
 /* ── Card Action Buttons ── */
 .card-actions {
   display: flex; flex-direction: column; gap: 7px; margin-top: auto; padding-top: 12px;
@@ -1760,33 +1799,46 @@ var NavSystem = (function(){
 
   // ── Group editing (panel) ──
   function navCfgAddGroup(sectionId) {
-    var title = prompt('New group name (e.g. Core):', '');
-    if (!title) return;
-    title = title.trim().slice(0, 30);
-    var gid = title.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24) || ('group-' + Date.now());
-    var sec = document.querySelector('.navcfg-section[data-id="' + sectionId + '"]');
-    if (!sec) return;
-    var addBtn = sec.querySelector('.navcfg-add-group');
-    var group = document.createElement('div');
-    group.className = 'navcfg-group';
-    group.setAttribute('data-gid', gid);
-    group.setAttribute('data-title', title);
-    group.innerHTML = '<div class="navcfg-row navcfg-group-row"><span class="navcfg-group-label">' + esc(title) + '</span>'
-      + '<span class="navcfg-spacer"></span>'
-      + '<button class="navcfg-btn" onclick="NavSystem.navCfgRenameGroup(\'' + gid + '\',\'' + sectionId + '\')">&#9999;&#65039;</button>'
-      + '<button class="navcfg-btn" onclick="NavSystem.navCfgDelGroup(\'' + gid + '\',\'' + sectionId + '\')">&#128465;&#65039;</button></div>'
-      + '<div class="navcfg-items" data-gid="' + gid + '"></div>';
-    sec.insertBefore(group, addBtn);
+    agenticPrompt({
+      title: 'New group',
+      label: 'New group name (e.g. Core):',
+      okText: 'Add',
+      onOk: function(v) {
+        var title = (v || '').trim().slice(0, 30);
+        if (!title) return;
+        var gid = title.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24) || ('group-' + Date.now());
+        var sec = document.querySelector('.navcfg-section[data-id="' + sectionId + '"]');
+        if (!sec) return;
+        var addBtn = sec.querySelector('.navcfg-add-group');
+        var group = document.createElement('div');
+        group.className = 'navcfg-group';
+        group.setAttribute('data-gid', gid);
+        group.setAttribute('data-title', title);
+        group.innerHTML = '<div class="navcfg-row navcfg-group-row"><span class="navcfg-group-label">' + esc(title) + '</span>'
+          + '<span class="navcfg-spacer"></span>'
+          + '<button class="navcfg-btn" onclick="NavSystem.navCfgRenameGroup(\'' + gid + '\',\'' + sectionId + '\')">&#9999;&#65039;</button>'
+          + '<button class="navcfg-btn" onclick="NavSystem.navCfgDelGroup(\'' + gid + '\',\'' + sectionId + '\')">&#128465;&#65039;</button></div>'
+          + '<div class="navcfg-items" data-gid="' + gid + '"></div>';
+        sec.insertBefore(group, addBtn);
+      }
+    });
   }
   function navCfgRenameGroup(gid, sectionId) {
     var grp = document.querySelector('.navcfg-section[data-id="' + sectionId + '"] .navcfg-group[data-gid="' + gid + '"]');
     if (!grp) return;
-    var title = prompt('Rename group:', grp.getAttribute('data-title') || gid);
-    if (!title) return;
-    title = title.trim().slice(0, 30);
-    grp.setAttribute('data-title', title);
-    var lbl = grp.querySelector('.navcfg-group-label');
-    if (lbl) lbl.textContent = title;
+    agenticPrompt({
+      title: 'Rename group',
+      label: 'Rename group:',
+      value: grp.getAttribute('data-title') || gid,
+      okText: 'Rename',
+      onOk: function(v) {
+        var title = (v || '').trim().slice(0, 30);
+        if (!title) return;
+        grp.setAttribute('data-title', title);
+        var lbl = grp.querySelector('.navcfg-group-label');
+        if (lbl) lbl.textContent = title;
+      }
+    });
   }
   function navCfgDelGroup(gid, sectionId) {
     var grp = document.querySelector('.navcfg-section[data-id="' + sectionId + '"] .navcfg-group[data-gid="' + gid + '"]');
@@ -2454,7 +2506,10 @@ function cardHTML(a) {
   }
 
   return '<div class="card">'
-    + '<div class="card-hdr"><div class="card-icon">📦</div>'
+    + '<div class="card-hdr"><div class="card-icon" style="overflow:hidden;position:relative;background:var(--bg-hover);">'
+    + '<img src="' + iconUrl(a) + '" onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'flex\'" style="width:100%;height:100%;object-fit:cover;">'
+    + '<span style="display:none;position:absolute;inset:0;align-items:center;justify-content:center;font-size:16px;">' + tileEmoji(a) + '</span>'
+    + '</div>'
     + '<div><div class="card-name">' + a.name + certBadge + badge(s) + premiumBadge(a) + '</div>'
     + '<div class="card-cat">' + (a.category||'app') + '</div></div></div>'
     + '<div class="card-desc">' + (a.description||'') + '</div>'
@@ -3200,8 +3255,13 @@ function hermesNewSession() {
 }
 
 function hermesDeleteSession(id) {
-  if (!confirm('Delete this session?')) return;
-  hermesApi('/sessions/' + id, { method: 'DELETE' }).then(function(){ _hermesActiveSession = null; hermesLoadSessions(); });
+  agenticConfirm({
+    title: 'Delete session',
+    message: 'Delete this session?',
+    okText: 'Delete',
+    danger: true,
+    onOk: function(){ hermesApi('/sessions/' + id, { method: 'DELETE' }).then(function(){ _hermesActiveSession = null; hermesLoadSessions(); }); }
+  });
 }
 
 function hermesOpenSession(id) { _hermesActiveSession = id; hermesLoadSessions(); }
@@ -3370,7 +3430,7 @@ function agenticMoreMenu(btn, items) {
   var html = '';
   (items || []).forEach(function(it){
     var cls = 'agentic-more-item' + (it.danger ? ' danger' : '');
-    var icon = it.icon ? '<span class="mi-icon">' + it.icon + '</span>' : '';
+    var icon = it.icon ? '<span class="msr mi-icon" style="font-size:14px;">' + it.icon + '</span>' : '';
     if (it.href) {
       html += '<a class="' + cls + '" href="' + it.href + '" target="_blank" rel="noopener">' + icon + '<span>' + it.label + '</span></a>';
     } else {
@@ -3402,15 +3462,15 @@ function agenticMoreClose() {
 }
 function agenticSubbarItems(agentId) {
   var items = [
-    { icon: '🔮', label: 'Oracle Feeds', onclick: 'showOracleStudio()' },
-    { icon: '⚙️', label: 'LLM & API Keys', onclick: "nav('config')" }
+    { icon: 'radar', label: 'Oracle Feeds', onclick: 'showOracleStudio()' },
+    { icon: 'key', label: 'LLM & API Keys', onclick: "nav('config')" }
   ];
   if (agentId === 'hermes') {
     items = items.concat([
-      { icon: '🛠', label: 'Hermes Tools', onclick: "hermesWorkspacePanel('tools')" },
-      { icon: '⚙️', label: 'Hermes Config', onclick: "hermesWorkspacePanel('config')" },
-      { icon: '📊', label: 'Hermes Telemetry', onclick: "hermesWorkspacePanel('telemetry')" },
-      { icon: '🚀', label: 'Full Hermes Console', onclick: "nav('hermes-full')" }
+      { icon: 'handyman', label: 'Hermes Tools', onclick: "hermesWorkspacePanel('tools')" },
+      { icon: 'tune', label: 'Hermes Config', onclick: "hermesWorkspacePanel('config')" },
+      { icon: 'monitoring', label: 'Hermes Telemetry', onclick: "hermesWorkspacePanel('telemetry')" },
+      { icon: 'terminal', label: 'Full Hermes Console', onclick: "nav('hermes-full')" }
     ]);
   }
   return items;
@@ -3418,55 +3478,55 @@ function agenticSubbarItems(agentId) {
 function agenticTopicItems(agentId) {
   agentId = (agentId || 'hermes').toLowerCase();
   var items = [
-    { icon: '✏️', label: 'Rename Topic', onclick: "renameCurrentAgentSession('" + agentId + "')" },
-    { icon: '🗑️', label: 'Delete Topic', onclick: "deleteCurrentAgentSession('" + agentId + "')", danger: true }
+    { icon: 'edit', label: 'Rename Topic', onclick: "renameCurrentAgentSession('" + agentId + "')" },
+    { icon: 'delete', label: 'Delete Topic', onclick: "deleteCurrentAgentSession('" + agentId + "')", danger: true }
   ];
   var extras = [];
   if (agentId === 'hermes') {
     extras = [
-      { icon: '📚', label: 'Skills', onclick: 'goToSkills()' },
-      { icon: '📡', label: 'Telegram & Integrations', onclick: "nav('gov')" },
-      { icon: '⚙️', label: 'Settings', onclick: "nav('config')" }
+      { icon: 'school', label: 'Skills', onclick: 'goToSkills()' },
+      { icon: 'send', label: 'Telegram & Integrations', onclick: "nav('gov')" },
+      { icon: 'settings', label: 'Settings', onclick: "nav('config')" }
     ];
   } else if (agentId === 'openclaw') {
     extras = [
-      { icon: '⚙️', label: 'Configure API Key & Model', onclick: "nav('config')" },
-      { icon: '📡', label: 'Telegram & Integrations', onclick: "nav('gov')" },
-      { icon: '🔄', label: 'Refresh', onclick: "loadAgentWorkspace('openclaw', currentThreadId)" },
-      { icon: '🐙', label: 'GitHub', href: 'https://github.com/openclaw/openclaw' }
+      { icon: 'key', label: 'Configure API Key & Model', onclick: "nav('config')" },
+      { icon: 'send', label: 'Telegram & Integrations', onclick: "nav('gov')" },
+      { icon: 'refresh', label: 'Refresh', onclick: "loadAgentWorkspace('openclaw', currentThreadId)" },
+      { icon: 'code', label: 'GitHub', href: 'https://github.com/openclaw/openclaw' }
     ];
   } else if (agentId === 'buzz') {
     extras = [
-      { icon: '🚀', label: 'Open Buzz Web UI', onclick: "launch('35522','/','Buzz Workspace','','')" },
-      { icon: '📡', label: 'Telegram & Integrations', onclick: "nav('gov')" },
-      { icon: '🔄', label: 'Refresh', onclick: "loadAgentWorkspace('buzz', currentThreadId)" },
-      { icon: '🐙', label: 'GitHub', href: 'https://github.com/block/buzz' }
+      { icon: 'open_in_new', label: 'Open Buzz Web UI', onclick: "launch('35522','/','Buzz Workspace','','')" },
+      { icon: 'send', label: 'Telegram & Integrations', onclick: "nav('gov')" },
+      { icon: 'refresh', label: 'Refresh', onclick: "loadAgentWorkspace('buzz', currentThreadId)" },
+      { icon: 'code', label: 'GitHub', href: 'https://github.com/block/buzz' }
     ];
   } else if (agentId === 'goose') {
     extras = [
-      { icon: '📡', label: 'Telegram & Integrations', onclick: "nav('gov')" },
-      { icon: '⚙️', label: 'Configure API Key & Model', onclick: "nav('config')" },
-      { icon: '🔄', label: 'Refresh', onclick: "loadAgentWorkspace('goose', currentThreadId)" },
-      { icon: '🐙', label: 'GitHub', href: 'https://github.com/aaif-goose/goose' }
+      { icon: 'send', label: 'Telegram & Integrations', onclick: "nav('gov')" },
+      { icon: 'key', label: 'Configure API Key & Model', onclick: "nav('config')" },
+      { icon: 'refresh', label: 'Refresh', onclick: "loadAgentWorkspace('goose', currentThreadId)" },
+      { icon: 'code', label: 'GitHub', href: 'https://github.com/aaif-goose/goose' }
     ];
   } else if (agentId === 'deepseek-harness') {
     extras = [
-      { icon: '📡', label: 'Telegram & Integrations', onclick: "nav('gov')" },
-      { icon: '⚙️', label: 'Configure API Key & Model', onclick: "nav('config')" },
-      { icon: '🔄', label: 'Refresh', onclick: "loadAgentWorkspace('deepseek-harness', currentThreadId)" },
-      { icon: '🐙', label: 'GitHub', href: 'https://github.com/deepseek-ai' }
+      { icon: 'send', label: 'Telegram & Integrations', onclick: "nav('gov')" },
+      { icon: 'key', label: 'Configure API Key & Model', onclick: "nav('config')" },
+      { icon: 'refresh', label: 'Refresh', onclick: "loadAgentWorkspace('deepseek-harness', currentThreadId)" },
+      { icon: 'code', label: 'GitHub', href: 'https://github.com/deepseek-ai' }
     ];
   } else if (agentId === 'deerflow') {
     extras = [
-      { icon: '🚀', label: 'Open DeerFlow UI', onclick: "launch('2026','/','DeerFlow','','')" },
-      { icon: '📡', label: 'Telegram & Integrations', onclick: "nav('gov')" },
-      { icon: '🔄', label: 'Refresh', onclick: "loadAgentWorkspace('deerflow', currentThreadId)" },
-      { icon: '⚙️', label: 'Settings', onclick: "nav('config')" }
+      { icon: 'open_in_new', label: 'Open DeerFlow UI', onclick: "launch('2026','/','DeerFlow','','')" },
+      { icon: 'send', label: 'Telegram & Integrations', onclick: "nav('gov')" },
+      { icon: 'refresh', label: 'Refresh', onclick: "loadAgentWorkspace('deerflow', currentThreadId)" },
+      { icon: 'settings', label: 'Settings', onclick: "nav('config')" }
     ];
   } else {
     extras = [
-      { icon: '⚙️', label: 'Configure API Key & Model', onclick: "nav('config')" },
-      { icon: '🔄', label: 'Refresh', onclick: "loadAgentWorkspace('" + agentId + "', currentThreadId)" }
+      { icon: 'key', label: 'Configure API Key & Model', onclick: "nav('config')" },
+      { icon: 'refresh', label: 'Refresh', onclick: "loadAgentWorkspace('" + agentId + "', currentThreadId)" }
     ];
   }
   return items.concat(extras);
@@ -3535,7 +3595,7 @@ function showAgentPage(agentId) {
           <span>Sync: <code style="color:#64748b;font-size:11px;">D:/ObsidianVault</code></span>
         </div>
         <div style="display:flex;gap:8px;align-items:center;">
-          <button class="agentic-btn" style="padding:6px 12px;font-size:11px;" onclick="previewRecentWork()">👁️ Live Preview</button>
+          <button class="agentic-btn" style="padding:6px 12px;font-size:11px;" onclick="previewRecentWork()"><span class="msr" style="font-size:13px;vertical-align:-2px;">visibility</span> Live Preview</button>
           <button class="agentic-btn-secondary" id="right-panel-reopen" style="display:none;padding:6px 10px;font-size:11px;" onclick="toggleRightPanel(false)" title="Show memory & vault panel">▸ Memory & Vault</button>
           <button class="agentic-icon-btn" style="font-size:15px;width:32px;height:32px;" onclick="agenticMoreMenu(this, agenticSubbarItems('${agentId}'))" title="More options" aria-label="More options">⋯</button>
         </div>
@@ -3709,12 +3769,10 @@ function loadAgentWorkspace(agentId, threadId) {
             </div>
             <div style="display:flex;gap:6px;">
               <textarea id="agent-msg-input" placeholder="Talk to Hermes Agent... (type / for commands, @ for skills)" style="flex:1;height:42px;background:rgba(15,23,42,0.9);border:1px solid rgba(51,65,85,0.6);border-radius:10px;padding:8px 12px;color:#fff;font-size:12px;resize:none;" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendAgentMessage();}"></textarea>
-              <button class="agentic-icon-btn" id="voice-btn" onclick="toggleVoiceInput()" title="Voice input (Web Speech API)" aria-label="Voice input">🎙️</button>
-              <button class="agentic-icon-btn" id="tts-btn" onclick="toggleTTS()" title="Read agent replies aloud" aria-label="Toggle speech">🔇</button>
-              <button class="agentic-icon-btn" onclick="exportSessionMenu(this)" title="Export session (.md / .json / PDF)" aria-label="Export session">📤</button>
-              <label class="agentic-icon-btn" title="Attach Markdown / Code File to context" aria-label="Attach file" style="cursor:pointer;">
-                📎 <input type="file" style="display:none;" onchange="handlePromptFileUpload(event)">
-              </label>
+              <button class="agentic-icon-btn" id="voice-btn" onclick="toggleVoiceInput()" title="Voice input (Web Speech API)" aria-label="Voice input"><span class="msr" style="font-size:16px;">mic</span></button>
+              <button class="agentic-icon-btn" id="tts-btn" onclick="toggleTTS()" title="Read agent replies aloud" aria-label="Toggle speech"><span class="msr" style="font-size:16px;">volume_off</span></button>
+              <button class="agentic-icon-btn" onclick="exportSessionMenu(this)" title="Export session (.md / .json / PDF)" aria-label="Export session"><span class="msr" style="font-size:16px;">ios_share</span></button>
+              <label class="agentic-icon-btn" title="Attach Markdown / Code File to context" aria-label="Attach file" style="cursor:pointer;"><span class="msr" style="font-size:16px;">attach_file</span> <input type="file" style="display:none;" onchange="handlePromptFileUpload(event)"></label>
               <button class="agentic-btn" onclick="sendAgentMessage()" style="padding:0 18px;height:34px;">Send</button>
             </div>
           </div>
@@ -3831,7 +3889,7 @@ function loadAgentWorkspace(agentId, threadId) {
           </div>
           <div style="display:flex;gap:8px;">
             <textarea id="agent-msg-input" placeholder="Talk to OpenClaw Autonomous Agent... (type / for commands, @ for skills)" style="flex:1;height:42px;background:rgba(15,23,42,0.9);border:1px solid rgba(51,65,85,0.6);border-radius:8px;padding:8px 12px;color:#fff;font-size:12px;resize:none;" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendAgentMessage();}"></textarea>
-            <button class="agentic-icon-btn" id="voice-btn" onclick="toggleVoiceInput()" title="Voice input (Web Speech API)" aria-label="Voice input">🎙️</button><button class="agentic-icon-btn" id="tts-btn" onclick="toggleTTS()" title="Read agent replies aloud" aria-label="Toggle speech">🔇</button><button class="agentic-icon-btn" onclick="exportSessionMenu(this)" title="Export session (.md / .json / PDF)" aria-label="Export session">📤</button><label class="agentic-icon-btn" title="Attach Markdown / Code File to context" aria-label="Attach file" style="cursor:pointer;">📎 <input type="file" style="display:none;" onchange="handlePromptFileUpload(event)"></label><button class="agentic-btn" onclick="sendAgentMessage()" style="padding:0 18px;height:34px;">Send</button>
+            <button class="agentic-icon-btn" id="voice-btn" onclick="toggleVoiceInput()" title="Voice input (Web Speech API)" aria-label="Voice input"><span class="msr" style="font-size:16px;">mic</span></button><button class="agentic-icon-btn" id="tts-btn" onclick="toggleTTS()" title="Read agent replies aloud" aria-label="Toggle speech"><span class="msr" style="font-size:16px;">volume_off</span></button><button class="agentic-icon-btn" onclick="exportSessionMenu(this)" title="Export session (.md / .json / PDF)" aria-label="Export session"><span class="msr" style="font-size:16px;">ios_share</span></button><label class="agentic-icon-btn" title="Attach Markdown / Code File to context" aria-label="Attach file" style="cursor:pointer;"><span class="msr" style="font-size:16px;">attach_file</span> <input type="file" style="display:none;" onchange="handlePromptFileUpload(event)"></label><button class="agentic-btn" onclick="sendAgentMessage()" style="padding:0 18px;height:34px;">Send</button>
           </div>
         </div>
       </div>
@@ -3888,7 +3946,7 @@ function loadAgentWorkspace(agentId, threadId) {
           </div>
           <div style="display:flex;gap:8px;">
             <textarea id="agent-msg-input" placeholder="Talk to Buzz Workspace Coordinator... (type / for commands, @ for skills)" style="flex:1;height:42px;background:rgba(15,23,42,0.9);border:1px solid rgba(51,65,85,0.6);border-radius:8px;padding:8px 12px;color:#fff;font-size:12px;resize:none;" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendAgentMessage();}"></textarea>
-            <button class="agentic-icon-btn" id="voice-btn" onclick="toggleVoiceInput()" title="Voice input (Web Speech API)" aria-label="Voice input">🎙️</button><button class="agentic-icon-btn" id="tts-btn" onclick="toggleTTS()" title="Read agent replies aloud" aria-label="Toggle speech">🔇</button><button class="agentic-icon-btn" onclick="exportSessionMenu(this)" title="Export session (.md / .json / PDF)" aria-label="Export session">📤</button><label class="agentic-icon-btn" title="Attach Markdown / Code File to context" aria-label="Attach file" style="cursor:pointer;">📎 <input type="file" style="display:none;" onchange="handlePromptFileUpload(event)"></label><button class="agentic-btn" onclick="sendAgentMessage()" style="padding:0 18px;height:34px;">Send</button>
+            <button class="agentic-icon-btn" id="voice-btn" onclick="toggleVoiceInput()" title="Voice input (Web Speech API)" aria-label="Voice input"><span class="msr" style="font-size:16px;">mic</span></button><button class="agentic-icon-btn" id="tts-btn" onclick="toggleTTS()" title="Read agent replies aloud" aria-label="Toggle speech"><span class="msr" style="font-size:16px;">volume_off</span></button><button class="agentic-icon-btn" onclick="exportSessionMenu(this)" title="Export session (.md / .json / PDF)" aria-label="Export session"><span class="msr" style="font-size:16px;">ios_share</span></button><label class="agentic-icon-btn" title="Attach Markdown / Code File to context" aria-label="Attach file" style="cursor:pointer;"><span class="msr" style="font-size:16px;">attach_file</span> <input type="file" style="display:none;" onchange="handlePromptFileUpload(event)"></label><button class="agentic-btn" onclick="sendAgentMessage()" style="padding:0 18px;height:34px;">Send</button>
           </div>
         </div>
       </div>
@@ -3945,7 +4003,7 @@ function loadAgentWorkspace(agentId, threadId) {
           </div>
           <div style="display:flex;gap:8px;">
             <textarea id="agent-msg-input" placeholder="Talk to Goose Developer Agent... (type / for commands, @ for skills)" style="flex:1;height:42px;background:rgba(15,23,42,0.9);border:1px solid rgba(51,65,85,0.6);border-radius:8px;padding:8px 12px;color:#fff;font-size:12px;resize:none;" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendAgentMessage();}"></textarea>
-            <button class="agentic-icon-btn" id="voice-btn" onclick="toggleVoiceInput()" title="Voice input (Web Speech API)" aria-label="Voice input">🎙️</button><button class="agentic-icon-btn" id="tts-btn" onclick="toggleTTS()" title="Read agent replies aloud" aria-label="Toggle speech">🔇</button><button class="agentic-icon-btn" onclick="exportSessionMenu(this)" title="Export session (.md / .json / PDF)" aria-label="Export session">📤</button><label class="agentic-icon-btn" title="Attach Markdown / Code File to context" aria-label="Attach file" style="cursor:pointer;">📎 <input type="file" style="display:none;" onchange="handlePromptFileUpload(event)"></label><button class="agentic-btn" onclick="sendAgentMessage()" style="padding:0 18px;height:34px;">Send</button>
+            <button class="agentic-icon-btn" id="voice-btn" onclick="toggleVoiceInput()" title="Voice input (Web Speech API)" aria-label="Voice input"><span class="msr" style="font-size:16px;">mic</span></button><button class="agentic-icon-btn" id="tts-btn" onclick="toggleTTS()" title="Read agent replies aloud" aria-label="Toggle speech"><span class="msr" style="font-size:16px;">volume_off</span></button><button class="agentic-icon-btn" onclick="exportSessionMenu(this)" title="Export session (.md / .json / PDF)" aria-label="Export session"><span class="msr" style="font-size:16px;">ios_share</span></button><label class="agentic-icon-btn" title="Attach Markdown / Code File to context" aria-label="Attach file" style="cursor:pointer;"><span class="msr" style="font-size:16px;">attach_file</span> <input type="file" style="display:none;" onchange="handlePromptFileUpload(event)"></label><button class="agentic-btn" onclick="sendAgentMessage()" style="padding:0 18px;height:34px;">Send</button>
           </div>
         </div>
       </div>
@@ -4002,7 +4060,7 @@ function loadAgentWorkspace(agentId, threadId) {
           </div>
           <div style="display:flex;gap:8px;">
             <textarea id="agent-msg-input" placeholder="Talk to DeepSeek Reasoning Harness... (type / for commands, @ for skills)" style="flex:1;height:42px;background:rgba(15,23,42,0.9);border:1px solid rgba(51,65,85,0.6);border-radius:8px;padding:8px 12px;color:#fff;font-size:12px;resize:none;" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendAgentMessage();}"></textarea>
-            <button class="agentic-icon-btn" id="voice-btn" onclick="toggleVoiceInput()" title="Voice input (Web Speech API)" aria-label="Voice input">🎙️</button><button class="agentic-icon-btn" id="tts-btn" onclick="toggleTTS()" title="Read agent replies aloud" aria-label="Toggle speech">🔇</button><button class="agentic-icon-btn" onclick="exportSessionMenu(this)" title="Export session (.md / .json / PDF)" aria-label="Export session">📤</button><label class="agentic-icon-btn" title="Attach Markdown / Code File to context" aria-label="Attach file" style="cursor:pointer;">📎 <input type="file" style="display:none;" onchange="handlePromptFileUpload(event)"></label><button class="agentic-btn" onclick="sendAgentMessage()" style="padding:0 18px;height:34px;">Send</button>
+            <button class="agentic-icon-btn" id="voice-btn" onclick="toggleVoiceInput()" title="Voice input (Web Speech API)" aria-label="Voice input"><span class="msr" style="font-size:16px;">mic</span></button><button class="agentic-icon-btn" id="tts-btn" onclick="toggleTTS()" title="Read agent replies aloud" aria-label="Toggle speech"><span class="msr" style="font-size:16px;">volume_off</span></button><button class="agentic-icon-btn" onclick="exportSessionMenu(this)" title="Export session (.md / .json / PDF)" aria-label="Export session"><span class="msr" style="font-size:16px;">ios_share</span></button><label class="agentic-icon-btn" title="Attach Markdown / Code File to context" aria-label="Attach file" style="cursor:pointer;"><span class="msr" style="font-size:16px;">attach_file</span> <input type="file" style="display:none;" onchange="handlePromptFileUpload(event)"></label><button class="agentic-btn" onclick="sendAgentMessage()" style="padding:0 18px;height:34px;">Send</button>
           </div>
         </div>
       </div>
@@ -4058,7 +4116,7 @@ function loadAgentWorkspace(agentId, threadId) {
           </div>
           <div style="display:flex;gap:8px;">
             <textarea id="agent-msg-input" placeholder="Talk to DeerFlow Super-Agent... (type / for commands, @ for skills)" style="flex:1;height:42px;background:rgba(15,23,42,0.9);border:1px solid rgba(51,65,85,0.6);border-radius:8px;padding:8px 12px;color:#fff;font-size:12px;resize:none;" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendAgentMessage();}"></textarea>
-            <button class="agentic-icon-btn" id="voice-btn" onclick="toggleVoiceInput()" title="Voice input (Web Speech API)" aria-label="Voice input">🎙️</button><button class="agentic-icon-btn" id="tts-btn" onclick="toggleTTS()" title="Read agent replies aloud" aria-label="Toggle speech">🔇</button><button class="agentic-icon-btn" onclick="exportSessionMenu(this)" title="Export session (.md / .json / PDF)" aria-label="Export session">📤</button><label class="agentic-icon-btn" title="Attach Markdown / Code File to context" aria-label="Attach file" style="cursor:pointer;">📎 <input type="file" style="display:none;" onchange="handlePromptFileUpload(event)"></label><button class="agentic-btn" onclick="sendAgentMessage()" style="padding:0 18px;height:34px;">Send</button>
+            <button class="agentic-icon-btn" id="voice-btn" onclick="toggleVoiceInput()" title="Voice input (Web Speech API)" aria-label="Voice input"><span class="msr" style="font-size:16px;">mic</span></button><button class="agentic-icon-btn" id="tts-btn" onclick="toggleTTS()" title="Read agent replies aloud" aria-label="Toggle speech"><span class="msr" style="font-size:16px;">volume_off</span></button><button class="agentic-icon-btn" onclick="exportSessionMenu(this)" title="Export session (.md / .json / PDF)" aria-label="Export session"><span class="msr" style="font-size:16px;">ios_share</span></button><label class="agentic-icon-btn" title="Attach Markdown / Code File to context" aria-label="Attach file" style="cursor:pointer;"><span class="msr" style="font-size:16px;">attach_file</span> <input type="file" style="display:none;" onchange="handlePromptFileUpload(event)"></label><button class="agentic-btn" onclick="sendAgentMessage()" style="padding:0 18px;height:34px;">Send</button>
           </div>
         </div>
       </div>
@@ -4121,7 +4179,7 @@ function loadAgentWorkspace(agentId, threadId) {
           </div>
           <div style="display:flex;gap:8px;">
             <textarea id="agent-msg-input" placeholder="Talk to ${agentName}... (type / for commands, @ for skills)" style="flex:1;height:42px;background:rgba(15,23,42,0.9);border:1px solid rgba(51,65,85,0.6);border-radius:8px;padding:8px 12px;color:#fff;font-size:12px;resize:none;" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendAgentMessage();}"></textarea>
-            <button class="agentic-icon-btn" id="voice-btn" onclick="toggleVoiceInput()" title="Voice input (Web Speech API)" aria-label="Voice input">🎙️</button><button class="agentic-icon-btn" id="tts-btn" onclick="toggleTTS()" title="Read agent replies aloud" aria-label="Toggle speech">🔇</button><button class="agentic-icon-btn" onclick="exportSessionMenu(this)" title="Export session (.md / .json / PDF)" aria-label="Export session">📤</button><label class="agentic-icon-btn" title="Attach Markdown / Code File to context" aria-label="Attach file" style="cursor:pointer;">📎 <input type="file" style="display:none;" onchange="handlePromptFileUpload(event)"></label><button class="agentic-btn" onclick="sendAgentMessage()" style="padding:0 18px;height:34px;">Send</button>
+            <button class="agentic-icon-btn" id="voice-btn" onclick="toggleVoiceInput()" title="Voice input (Web Speech API)" aria-label="Voice input"><span class="msr" style="font-size:16px;">mic</span></button><button class="agentic-icon-btn" id="tts-btn" onclick="toggleTTS()" title="Read agent replies aloud" aria-label="Toggle speech"><span class="msr" style="font-size:16px;">volume_off</span></button><button class="agentic-icon-btn" onclick="exportSessionMenu(this)" title="Export session (.md / .json / PDF)" aria-label="Export session"><span class="msr" style="font-size:16px;">ios_share</span></button><label class="agentic-icon-btn" title="Attach Markdown / Code File to context" aria-label="Attach file" style="cursor:pointer;"><span class="msr" style="font-size:16px;">attach_file</span> <input type="file" style="display:none;" onchange="handlePromptFileUpload(event)"></label><button class="agentic-btn" onclick="sendAgentMessage()" style="padding:0 18px;height:34px;">Send</button>
           </div>
         </div>
       </div>
@@ -4309,18 +4367,25 @@ function loadOpenClawDetails() {
 }
 
 function dispatchOpenClawTask() {
-  var promptTxt = prompt('Enter autonomous task to dispatch to OpenClaw:');
-  if (!promptTxt || !promptTxt.trim()) return;
-  toast('Dispatching task to OpenClaw...', 'blue');
-  fetch(API + '/api/agentic/openclaw/dispatch', {
-    method: 'POST',
-    headers: Object.assign({'Content-Type': 'application/json'}, apiHeaders()),
-    body: JSON.stringify({task: promptTxt.trim()})
-  }).then(function(r){ return r.json(); }).then(function(res){
-    toast('OpenClaw task completed!', 'green');
-    alert('🦞 OpenClaw Output:\n\n' + (res.output || JSON.stringify(res)));
-  }).catch(function(err){
-    toast('Error dispatching to OpenClaw: ' + err, 'red');
+  agenticPrompt({
+    title: 'Dispatch to OpenClaw',
+    label: 'Enter autonomous task to dispatch to OpenClaw:',
+    okText: 'Dispatch',
+    onOk: function(v) {
+      var promptTxt = (v || '').trim();
+      if (!promptTxt) return;
+      toast('Dispatching task to OpenClaw...', 'blue');
+      fetch(API + '/api/agentic/openclaw/dispatch', {
+        method: 'POST',
+        headers: Object.assign({'Content-Type': 'application/json'}, apiHeaders()),
+        body: JSON.stringify({task: promptTxt})
+      }).then(function(r){ return r.json(); }).then(function(res){
+        toast('OpenClaw task completed!', 'green');
+        agenticAlert('🦞 OpenClaw Output:\n\n' + (res.output || JSON.stringify(res)));
+      }).catch(function(err){
+        toast('Error dispatching to OpenClaw: ' + err, 'red');
+      });
+    }
   });
 }
 
@@ -4541,15 +4606,22 @@ function createNewHermesSession() {
 }
 
 function deleteCurrentHermesSession() {
-  if (!confirm('Are you sure you want to delete the active Hermes session?')) return;
-  fetch(API + '/api/agentic/hermes/sessions/' + currentHermesSessionId, {
-    method: 'DELETE',
-    headers: apiHeaders()
-  }).then(function(r){ return r.json(); }).then(function(data){
-    toast('Hermes session deleted!', 'green');
-    loadHermesSessions();
-  }).catch(function(err){
-    toast('Error deleting session: ' + err, 'red');
+  agenticConfirm({
+    title: 'Delete Hermes session',
+    message: 'Are you sure you want to delete the active Hermes session?',
+    okText: 'Delete',
+    danger: true,
+    onOk: function(){
+      fetch(API + '/api/agentic/hermes/sessions/' + currentHermesSessionId, {
+        method: 'DELETE',
+        headers: apiHeaders()
+      }).then(function(r){ return r.json(); }).then(function(data){
+        toast('Hermes session deleted!', 'green');
+        loadHermesSessions();
+      }).catch(function(err){
+        toast('Error deleting session: ' + err, 'red');
+      });
+    }
   });
 }
 
@@ -5670,9 +5742,9 @@ function saveProfile() {
     body: JSON.stringify(payload)
   }).then(function(d){
     if (d && d.status === 'ok') {
-      toast ? toast('✅ Identity profile saved — every agent now knows who you are.') : alert('Saved.');
-    } else { alert('Save failed: ' + JSON.stringify(d)); }
-  }).catch(function(e){ alert('Save failed: ' + e); });
+      toast ? toast('✅ Identity profile saved — every agent now knows who you are.') : agenticAlert('Saved.');
+    } else { agenticAlert('Save failed: ' + JSON.stringify(d)); }
+  }).catch(function(e){ agenticAlert('Save failed: ' + e); });
 }
 
 // ── 🎯 GOALS PAGE ──
@@ -5759,16 +5831,23 @@ function populateGoalCatSelects() {
   if (esel) { var cur = esel.getAttribute('data-cur') || ''; esel.innerHTML = opts; if (cur) esel.value = cur; }
 }
 function goalAddCat() {
-  var name = prompt('New goal category name — e.g. fitness, finance, family:');
-  if (!name || !name.trim()) return;
-  fetchJSON(API + '/api/agentic/goals/categories', {
-    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name: name.trim()})
-  }).then(function(d){
-    if (d && d.categories) {
-      goalCats = ['all'].concat(d.categories.filter(function(c){ return c !== 'all'; }));
-      renderGoalTabs();
-      populateGoalCatSelects();
-      toast ? toast('Category added: ' + name.trim(), 'green') : alert('Category added: ' + name.trim());
+  agenticPrompt({
+    title: 'New goal category',
+    label: 'New goal category name — e.g. fitness, finance, family:',
+    okText: 'Add',
+    onOk: function(v) {
+      var name = (v || '').trim();
+      if (!name) return;
+      fetchJSON(API + '/api/agentic/goals/categories', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name: name})
+      }).then(function(d){
+        if (d && d.categories) {
+          goalCats = ['all'].concat(d.categories.filter(function(c){ return c !== 'all'; }));
+          renderGoalTabs();
+          populateGoalCatSelects();
+          toast ? toast('Category added: ' + name, 'green') : agenticAlert('Category added: ' + name);
+        }
+      });
     }
   });
 }
@@ -5858,7 +5937,7 @@ function loadGoals() {
 function goalEditModal(id) {
   fetchJSON(API + '/api/agentic/goals').then(function(d){
     var g = ((d && d.goals) || []).filter(function(x){ return x.id === id; })[0];
-    if (!g) { alert('Goal not found'); return; }
+    if (!g) { agenticAlert('Goal not found'); return; }
     var overlay = document.createElement('div');
     overlay.style.cssText = 'position:fixed;inset:0;background:rgba(2,6,23,0.8);z-index:999;display:flex;align-items:center;justify-content:center;';
     overlay.innerHTML = '<div style="background:#0f172a;border:1px solid rgba(51,65,85,0.6);border-radius:12px;padding:18px;width:min(640px,94vw);max-height:92vh;overflow-y:auto;scrollbar-width:thin;">'
@@ -5918,8 +5997,8 @@ function goalEditSave(id) {
       var ov = document.querySelector('div[style*="position:fixed"]');
       if (ov) ov.remove();
       loadGoals();
-      toast ? toast('Goal updated', 'green') : alert('Goal updated');
-    } else { alert('Save failed: ' + JSON.stringify(d)); }
+      toast ? toast('Goal updated', 'green') : agenticAlert('Goal updated');
+    } else { agenticAlert('Save failed: ' + JSON.stringify(d)); }
   });
 }
 
@@ -6207,44 +6286,58 @@ function memEditToggle() {
     fetchJSON(API + '/api/agentic/brain/note', {
       method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({path: memNotePath, content: ed.value})
     }).then(function(d){
-      if (d && d.status === 'ok') { toast ? toast('Note saved', 'green') : alert('Saved'); memOpen(memSel); loadMemoryGraph(); }
-      else alert('Save failed: ' + JSON.stringify(d));
+      if (d && d.status === 'ok') { toast ? toast('Note saved', 'green') : agenticAlert('Saved'); memOpen(memSel); loadMemoryGraph(); }
+      else agenticAlert('Save failed: ' + JSON.stringify(d));
     });
   }
 }
 function memDeleteNote() {
-  if (!confirm('Remove this note from the vault?')) return;
-  fetchJSON(API + '/api/agentic/brain/note?path=' + encodeURIComponent(memNotePath), { method: 'DELETE' }).then(function(d){
-    if (d && d.status === 'ok') {
-      toast ? toast('Note removed', 'green') : alert('Removed');
-      var pane = $('mem-pane'); if (pane) pane.style.display = 'none';
-      memSel = null; loadMemoryGraph();
-    } else alert('Failed: ' + JSON.stringify(d));
+  agenticConfirm({
+    title: 'Remove note',
+    message: 'Remove this note from the vault?',
+    okText: 'Remove',
+    danger: true,
+    onOk: function(){
+      fetchJSON(API + '/api/agentic/brain/note?path=' + encodeURIComponent(memNotePath), { method: 'DELETE' }).then(function(d){
+        if (d && d.status === 'ok') {
+          toast ? toast('Note removed', 'green') : agenticAlert('Removed');
+          var pane = $('mem-pane'); if (pane) pane.style.display = 'none';
+          memSel = null; loadMemoryGraph();
+        } else agenticAlert('Failed: ' + JSON.stringify(d));
+      });
+    }
   });
 }
 function memNewLinkedNote() {
-  var title = prompt('New note title (linked from the current note):');
-  if (!title || !title.trim()) return;
-  var slug = title.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-  var folder = (memNotePath || '').split('/')[0] || 'inbox';
-  var path = folder + '/' + slug + '.md';
-  var content = '# ' + title.trim() + '\n\n';
-  fetchJSON(API + '/api/agentic/brain/note', {
-    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({path: path, title: title.trim(), content: content})
-  }).then(function(d){
-    if (d && d.status === 'ok') {
-      // append the wiki-link to the current note
-      fetchJSON(API + '/api/agentic/brain/note?path=' + encodeURIComponent(memNotePath)).then(function(cur){
-        if (cur && cur.content) {
-          fetchJSON(API + '/api/agentic/brain/note', {
-            method: 'PUT', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({path: memNotePath, content: cur.content + '\n\nSee also: [[' + folder + '/' + slug + '|' + title.trim() + ']]\n'})
+  agenticPrompt({
+    title: 'New linked note',
+    label: 'New note title (linked from the current note):',
+    okText: 'Create',
+    onOk: function(val) {
+      var title = (val || '').trim();
+      if (!title) return;
+      var slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      var folder = (memNotePath || '').split('/')[0] || 'inbox';
+      var path = folder + '/' + slug + '.md';
+      var content = '# ' + title + '\n\n';
+      fetchJSON(API + '/api/agentic/brain/note', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({path: path, title: title, content: content})
+      }).then(function(d){
+        if (d && d.status === 'ok') {
+          // append the wiki-link to the current note
+          fetchJSON(API + '/api/agentic/brain/note?path=' + encodeURIComponent(memNotePath)).then(function(cur){
+            if (cur && cur.content) {
+              fetchJSON(API + '/api/agentic/brain/note', {
+                method: 'PUT', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({path: memNotePath, content: cur.content + '\n\nSee also: [[' + folder + '/' + slug + '|' + title + ']]\n'})
+              });
+            }
           });
-        }
+          toast ? toast('Note created + linked', 'green') : agenticAlert('Created');
+          loadMemoryGraph();
+        } else agenticAlert('Failed: ' + JSON.stringify(d));
       });
-      toast ? toast('Note created + linked', 'green') : alert('Created');
-      loadMemoryGraph();
-    } else alert('Failed: ' + JSON.stringify(d));
+    }
   });
 }
 
@@ -6314,7 +6407,7 @@ function memLoadList() {
 }
 function memAddEntry() {
   var content = $('mem-new-content'), tag = $('mem-new-tag');
-  if (!content || !content.value.trim()) { alert('Content required'); return; }
+  if (!content || !content.value.trim()) { agenticAlert('Content required'); return; }
   fetchJSON(API + '/api/agentic/memory', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({content: content.value.trim(), tag: tag ? tag.value.trim() || 'General' : 'General', agent: 'User', tier: 'working', source: 'memory-page'})
@@ -6323,8 +6416,8 @@ function memAddEntry() {
       if (content) content.value = '';
       if (tag) tag.value = '';
       memLoadList();
-      toast ? toast('Memory entry added — the agent will remember this', 'green') : alert('Added');
-    } else alert('Failed: ' + JSON.stringify(d));
+      toast ? toast('Memory entry added — the agent will remember this', 'green') : agenticAlert('Added');
+    } else agenticAlert('Failed: ' + JSON.stringify(d));
   });
 }
 function memEditEntry(id) {
@@ -6365,15 +6458,22 @@ function memEditSave(id) {
       var ov = document.querySelector('div[style*="position:fixed"]');
       if (ov) ov.remove();
       memLoadList();
-      toast ? toast('Memory updated', 'green') : alert('Updated');
-    } else alert('Save failed: ' + JSON.stringify(d));
+      toast ? toast('Memory updated', 'green') : agenticAlert('Updated');
+    } else agenticAlert('Save failed: ' + JSON.stringify(d));
   });
 }
 function memDelEntry(id) {
-  if (!confirm('Remove this memory entry? The agent will stop remembering it.')) return;
-  fetchJSON(API + '/api/agentic/memory/' + id, { method: 'DELETE' }).then(function(d){
-    if (d && d.deleted) { memLoadList(); toast ? toast('Memory removed', 'green') : alert('Removed'); }
-    else alert('Failed: ' + JSON.stringify(d));
+  agenticConfirm({
+    title: 'Remove memory entry',
+    message: 'Remove this memory entry? The agent will stop remembering it.',
+    okText: 'Remove',
+    danger: true,
+    onOk: function(){
+      fetchJSON(API + '/api/agentic/memory/' + id, { method: 'DELETE' }).then(function(d){
+        if (d && d.deleted) { memLoadList(); toast ? toast('Memory removed', 'green') : agenticAlert('Removed'); }
+        else agenticAlert('Failed: ' + JSON.stringify(d));
+      });
+    }
   });
 }
 
@@ -6572,7 +6672,7 @@ function memLoop() {
 
 function addGoal() {
   var title = $('goal-title').value.trim();
-  if (!title) { alert('Title required'); return; }
+  if (!title) { agenticAlert('Title required'); return; }
   var payload = {
     title: title, description: $('goal-desc').value.trim(),
     priority: parseInt($('goal-priority').value, 10) || 3,
@@ -6723,7 +6823,7 @@ function openVaultNote(rel) {
   fetchJSON(API + '/api/agentic/vault/file?path=' + encodeURIComponent(rel)).then(function(d){
     if (d && d.content) {
       openArtifactModal(rel.split('/').pop(), mdRender(escapeHtml(d.content)), '📄 ' + escapeHtml(rel));
-    } else { alert('Could not read note'); }
+    } else { agenticAlert('Could not read note'); }
   });
 }
 function openPostModal(id) {
@@ -6756,7 +6856,7 @@ function decorateAgenticPage() {
 // ── SEO ──
 function seoResearch() {
   var seed = $('seo-seed').value.trim();
-  if (!seed) { alert('Enter a seed topic first'); return; }
+  if (!seed) { agenticAlert('Enter a seed topic first'); return; }
   var res = $('seo-clusters');
   res.innerHTML = '<span style="color:#f59e0b;">🔬 Researching keyword cluster for "' + escapeHtml(seed) + '"… (LLM, ~30s)</span>';
   fetchJSON(API + '/api/agentic/seo/research', {
@@ -6796,7 +6896,7 @@ function loadSeoClusters() {
 }
 function seoGenerate() {
   var cluster = $('seo-cluster-select').value;
-  if (!cluster) { alert('Pick a keyword cluster first'); return; }
+  if (!cluster) { agenticAlert('Pick a keyword cluster first'); return; }
   var res = $('seo-result');
   res.style.display = 'block';
   res.innerHTML = '<span style="color:#f59e0b;">✍️ Writing SEO article for "' + escapeHtml(cluster) + '"… (LLM, up to 90s)</span>';
@@ -6814,7 +6914,7 @@ function seoGenerate() {
 // ── MEDIA ──
 function mediaGenerate() {
   var prompt = $('media-prompt').value.trim();
-  if (!prompt) { alert('Describe the image first'); return; }
+  if (!prompt) { agenticAlert('Describe the image first'); return; }
   var btn = document.querySelector('#media-studio-card .agentic-btn');
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Generating…'; }
   fetchJSON(API + '/api/agentic/media', {
@@ -6826,8 +6926,8 @@ function mediaGenerate() {
       pv.style.display = 'block';
       $('media-preview-img').src = API + '/api/agentic/media/file/' + d.file;
       loadMediaGallery();
-    } else { alert('Generation failed: ' + JSON.stringify(d)); }
-  }).catch(function(e){ if (btn) { btn.disabled = false; btn.textContent = '✨ Generate'; } alert('Generation failed: ' + e); });
+    } else { agenticAlert('Generation failed: ' + JSON.stringify(d)); }
+  }).catch(function(e){ if (btn) { btn.disabled = false; btn.textContent = '✨ Generate'; } agenticAlert('Generation failed: ' + e); });
 }
 function loadMediaGallery() {
   fetchJSON(API + '/api/agentic/media').then(function(d){
@@ -6897,7 +6997,7 @@ function loadSkillsPanel() {
 function addSkill() {
   var name = $('skill-name').value.trim();
   var desc = $('skill-desc').value.trim();
-  if (!name) { alert('Skill name required'); return; }
+  if (!name) { agenticAlert('Skill name required'); return; }
   fetchJSON(API + '/api/agentic/skills', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({name: name, description: desc, content: desc, source: 'manual'})
@@ -6920,15 +7020,22 @@ function captureNow() {
     method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({})
   }).then(function(d){
     var msg = (d && d.file) ? '✅ Daily log written: ' + d.file + (d.stats ? ' — ' + d.stats.chats + ' chats · ' + d.stats.memory + ' memory · ' + d.stats.posts + ' posts · ' + d.stats.media + ' media' : '') : 'Capture done';
-    alert(msg);
+    agenticAlert(msg);
   });
 }
 function logLifeNote() {
-  var note = prompt('What did you just do? (logged to 02_Agent_Logs and shared memory)');
-  if (note === null || !note.trim()) return;
-  fetchJSON(API + '/api/agentic/capture', {
-    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({note: note.trim()})
-  }).then(function(d){ alert(d && d.logged ? '✅ Logged: ' + d.logged : 'Logged.'); });
+  agenticPrompt({
+    title: 'Log what you just did',
+    label: 'What did you just do? (logged to 02_Agent_Logs and shared memory)',
+    okText: 'Log',
+    onOk: function(v) {
+      var note = (v || '').trim();
+      if (!note) return;
+      fetchJSON(API + '/api/agentic/capture', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({note: note})
+      }).then(function(d){ agenticAlert(d && d.logged ? '✅ Logged: ' + d.logged : 'Logged.'); });
+    }
+  });
 }
 // ===/SPLICE:agentic_compounding_ui.js===
 
@@ -6946,17 +7053,28 @@ function sendFeedback(rating, btn) {
   var text = bubble ? bubble.innerText.slice(0, 400) : '';
   var agentEl = bubble && bubble.querySelector('strong');
   var agent = agentEl ? agentEl.textContent.trim() : 'hermes';
-  var comment = '';
-  if (rating < 0) comment = prompt('What went wrong? (this feeds the nightly self-improvement job):') || '';
-  fetchJSON(API + '/api/agentic/feedback', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({agent: agent, rating: rating, comment: comment, reply_preview: text})
-  }).then(function(d){
-    btn.textContent = rating > 0 ? '👍✓' : '👎✓';
-    btn.disabled = true;
-    var other = btn.parentElement.querySelectorAll('button');
-    other.forEach(function(b){ if (b !== btn) b.disabled = true; });
-  });
+  var submit = function(comment){
+    fetchJSON(API + '/api/agentic/feedback', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({agent: agent, rating: rating, comment: comment || '', reply_preview: text})
+    }).then(function(d){
+      btn.textContent = rating > 0 ? '👍✓' : '👎✓';
+      btn.disabled = true;
+      var other = btn.parentElement.querySelectorAll('button');
+      other.forEach(function(b){ if (b !== btn) b.disabled = true; });
+    });
+  };
+  if (rating < 0) {
+    agenticPrompt({
+      title: 'What went wrong?',
+      label: 'What went wrong? (this feeds the nightly self-improvement job)',
+      okText: 'Send feedback',
+      onOk: function(v){ submit(v || ''); },
+      onCancel: function(){ submit(''); }
+    });
+  } else {
+    submit('');
+  }
 }
 
 // ── 🛡️ GOV PAGE — governance: channels · evals · approvals · audit · events · self-improvement ──
@@ -7166,7 +7284,7 @@ function loadEvals() {
 function addEval() {
   var name = $('eval-name').value.trim();
   var prompt = $('eval-prompt').value.trim();
-  if (!name || !prompt) { alert('Name + prompt required'); return; }
+  if (!name || !prompt) { agenticAlert('Name + prompt required'); return; }
   fetchJSON(API + '/api/agentic/evals', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({name: name, agent: $('eval-agent').value, prompt: prompt, expected_contains: $('eval-expected').value.trim()})
@@ -7176,7 +7294,7 @@ function runEval(id, btn) {
   if (btn) { btn.textContent = '…'; btn.disabled = true; }
   fetchJSON(API + '/api/agentic/evals/' + id + '/run', {method: 'POST'}).then(function(d){
     if (btn) { btn.textContent = '▶'; btn.disabled = false; }
-    alert((d && d.passed ? '✅ PASS' : '❌ FAIL') + ' — ' + (d && d.name) + '\n\n' + (d && d.output || '') + '\n\n(' + (d && d.latency_ms) + ' ms)');
+    agenticAlert((d && d.passed ? '✅ PASS' : '❌ FAIL') + ' — ' + (d && d.name) + '\n\n' + (d && d.output || '') + '\n\n(' + (d && d.latency_ms) + ' ms)');
     loadEvals();
   });
 }
@@ -7185,7 +7303,7 @@ function deleteEval(id) {
 }
 function runAllEvals() {
   fetchJSON(API + '/api/agentic/evals/run-all', {method: 'POST'}).then(function(d){
-    alert('Evals: ' + d.passed + '/' + d.total + ' passed');
+    agenticAlert('Evals: ' + d.passed + '/' + d.total + ' passed');
     loadEvals();
   });
 }
@@ -7209,9 +7327,9 @@ function newApproval() {
   if (_newApprovalBusy) return; // double-click guard
   var action = $('appr-action').value;
   var target = $('appr-target').value.trim();
-  if (!target) { alert('Target required'); return; }
+  if (!target) { agenticAlert('Target required'); return; }
   var payload = {};
-  try { payload = $('appr-payload').value.trim() ? JSON.parse($('appr-payload').value) : {}; } catch(e) { alert('Payload is not valid JSON'); return; }
+  try { payload = $('appr-payload').value.trim() ? JSON.parse($('appr-payload').value) : {}; } catch(e) { agenticAlert('Payload is not valid JSON'); return; }
   _newApprovalBusy = true;
   fetchJSON(API + '/api/agentic/approvals', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -7223,7 +7341,7 @@ function decideApproval(id, approved) {
   fetchJSON(API + '/api/agentic/approvals/' + id + '/decide', {
     method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({approved: approved})
   }).then(function(d){
-    alert('#' + id + ' ' + (approved ? 'APPROVED — ' : 'DENIED — ') + (d && d.detail || ''));
+    agenticAlert('#' + id + ' ' + (approved ? 'APPROVED — ' : 'DENIED — ') + (d && d.detail || ''));
     loadApprovals(); loadAudit();
   });
 }
@@ -7246,7 +7364,7 @@ function loadProposals() {
 }
 function runSelfImprove() {
   fetchJSON(API + '/api/agentic/self-improve', {method: 'POST'}).then(function(d){
-    alert('Self-improvement: ' + (d && d.proposals !== undefined ? d.proposals + ' proposals generated' : JSON.stringify(d)));
+    agenticAlert('Self-improvement: ' + (d && d.proposals !== undefined ? d.proposals + ' proposals generated' : JSON.stringify(d)));
     loadProposals();
   });
 }
@@ -7259,14 +7377,14 @@ function setProposalStatus(id, status) {
 // ── Events + Audit ──
 function fireEvent() {
   var name = $('evt-name').value.trim();
-  if (!name) { alert('Event name required'); return; }
+  if (!name) { agenticAlert('Event name required'); return; }
   var payload = {};
-  try { payload = $('evt-payload').value.trim() ? JSON.parse($('evt-payload').value) : {}; } catch(e) { alert('Payload is not valid JSON'); return; }
+  try { payload = $('evt-payload').value.trim() ? JSON.parse($('evt-payload').value) : {}; } catch(e) { agenticAlert('Payload is not valid JSON'); return; }
   fetchJSON(API + '/api/agentic/events', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({event: name, source: $('evt-source').value.trim() || 'manual', payload: payload})
   }).then(function(d){
-    alert(d && d.triggered_pipeline ? '⚡ Event fired + triggered pipeline ' + d.triggered_pipeline : '⚡ Event ingested into the agent brain.');
+    agenticAlert(d && d.triggered_pipeline ? '⚡ Event fired + triggered pipeline ' + d.triggered_pipeline : '⚡ Event ingested into the agent brain.');
     loadEvents(); loadAudit();
   });
 }
@@ -7393,13 +7511,13 @@ function vSend() {
 }
 function conRun() {
   var q = $('con-q').value.trim();
-  if (!q) { alert('Ask a question first'); return; }
+  if (!q) { agenticAlert('Ask a question first'); return; }
   var providers = [];
   if ($('con-deepseek').checked) providers.push('deepseek');
   if ($('con-grok').checked) providers.push('grok');
   if ($('con-anthropic').checked) providers.push('anthropic');
   if ($('con-ollama').checked) providers.push('ollama');
-  if (!providers.length) { alert('Pick at least one provider'); return; }
+  if (!providers.length) { agenticAlert('Pick at least one provider'); return; }
   var out = $('con-out');
   out.innerHTML = '<span style="color:#f59e0b;">⚖️ Asking ' + providers.join(', ') + '… (this takes a minute)</span>';
   fetchJSON(API + '/api/agentic/consortium', {
@@ -7440,7 +7558,7 @@ function saveSouls() {
     method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({content: content})
   }).then(function(d){
     if (d && d.profile) __soulsCurrent = d.profile;
-    toast ? toast('🧬 Soul saved for profile ' + (d && d.profile ? d.profile : '') + ' — applies from the next call.', 'green') : alert('Soul saved.');
+    toast ? toast('🧬 Soul saved for profile ' + (d && d.profile ? d.profile : '') + ' — applies from the next call.', 'green') : agenticAlert('Soul saved.');
   });
 }
 // ===/SPLICE:agentic_v_ui.js===// ===SPLICE:agentic_skills_ui.js===
@@ -7486,7 +7604,7 @@ function closeSkillImportBox() {
 
 function importSkillFromUrl() {
   var u = $('skill-import-url').value.trim();
-  if (!u) { alert('Paste a GitHub URL first — e.g. https://github.com/199-biotechnologies/humanise-text-skill'); return; }
+  if (!u) { agenticAlert('Paste a GitHub URL first — e.g. https://github.com/199-biotechnologies/humanise-text-skill'); return; }
   $('skill-import-result').innerHTML = '<span style="color:#f59e0b;">⏳ Fetching ' + escapeHtml(u) + '…</span>';
   fetchJSON(API + '/api/agentic/skills/import', {
     method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({url: u})
@@ -7496,7 +7614,7 @@ function importSkillFromUrl() {
 function importSkillFromMarket() {
   var sel = $('skill-market');
   var url = sel && sel.value;
-  if (!url) { alert('Pick a skill from the market'); return; }
+  if (!url) { agenticAlert('Pick a skill from the market'); return; }
   $('skill-import-result').innerHTML = '<span style="color:#f59e0b;">⏳ Importing…</span>';
   fetchJSON(API + '/api/agentic/skills/import', {
     method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({url: url})
@@ -7507,15 +7625,22 @@ function importSkillFromMarket() {
 }
 
 function applySkillPanel(id) {
-  var text = prompt('Text to apply the skill to:');
-  if (text === null || !text.trim()) return;
-  fetchJSON(API + '/api/agentic/skills/' + id + '/apply', {
-    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({text: text.trim()})
-  }).then(function(d){
-    if (d && d.status === 'ok') {
-      openArtifactModal('✍️ ' + d.skill + ' — result', mdRender(escapeHtml(d.result || '')), 'applied to ' + text.trim().length + ' chars');
-    } else {
-      alert('Apply failed: ' + JSON.stringify(d));
+  agenticPrompt({
+    title: 'Apply skill',
+    label: 'Text to apply the skill to:',
+    okText: 'Apply',
+    onOk: function(v) {
+      var text = (v || '').trim();
+      if (!text) return;
+      fetchJSON(API + '/api/agentic/skills/' + id + '/apply', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({text: text})
+      }).then(function(d){
+        if (d && d.status === 'ok') {
+          openArtifactModal('✍️ ' + d.skill + ' — result', mdRender(escapeHtml(d.result || '')), 'applied to ' + text.length + ' chars');
+        } else {
+          agenticAlert('Apply failed: ' + JSON.stringify(d));
+        }
+      });
     }
   });
 }
@@ -7732,7 +7857,7 @@ function testWpTool() {
 
 function wpPublish() {
   var content = $('wp-content').value.trim();
-  if (!content) { alert('Write some content first'); return; }
+  if (!content) { agenticAlert('Write some content first'); return; }
   var title = $('wp-title').value.trim() || ('Post from AppVault ' + new Date().toLocaleString());
   var status = $('wp-status').value;
   var btn = $('wp-publish-btn');
@@ -7885,7 +8010,7 @@ function loadCronJobs() {
 function addCronJob() {
   var name = $('cron-name').value.trim();
   var sched = $('cron-sched').value.trim();
-  if (!name || !sched) { alert('Name + schedule required'); return; }
+  if (!name || !sched) { agenticAlert('Name + schedule required'); return; }
   var payload = {name: name, schedule: sched};
   if ($('cron-action').value) {
     payload.action = $('cron-action').value;
@@ -7896,7 +8021,7 @@ function addCronJob() {
     method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
   }).then(function(d){
     if (d && d.status === 'ok') { $('cron-name').value=''; $('cron-task').value=''; loadCronJobs(); }
-    else alert('Create failed: ' + JSON.stringify(d));
+    else agenticAlert('Create failed: ' + JSON.stringify(d));
   });
 }
 
@@ -7907,7 +8032,7 @@ function toggleCronJob(id, enabled) {
 }
 function runCronJob(id) {
   fetchJSON(API + '/api/agentic/cron/' + id + '/run', {method: 'POST'}).then(function(d){
-    alert('Cron run → ' + (d && d.status) + ': ' + ((d && d.output) || '') + '\n\nResult saved to memory + vault.');
+    agenticAlert('Cron run → ' + (d && d.status) + ': ' + ((d && d.output) || '') + '\n\nResult saved to memory + vault.');
     loadCronJobs();
   });
 }
@@ -7934,26 +8059,40 @@ function switchProfile() {
   var sel = $('profile-select');
   if (!sel || !sel.value) return;
   fetchJSON(API + '/api/agentic/profiles/' + sel.value + '/switch', {method: 'POST'}).then(function(d){
-    alert('🔄 Switched to profile: ' + (d && d.active));
+    agenticAlert('🔄 Switched to profile: ' + (d && d.active));
     showIdentityPage();
   });
 }
 function createProfile() {
-  var name = prompt('New profile name (a separate identity for your agents):');
-  if (!name || !name.trim()) return;
-  fetchJSON(API + '/api/agentic/profiles', {
-    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name: name.trim()})
-  }).then(function(d){
-    if (d && d.status === 'ok') showIdentityPage();
-    else alert('Create failed: ' + JSON.stringify(d));
+  agenticPrompt({
+    title: 'New profile',
+    label: 'New profile name (a separate identity for your agents):',
+    okText: 'Create',
+    onOk: function(v) {
+      var name = (v || '').trim();
+      if (!name) return;
+      fetchJSON(API + '/api/agentic/profiles', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name: name})
+      }).then(function(d){
+        if (d && d.status === 'ok') showIdentityPage();
+        else agenticAlert('Create failed: ' + JSON.stringify(d));
+      });
+    }
   });
 }
 function deleteProfile() {
   var sel = $('profile-select');
   if (!sel || !sel.value) return;
-  if (!confirm('Delete this profile? (agents will switch to the remaining profile)')) return;
-  fetchJSON(API + '/api/agentic/profiles/' + sel.value, {method: 'DELETE'}).then(function(d){
-    showIdentityPage();
+  agenticConfirm({
+    title: 'Delete profile',
+    message: 'Delete this profile? (agents will switch to the remaining profile)',
+    okText: 'Delete',
+    danger: true,
+    onOk: function(){
+      fetchJSON(API + '/api/agentic/profiles/' + sel.value, {method: 'DELETE'}).then(function(d){
+        showIdentityPage();
+      });
+    }
   });
 }
 
@@ -8156,6 +8295,72 @@ function agenticPrompt(opts) {
   document.addEventListener('keydown', escHandler, true);
 }
 
+// Styled in-app confirm (dark themed) — replaces native confirm().
+function agenticConfirm(opts) {
+  if (_agenticPromptActive) return;
+  _agenticPromptActive = true;
+  opts = opts || {};
+  var ov = document.createElement('div');
+  ov.className = 'agentic-prompt-overlay';
+  ov.innerHTML =
+    '<div class="agentic-prompt-card" role="alertdialog" aria-modal="true">' +
+      '<div class="agentic-prompt-head"><span>' + escapeHtml(opts.title || 'Confirm') + '</span>' +
+        '<button class="agentic-icon-btn" id="agentic-confirm-close" style="width:26px;height:26px;font-size:12px;" aria-label="Close">✕</button></div>' +
+      '<div class="agentic-prompt-label" style="line-height:1.6;">' + escapeHtml(opts.message || 'Are you sure?') + '</div>' +
+      '<div class="agentic-prompt-actions">' +
+        '<button class="agentic-btn-secondary" id="agentic-confirm-cancel">' + escapeHtml(opts.cancelText || 'Cancel') + '</button>' +
+        '<button class="agentic-btn" id="agentic-confirm-ok"' + (opts.danger ? ' style="background:linear-gradient(135deg,#dc2626,#b91c1c);box-shadow:0 1px 2px rgba(0,0,0,0.35),0 0 0 1px rgba(239,68,68,0.25) inset;"' : '') + '>' + escapeHtml(opts.okText || 'Confirm') + '</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(ov);
+
+  function finish(result) {
+    if (!_agenticPromptActive) return;
+    _agenticPromptActive = false;
+    ov.remove();
+    document.removeEventListener('keydown', escHandler, true);
+    if (result && opts.onOk) opts.onOk();
+  }
+  function escHandler(e) { if (e.key === 'Escape') { e.preventDefault(); finish(false); } }
+  ov.addEventListener('mousedown', function(e){ if (e.target === ov) finish(false); });
+  $('agentic-confirm-close').addEventListener('click', function(){ finish(false); });
+  $('agentic-confirm-cancel').addEventListener('click', function(){ finish(false); });
+  $('agentic-confirm-ok').addEventListener('click', function(){ finish(true); });
+  document.addEventListener('keydown', escHandler, true);
+}
+
+// Styled in-app alert (dark themed) — replaces native agenticAlert().
+var _agenticAlertQueue = [];
+function agenticAlert(message, title) {
+  if (_agenticPromptActive) { _agenticAlertQueue.push([message, title]); return; }
+  _agenticPromptActive = true;
+  title = title || 'Notice';
+  var ov = document.createElement('div');
+  ov.className = 'agentic-prompt-overlay';
+  ov.innerHTML =
+    '<div class="agentic-prompt-card" role="alertdialog" aria-modal="true">' +
+      '<div class="agentic-prompt-head"><span>' + escapeHtml(title) + '</span>' +
+        '<button class="agentic-icon-btn" id="agentic-alert-close" style="width:26px;height:26px;font-size:12px;" aria-label="Close">✕</button></div>' +
+      '<div class="agentic-prompt-label" style="line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere;">' + escapeHtml(String(message == null ? '' : message)) + '</div>' +
+      '<div class="agentic-prompt-actions"><button class="agentic-btn" id="agentic-alert-ok">OK</button></div>' +
+    '</div>';
+  document.body.appendChild(ov);
+
+  function close() {
+    if (!_agenticPromptActive) return;
+    _agenticPromptActive = false;
+    ov.remove();
+    document.removeEventListener('keydown', escHandler, true);
+    var nxt = _agenticAlertQueue.shift();
+    if (nxt) agenticAlert(nxt[0], nxt[1]);
+  }
+  function escHandler(e) { if (e.key === 'Escape') { e.preventDefault(); close(); } }
+  ov.addEventListener('mousedown', function(e){ if (e.target === ov) close(); });
+  $('agentic-alert-close').addEventListener('click', close);
+  $('agentic-alert-ok').addEventListener('click', close);
+  document.addEventListener('keydown', escHandler, true);
+}
+
 function createNewAgentSession(agentId) {
   var targetAgent = (agentId || currentAgentWorkspace || 'hermes').toLowerCase();
   var defaultTitle = 'Topic ' + (new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}));
@@ -8176,7 +8381,7 @@ function createNewAgentSession(agentId) {
           if (typeof toast === 'function') toast('Created new topic: ' + title, 'green');
           openAgentSession(targetAgent, d.session_id);
         } else {
-          alert('Failed to create new topic: ' + JSON.stringify(d));
+          agenticAlert('Failed to create new topic: ' + JSON.stringify(d));
         }
       }).catch(function(err){
         if (typeof toast === 'function') toast('Error creating topic: ' + err, 'red');
@@ -8213,7 +8418,7 @@ function renameCurrentAgentSession(agentId, sessionId) {
           loadAgentSessions(targetAgent, activeSid);
           if (typeof loadAgentRoster === 'function') loadAgentRoster();
         } else {
-          alert('Failed to rename topic: ' + JSON.stringify(d));
+          agenticAlert('Failed to rename topic: ' + JSON.stringify(d));
         }
       }).catch(function(err){
         if (typeof toast === 'function') toast('Error renaming topic: ' + err, 'red');
@@ -8226,21 +8431,27 @@ function deleteCurrentAgentSession(agentId, sessionId) {
   var targetAgent = (agentId || currentAgentWorkspace || 'hermes').toLowerCase();
   var activeSid = sessionId || (targetAgent === 'hermes' ? currentHermesSessionId : currentThreadId) || (targetAgent === 'hermes' ? 'session-default' : 'main');
 
-  if (!confirm('Are you sure you want to delete this chat / topic?')) return;
-
-  fetchJSON(API + '/api/agentic/roster/sessions/' + encodeURIComponent(targetAgent) + '/' + encodeURIComponent(activeSid), {
-    method: 'DELETE',
-    headers: typeof apiHeaders === 'function' ? apiHeaders() : {}
-  }).then(function(d){
-    if (d && d.status === 'ok') {
-      if (typeof toast === 'function') toast('Chat topic deleted', 'green');
-      var fallbackSid = (targetAgent === 'hermes') ? 'session-default' : 'main';
-      openAgentSession(targetAgent, fallbackSid);
-    } else {
-      alert('Failed to delete topic: ' + JSON.stringify(d));
+  agenticConfirm({
+    title: 'Delete chat topic',
+    message: 'Are you sure you want to delete this chat / topic?',
+    okText: 'Delete',
+    danger: true,
+    onOk: function(){
+      fetchJSON(API + '/api/agentic/roster/sessions/' + encodeURIComponent(targetAgent) + '/' + encodeURIComponent(activeSid), {
+        method: 'DELETE',
+        headers: typeof apiHeaders === 'function' ? apiHeaders() : {}
+      }).then(function(d){
+        if (d && d.status === 'ok') {
+          if (typeof toast === 'function') toast('Chat topic deleted', 'green');
+          var fallbackSid = (targetAgent === 'hermes') ? 'session-default' : 'main';
+          openAgentSession(targetAgent, fallbackSid);
+        } else {
+          agenticAlert('Failed to delete topic: ' + JSON.stringify(d));
+        }
+      }).catch(function(err){
+        if (typeof toast === 'function') toast('Error deleting topic: ' + err, 'red');
+      });
     }
-  }).catch(function(err){
-    if (typeof toast === 'function') toast('Error deleting topic: ' + err, 'red');
   });
 }
 
@@ -8353,14 +8564,21 @@ function startDesktopHelper() {
 
 function desktopLaunch(id) {
   desktopFetch('/launch', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({id: id})}).then(function(d){
-    if (!d || !d.ok) alert('Launch failed: ' + JSON.stringify(d));
+    if (!d || !d.ok) agenticAlert('Launch failed: ' + JSON.stringify(d));
   });
 }
 
 function desktopRemove(id) {
-  if (!confirm('Remove this app from the launcher?')) return;
-  desktopFetch('/remove', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({id: id})}).then(function(){
-    renderStore();
+  agenticConfirm({
+    title: 'Remove from launcher',
+    message: 'Remove this app from the launcher?',
+    okText: 'Remove',
+    danger: true,
+    onOk: function(){
+      desktopFetch('/remove', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({id: id})}).then(function(){
+        renderStore();
+      });
+    }
   });
 }
 
@@ -8560,12 +8778,19 @@ function addOracleFeed() {
 }
 
 function deleteOracleFeed(id) {
-  if (!confirm('Delete this feed?')) return;
-  fetch(API + '/api/agentic/oracle/feeds/' + id, {
-    method: 'DELETE',
-    headers: Object.assign({}, apiHeaders())
-  }).then(function(){ toast('Feed deleted', 'green'); loadOracleFeeds(); })
-    .catch(function(e){ toast('Failed: ' + esc(String(e)), 'red'); });
+  agenticConfirm({
+    title: 'Delete feed',
+    message: 'Delete this feed?',
+    okText: 'Delete',
+    danger: true,
+    onOk: function(){
+      fetch(API + '/api/agentic/oracle/feeds/' + id, {
+        method: 'DELETE',
+        headers: Object.assign({}, apiHeaders())
+      }).then(function(){ toast('Feed deleted', 'green'); loadOracleFeeds(); })
+        .catch(function(e){ toast('Failed: ' + esc(String(e)), 'red'); });
+    }
+  });
 }
 
 function sweepOracleFeed(id) {
@@ -8941,16 +9166,24 @@ document.addEventListener('click', function(ev){
 });
 
 function wfSavePipeline() {
-  var name = prompt('Pipeline name:', wfPipeId ? (wfPipeId + ' (updated)') : ('Pipeline ' + new Date().toLocaleTimeString()));
-  if (!name) return;
-  var pid = wfPipeId || ('pipe-' + Date.now());
-  fetch(API + '/api/agentic/pipelines', {
-    method: 'POST',
-    headers: Object.assign({ 'Content-Type': 'application/json' }, apiHeaders()),
-    body: JSON.stringify({ id: pid, name: name, nodes: wfNodes, edges: wfEdges })
-  }).then(function(r){ return r.json(); }).then(function(d){
-    if (d && d.status === 'ok') { wfPipeId = pid; toast('Pipeline saved: ' + name, 'green'); wfRefreshPipelineSelect(); }
-    else toast('Save failed', 'red');
+  agenticPrompt({
+    title: 'Save pipeline',
+    label: 'Pipeline name:',
+    value: wfPipeId ? (wfPipeId + ' (updated)') : ('Pipeline ' + new Date().toLocaleTimeString()),
+    okText: 'Save',
+    onOk: function(v) {
+      var name = (v || '').trim();
+      if (!name) return;
+      var pid = wfPipeId || ('pipe-' + Date.now());
+      fetch(API + '/api/agentic/pipelines', {
+        method: 'POST',
+        headers: Object.assign({ 'Content-Type': 'application/json' }, apiHeaders()),
+        body: JSON.stringify({ id: pid, name: name, nodes: wfNodes, edges: wfEdges })
+      }).then(function(r){ return r.json(); }).then(function(d){
+        if (d && d.status === 'ok') { wfPipeId = pid; toast('Pipeline saved: ' + name, 'green'); wfRefreshPipelineSelect(); }
+        else toast('Save failed', 'red');
+      });
+    }
   });
 }
 
@@ -9189,12 +9422,18 @@ function showHealthPage() {
 }
 
 function healthManualRestart(sid) {
-  if (!confirm('Restart this service container now?')) return;
-  fetch(API + '/api/agentic/health/restart/' + sid, { method: 'POST', headers: apiHeaders() })
-    .then(function(r){ return r.json(); }).then(function(d){
-      toast((d && d.status === 'ok' ? 'Restart signal sent: ' : 'Restart failed: ') + ((d && d.container) || sid), d && d.status === 'ok' ? 'green' : 'red');
-      setTimeout(showHealthPage, 3000);
-    });
+  agenticConfirm({
+    title: 'Restart container',
+    message: 'Restart this service container now?',
+    okText: 'Restart',
+    onOk: function(){
+      fetch(API + '/api/agentic/health/restart/' + sid, { method: 'POST', headers: apiHeaders() })
+        .then(function(r){ return r.json(); }).then(function(d){
+          toast((d && d.status === 'ok' ? 'Restart signal sent: ' : 'Restart failed: ') + ((d && d.container) || sid), d && d.status === 'ok' ? 'green' : 'red');
+          setTimeout(showHealthPage, 3000);
+        });
+    }
+  });
 }
 
 /* ── 4. VAULT RAG SEARCH + KNOWLEDGE GRAPH (in Vault Inspector) ── */
@@ -9297,10 +9536,11 @@ var voiceListening = false, voiceRecognition = null;
 function toggleVoiceInput() {
   var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) { toast('Voice input not supported in this browser — use Chrome/Edge', 'red'); return; }
+  function setVoiceBtn(icon) { var btn = $('voice-btn'); if (btn) { btn.innerHTML = '<span class="msr" style="font-size:16px;">' + icon + '</span>'; btn.style.background = ''; } }
   if (voiceListening) {
     if (voiceRecognition) voiceRecognition.stop();
     voiceListening = false;
-    var btn = $('voice-btn'); if (btn) { btn.textContent = '🎙️'; btn.style.background = ''; }
+    setVoiceBtn('mic');
     return;
   }
   voiceRecognition = new SR();
@@ -9310,13 +9550,14 @@ function toggleVoiceInput() {
     var txt = ev.results[0][0].transcript || '';
     var inp = $('agent-msg-input');
     if (inp) { inp.value = (inp.value ? inp.value + ' ' : '') + txt; inp.focus(); }
-    var btn = $('voice-btn'); if (btn) { btn.textContent = '🎙️'; btn.style.background = ''; }
+    voiceListening = false;
+    setVoiceBtn('mic');
   };
-  voiceRecognition.onerror = function(){ voiceListening = false; var btn = $('voice-btn'); if (btn) { btn.textContent = '🎙️'; btn.style.background = ''; } };
-  voiceRecognition.onend = function(){ voiceListening = false; var btn = $('voice-btn'); if (btn) { btn.textContent = '🎙️'; btn.style.background = ''; } };
+  voiceRecognition.onerror = function(){ voiceListening = false; setVoiceBtn('mic'); };
+  voiceRecognition.onend = function(){ voiceListening = false; setVoiceBtn('mic'); };
   voiceRecognition.start();
   voiceListening = true;
-  var btn = $('voice-btn'); if (btn) { btn.textContent = '🔴 Listening…'; btn.style.background = 'rgba(239,68,68,0.25)'; }
+  var btn = $('voice-btn'); if (btn) { btn.innerHTML = '<span class="msr" style="font-size:16px;">mic_off</span>'; btn.style.background = 'rgba(239,68,68,0.25)'; }
 }
 
 var ttsEnabled = false;
@@ -9324,7 +9565,7 @@ function toggleTTS() {
   ttsEnabled = !ttsEnabled;
   var btn = $('tts-btn');
   if (btn) {
-    btn.textContent = ttsEnabled ? '🔊' : '🔇';
+    btn.innerHTML = '<span class="msr" style="font-size:16px;">' + (ttsEnabled ? 'volume_up' : 'volume_off') + '</span>';
     btn.style.background = ttsEnabled ? 'rgba(34,197,94,0.18)' : '';
     btn.style.borderColor = ttsEnabled ? 'rgba(34,197,94,0.45)' : '';
     btn.title = ttsEnabled ? 'Speech ON — click to mute' : 'Speech OFF — click to enable';
@@ -9570,7 +9811,10 @@ function showHome() {
     + '<input class="search-box" id="home-srch" placeholder="Search your apps by name..." onkeyup="filterHome()" style="flex:1;">'
     + '<select id="home-sort" onchange="changeHomeSort(this.value)" title="Sort apps" style="background:rgba(30,41,59,0.9);border:1px solid rgba(51,65,85,0.6);border-radius:8px;padding:8px 10px;color:#fff;font-size:11.5px;">'
     + '<option value="name-asc">A → Z</option><option value="name-desc">Z → A</option><option value="recent">Recently added</option>'
-    + '</select></div>' + catChipsHtml() + '<div id="home-tiles" style="max-width:1000px;margin:18px auto 0;"><div class="loading">Loading...</div></div></div>';
+    + '</select></div>' + catChipsHtml() + '<div id="home-tiles" style="max-width:1000px;margin:18px auto 0;">'
+    + '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:12px;">'
+    + Array(12).fill('<div class="skeleton skeleton-tile"></div>').join('')
+    + '</div></div></div>';
   fetchJSON(API + '/api/catalog').then(function(data){
     var apps = data.apps || [];
     var allInstalled = apps.filter(function(a){ return a.status === 'installed'; });
@@ -9640,24 +9884,24 @@ function renderHomeTiles(allInstalled, allStopped, totalApps) {
     + (deskApps.length ? ' · ' + deskApps.length + ' desktop' : '');
   var html = '';
   installed.forEach(function(a){
-    var em = tileEmoji(a); var bg = tileColor(a);
+    var em = tileEmoji(a);
     var port = a.host_port || '';
     var hasWebUi = (a.launch_url || port) && (a.category||'') !== 'database';
     var imgSrc = iconUrl(a);
     // Try to load real icon, fall back to emoji on error
     html += '<div class="tile" onclick="' + (hasWebUi ? 'launch(' + "'" + (a.host_port||'') + "'" + ',' + "'" + (a.web_path||'/') + "'" + ',' + "'" + a.name.replace(/'/g, "\\'") + "'" + ',' + "'" + (a.launch_url||'') + "'" + ')' : '') + '" title="' + a.name + '" style="' + (hasWebUi ? '' : 'cursor:default;opacity:0.85;') + '">'
       + (hasWebUi ? '<div class="dot green"></div>' : '')
-      + '<div class="icon" style="background:linear-gradient(135deg,' + bg + '55,' + bg + '33);box-shadow:inset 0 0 0 1px ' + bg + '55;overflow:hidden;position:relative;">'
+      + '<div class="icon" style="background:linear-gradient(135deg,rgba(51,65,85,0.55),rgba(30,41,59,0.85));box-shadow:inset 0 0 0 1px rgba(56,189,248,0.14);overflow:hidden;position:relative;">'
       + '<img src="' + imgSrc + '" onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'flex\'" style="width:100%;height:100%;object-fit:cover;">'
       + '<span style="display:none;position:absolute;inset:0;align-items:center;justify-content:center;font-size:22px;">' + em + '</span>'
       + '</div>'
       + '<div class="label">' + a.name + '</div><div class="sub">Running</div></div>';
   });
   stopped.forEach(function(a){
-    var em = tileEmoji(a); var bg = tileColor(a);
+    var em = tileEmoji(a);
 html += '<div class="tile" onclick="startAndLaunch(' + "'" + a.id + "'" + ',' + "'" + a.name.replace(/'/g, "\\'") + "'" + ',' + "'" + (a.launch_url||'') + "'" + ')" title="Start ' + a.name + '" style="opacity:0.7">'
       + '<div class="dot amber"></div>'
-      + '<div class="icon" style="background:linear-gradient(135deg,' + bg + '44,' + bg + '22);box-shadow:inset 0 0 0 1px ' + bg + '44;opacity:0.8;overflow:hidden;position:relative;">'
+      + '<div class="icon" style="background:linear-gradient(135deg,rgba(51,65,85,0.4),rgba(30,41,59,0.8));box-shadow:inset 0 0 0 1px rgba(148,163,184,0.12);opacity:0.8;overflow:hidden;position:relative;">'
       + '<img src="' + iconUrl(a) + '" onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'flex\'" style="width:100%;height:100%;object-fit:cover;">'
       + '<span style="display:none;position:absolute;inset:0;align-items:center;justify-content:center;font-size:22px;">' + em + '</span>'
       + '</div>'
@@ -9670,12 +9914,12 @@ html += '<div class="tile" onclick="startAndLaunch(' + "'" + a.id + "'" + ',' + 
   if (currentCat === 'all') {
     deskApps.forEach(function(a){
       deskHtml += '<div class="tile" onclick="desktopLaunch(\'' + a.id + '\')" title="Launch ' + a.name + ' (desktop)" style="cursor:pointer;">'
-        + '<div class="dot" style="background:#a855f7;"></div>'
-        + '<div class="icon" style="background:linear-gradient(135deg,rgba(168,85,247,0.45),rgba(56,189,248,0.3));box-shadow:inset 0 0 0 1px rgba(168,85,247,0.5);overflow:hidden;position:relative;">'
+        + '<div class="pulse-dot" style="position:absolute;top:8px;right:8px;"></div>'
+        + '<div class="icon" style="background:linear-gradient(135deg,rgba(51,65,85,0.55),rgba(30,41,59,0.85));box-shadow:inset 0 0 0 1px rgba(56,189,248,0.14);overflow:hidden;position:relative;">'
         + '<img src="' + DESKTOP_HELPER + '/icon?id=' + a.id + '" onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'flex\'" style="width:100%;height:100%;object-fit:contain;padding:5px;">'
         + '<span style="display:none;position:absolute;inset:0;align-items:center;justify-content:center;font-size:22px;">🖥</span>'
         + '</div>'
-        + '<div class="label">' + a.name + ' <span style="font-size:8px;color:#a855f7;border:1px solid rgba(168,85,247,0.5);border-radius:4px;padding:0 4px;vertical-align:middle;">DESKTOP</span></div>'
+        + '<div class="label">' + a.name + ' <span style="font-size:8px;color:#64748b;border:1px solid rgba(148,163,184,0.4);border-radius:4px;padding:0 4px;vertical-align:middle;">DESKTOP</span></div>'
         + '<div class="sub">Desktop app</div></div>';
     });
   }
@@ -9685,11 +9929,11 @@ html += '<div class="tile" onclick="startAndLaunch(' + "'" + a.id + "'" + ',' + 
   // the cramped 104px dense grid.
   function homeSection(title, emoji, count, gridHtml) {
     if (!count || !gridHtml) return '';
-    return '<div style="display:flex;align-items:center;gap:8px;margin:22px 0 10px;padding-bottom:6px;border-bottom:1px solid rgba(51,65,85,0.4);">'
-      + '<span style="font-size:12.5px;font-weight:700;color:#e2e8f0;letter-spacing:0.5px;">' + emoji + ' ' + title + '</span>'
-      + '<span style="font-size:10px;color:#94a3b8;background:rgba(30,41,59,0.9);border:1px solid rgba(51,65,85,0.5);padding:1px 9px;border-radius:10px;">' + count + '</span>'
+    return '<div class="agent-roster-cat" style="margin:22px 2px 10px;max-width:1000px;margin-left:auto;margin-right:auto;">'
+      + '<span>' + title + '</span>'
+      + '<span class="cat-count">' + count + '</span>'
       + '<span style="flex:1;"></span></div>'
-      + '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:12px;">' + gridHtml + '</div>';
+      + '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:12px;max-width:1000px;margin:0 auto;">' + gridHtml + '</div>';
   }
   var out = '';
   out += homeSection('Web Apps', '🌐', installed.length + stopped.length, html);
@@ -9987,7 +10231,8 @@ function showManage() {
 var _storeRetryTimer = null;
 function showStore() {
   var c = $('content');
-  c.innerHTML = '<div class="store-header"><h2>📦 App Store</h2><span class="sub" id="store-sub">Loading...</span><input class="search-box" id="srch" placeholder="Search..." onkeyup="filterStore()"></div>' + catChipsHtml() + '<div class="loading">Loading...</div>';
+  c.innerHTML = '<div class="store-header"><h2>📦 App Store</h2><span class="sub" id="store-sub">Loading...</span><input class="search-box" id="srch" placeholder="Search..." onkeyup="filterStore()"></div>' + catChipsHtml()
+    + '<div class="grid" style="padding-top:16px;">' + Array(9).fill('<div class="skeleton skeleton-card"></div>').join('') + '</div>';
   if (_storeRetryTimer) { clearTimeout(_storeRetryTimer); _storeRetryTimer = null; }
   loadStoreCatalog(1);
 }
@@ -10346,15 +10591,23 @@ function funnelRunSelected() {
   }).catch(function(e){ toast('Run error: ' + e, 'red'); });
 }
 function funnelImportCsv() {
-  var csv = prompt('Paste CSV — header row with Company and Website/URL columns, one prospect per line.', 'Company,Website\n');
-  if (!csv || !csv.trim()) return;
-  funnelBizForProject().then(function(b){
-    if (!b) { toast('No business matches this project', 'red'); return; }
-    return fetchJSON(API + '/api/agentic/funnel/seeds/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ business_id: b.id, csv: csv.trim() }) }).then(function(r){
-      toast((r && r.added) ? ('Imported ' + r.added + ' prospects — hit ✨ Enrich & score next') : ('Import failed: ' + ((r && r.error) || 'unknown')), (r && r.added) ? 'green' : 'red');
-      loadPipelineProspects();
-    });
-  }).catch(function(e){ toast('Import error: ' + e, 'red'); });
+  agenticPrompt({
+    title: 'Import prospects (CSV)',
+    label: 'Paste CSV — header row with Company and Website/URL columns, one prospect per line.',
+    value: 'Company,Website\n',
+    okText: 'Import',
+    onOk: function(v) {
+      var csv = (v || '').trim();
+      if (!csv) return;
+      funnelBizForProject().then(function(b){
+        if (!b) { toast('No business matches this project', 'red'); return; }
+        return fetchJSON(API + '/api/agentic/funnel/seeds/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ business_id: b.id, csv: csv }) }).then(function(r){
+          toast((r && r.added) ? ('Imported ' + r.added + ' prospects — hit ✨ Enrich & score next') : ('Import failed: ' + ((r && r.error) || 'unknown')), (r && r.added) ? 'green' : 'red');
+          loadPipelineProspects();
+        });
+      }).catch(function(e){ toast('Import error: ' + e, 'red'); });
+    }
+  });
 }
 function funnelConnectorRun() {
   funnelBizForProject().then(function(b){
@@ -10362,11 +10615,19 @@ function funnelConnectorRun() {
     fetchJSON(API + '/api/agentic/funnel/connectors?business_id=' + b.id).then(function(c){
       var names = ((c && c.connectors) || []).map(function(x){ return x.name; });
       if (!names.length) { toast('No connectors configured — set them up in ⚙️ Signals / Connectors first', 'red'); return; }
-      var name = prompt('Run connector (configured: ' + names.join(', ') + '):', names[0]);
-      if (!name) return;
-      return fetchJSON(API + '/api/agentic/funnel/connector/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ business_id: b.id, name: name.trim() }) }).then(function(r){
-        toast((r && r.added) ? ('Connector pulled ' + r.added + ' prospects — hit ✨ Enrich & score') : ('Connector: ' + ((r && r.error) || 'no new candidates')), (r && r.added) ? 'green' : 'red');
-        loadPipelineProspects();
+      agenticPrompt({
+        title: 'Run connector',
+        label: 'Run connector (configured: ' + names.join(', ') + '):',
+        value: names[0],
+        okText: 'Run',
+        onOk: function(v) {
+          var name = (v || '').trim();
+          if (!name) return;
+          fetchJSON(API + '/api/agentic/funnel/connector/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ business_id: b.id, name: name }) }).then(function(r){
+            toast((r && r.added) ? ('Connector pulled ' + r.added + ' prospects — hit ✨ Enrich & score') : ('Connector: ' + ((r && r.error) || 'no new candidates')), (r && r.added) ? 'green' : 'red');
+            loadPipelineProspects();
+          });
+        }
       });
     });
   }).catch(function(e){ toast('Connector error: ' + e, 'red'); });
@@ -10385,16 +10646,32 @@ function funnelCfgPrompt() {
     if (!b) { toast('No business matches this project', 'red'); return; }
     fetchJSON(API + '/api/agentic/funnel/connectors?business_id=' + b.id).then(function(c){
       var cur = (c && c.signals) || {};
-      var txt = prompt('Signal keywords — one per line as keyword:weight. These are the things YOUR prospects must show on their site to score high.', 'soc 2: 3\niso 27001: 3\ntrust center: 2\nprivacy: 1\ngdpr: 2');
-      if (!txt) return;
-      var signals = {};
-      txt.split('\n').forEach(function(ln){ var p = ln.split(':'); if (p[0] && p[0].trim()) signals[p[0].trim()] = parseFloat(p[1]) || 1; });
-      var ctxt = prompt('Connectors — JSON list [{name, url, link_regex}]: url = a page that LISTS your kind of prospects; link_regex = pattern matching the links to each prospect.', '[{"name": "customers", "url": "https://example.com/customers", "link_regex": "https?://[^/]+"}]');
-      var connectors = [];
-      if (ctxt && ctxt.trim()) { try { connectors = JSON.parse(ctxt); } catch (e) { toast('Connectors JSON invalid', 'red'); return; } }
-      return fetchJSON(API + '/api/agentic/funnel/connectors', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ business_id: b.id, signals: signals, connectors: connectors }) }).then(function(r){
-        toast('Saved signals + connectors for ' + pipelineProject, 'green');
-        loadPipelineProspects();
+      agenticPrompt({
+        title: 'Signal keywords',
+        label: 'Signal keywords — one per line as keyword:weight. These are the things YOUR prospects must show on their site to score high.',
+        value: 'soc 2: 3\niso 27001: 3\ntrust center: 2\nprivacy: 1\ngdpr: 2',
+        okText: 'Next',
+        onOk: function(v) {
+          var txt = (v || '').trim();
+          if (!txt) return;
+          var signals = {};
+          txt.split('\n').forEach(function(ln){ var p = ln.split(':'); if (p[0] && p[0].trim()) signals[p[0].trim()] = parseFloat(p[1]) || 1; });
+          agenticPrompt({
+            title: 'Connectors',
+            label: 'Connectors — JSON list [{name, url, link_regex}]: url = a page that LISTS your kind of prospects; link_regex = pattern matching the links to each prospect.',
+            value: '[{"name": "customers", "url": "https://example.com/customers", "link_regex": "https?://[^/]+"}]',
+            okText: 'Save',
+            onOk: function(v2) {
+              var connectors = [];
+              var ctxt = (v2 || '').trim();
+              if (ctxt) { try { connectors = JSON.parse(ctxt); } catch (e) { toast('Connectors JSON invalid', 'red'); return; } }
+              fetchJSON(API + '/api/agentic/funnel/connectors', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ business_id: b.id, signals: signals, connectors: connectors }) }).then(function(r){
+                toast('Saved signals + connectors for ' + pipelineProject, 'green');
+                loadPipelineProspects();
+              });
+            }
+          });
+        }
       });
     });
   }).catch(function(e){ toast('Config error: ' + e, 'red'); });
@@ -10558,19 +10835,26 @@ function funnelAction(wid, kind) {
   }).catch(function(e){ pipelineBusyEnd('funnel:' + wid + ':' + kind, btn); toast('Funnel error: ' + e, 'red'); });
 }
 function funnelLogReply(wid) {
-  var text = prompt('Paste the prospect reply (or type it):', '');
-  if (!text || !text.trim()) return;
-  var btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
-  if (btn) { btn.disabled = true; btn.textContent = '⏳ Triage…'; }
-  fetch(API + '/api/agentic/funnel/reply', {
-    method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, apiHeaders()), body: JSON.stringify({ wid: wid, text: text.trim() })
-  }).then(function(r){ return r.json(); }).then(function(d){
-    if (btn) { btn.disabled = false; btn.textContent = '📥 Log reply'; }
-    if (d && d.status === 'ok') {
-      var msg = { proposal: 'Reply triaged as POSITIVE — proposal drafted (approve it next)', closed: 'Reply triaged as negative — chain closed', followup: 'Reply triaged — follow-up drafted (approve it before sending)' }[d.action] || 'Reply logged';
-      toast(msg, 'green'); loadContentPipeline();
-    } else toast('Reply failed: ' + ((d && d.error) || 'unknown'), 'red');
-  }).catch(function(e){ if (btn) { btn.disabled = false; btn.textContent = '📥 Log reply'; } toast('Reply error: ' + e, 'red'); });
+  agenticPrompt({
+    title: 'Log prospect reply',
+    label: 'Paste the prospect reply (or type it):',
+    okText: 'Log',
+    onOk: function(v) {
+      var text = (v || '').trim();
+      if (!text) return;
+      var btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+      if (btn) { btn.disabled = true; btn.textContent = '⏳ Triage…'; }
+      fetch(API + '/api/agentic/funnel/reply', {
+        method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, apiHeaders()), body: JSON.stringify({ wid: wid, text: text })
+      }).then(function(r){ return r.json(); }).then(function(d){
+        if (btn) { btn.disabled = false; btn.textContent = '📥 Log reply'; }
+        if (d && d.status === 'ok') {
+          var msg = { proposal: 'Reply triaged as POSITIVE — proposal drafted (approve it next)', closed: 'Reply triaged as negative — chain closed', followup: 'Reply triaged — follow-up drafted (approve it before sending)' }[d.action] || 'Reply logged';
+          toast(msg, 'green'); loadContentPipeline();
+        } else toast('Reply failed: ' + ((d && d.error) || 'unknown'), 'red');
+      }).catch(function(e){ if (btn) { btn.disabled = false; btn.textContent = '📥 Log reply'; } toast('Reply error: ' + e, 'red'); });
+    }
+  });
 }
 function loadPipelineProjects() {
   fetchJSON(API + '/api/agentic/pipeline/projects').then(function(d){
@@ -10591,18 +10875,25 @@ function pipelineSetProject(slug) {
   showContentPipelinePage();
 }
 function pipelineAddProject() {
-  var name = prompt('New project name (e.g. "Acme Insurance"):', '');
-  if (!name || !name.trim()) return;
-  var slug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-  if (!slug) { toast('Invalid name', 'red'); return; }
-  fetch(API + '/api/agentic/pipeline/projects', {
-    method: 'POST',
-    headers: Object.assign({'Content-Type': 'application/json'}, apiHeaders()),
-    body: JSON.stringify({ slug: slug, name: name.trim() })
-  }).then(function(r){ return r.json(); }).then(function(d){
-    if (d.status === 'ok') { pipelineProject = slug; localStorage.setItem('appvault.pipelineProject', slug); showContentPipelinePage(); toast('Project created — configure its Sources, Social Router and WordPress in the tabs', 'green'); }
-    else toast('Create failed: ' + (d.error || ''), 'red');
-  }).catch(function(e){ toast('Error: ' + e, 'red'); });
+  agenticPrompt({
+    title: 'New project',
+    label: 'New project name (e.g. "Acme Insurance"):',
+    okText: 'Create',
+    onOk: function(v) {
+      var name = (v || '').trim();
+      if (!name) return;
+      var slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+      if (!slug) { toast('Invalid name', 'red'); return; }
+      fetch(API + '/api/agentic/pipeline/projects', {
+        method: 'POST',
+        headers: Object.assign({'Content-Type': 'application/json'}, apiHeaders()),
+        body: JSON.stringify({ slug: slug, name: name })
+      }).then(function(r){ return r.json(); }).then(function(d){
+        if (d.status === 'ok') { pipelineProject = slug; localStorage.setItem('appvault.pipelineProject', slug); showContentPipelinePage(); toast('Project created — configure its Sources, Social Router and WordPress in the tabs', 'green'); }
+        else toast('Create failed: ' + (d.error || ''), 'red');
+      }).catch(function(e){ toast('Error: ' + e, 'red'); });
+    }
+  });
 }
 // ===SPLICE:agentic_mt_ui.js===
 // ──── MULTI-TENANT CONTENT UI (2026-08-11) — businesses / social profiles / content types / WP sites ────
@@ -10844,38 +11135,122 @@ function mtFeedList(feeds) {
 }
 
 function mtCreateBusinessForm() {
-  var name = prompt('Business name (e.g. "Acme Media"):', '');
-  if (!name || !name.trim()) return;
-  var voice = prompt('Brand voice (one line, e.g. "conversational expert — friendly, concrete, no jargon"):', '') || '';
-  var website = prompt('Website URL (optional):', '') || '';
-  var cta = prompt('Call to action / offer (optional):', '') || '';
-  mtFetch('/businesses', { method: 'POST', body: { name: name.trim(), voice: voice, website: website, cta_offer: cta } })
-    .then(function (d) {
-      if (d && d.business) { toast('Business created', 'green'); mtLoad(); }
-      else toast((d && d.error) || 'Create failed', 'red');
-    });
+  agenticPrompt({
+    title: 'New business',
+    label: 'Business name (e.g. "Acme Media"):',
+    okText: 'Next',
+    onOk: function(v) {
+      var name = (v || '').trim();
+      if (!name) return;
+      agenticPrompt({
+        title: 'Brand voice',
+        label: 'Brand voice (one line, e.g. "conversational expert — friendly, concrete, no jargon"):',
+        okText: 'Next',
+        onOk: function(v2) {
+          var voice = (v2 || '');
+          agenticPrompt({
+            title: 'Website URL',
+            label: 'Website URL (optional):',
+            okText: 'Next',
+            onOk: function(v3) {
+              var website = (v3 || '');
+              agenticPrompt({
+                title: 'Call to action',
+                label: 'Call to action / offer (optional):',
+                okText: 'Create',
+                onOk: function(v4) {
+                  var cta = (v4 || '');
+                  mtFetch('/businesses', { method: 'POST', body: { name: name, voice: voice, website: website, cta_offer: cta } })
+                    .then(function (d) {
+                      if (d && d.business) { toast('Business created', 'green'); mtLoad(); }
+                      else toast((d && d.error) || 'Create failed', 'red');
+                    });
+                }
+              });
+            }
+          });
+        }
+      });
+    }
+  });
 }
 
 function mtEditBusiness(bid) {
   mtFetch('/businesses/' + bid).then(function (d) {
     if (!d || !d.business) return;
     var b = d.business;
-    var name = prompt('Business name:', b.name); if (!name || !name.trim()) return;
-    var voice = prompt('Brand voice:', b.voice || '') || '';
-    var website = prompt('Website URL:', b.website || '') || '';
-    var cta = prompt('Call to action / offer:', b.cta_offer || '') || '';
-    var plats = prompt('Generate posts for these platforms (comma-separated: x, linkedin, facebook, instagram). Empty = derive from content types:', (b.social_platforms || []).join(', ')) || '';
-    var platforms = plats.split(',').map(function (s) { return s.trim().toLowerCase(); }).filter(Boolean);
-    var tgt = prompt('Daily post target (mix planner):', b.daily_target || 8) || '8';
-    mtFetch('/businesses/' + bid, { method: 'PUT', body: { name: name.trim(), voice: voice, website: website, cta_offer: cta, social_platforms: platforms, daily_target: parseInt(tgt) || 8 } })
-      .then(function (x) { if (x && x.business) { toast('Business updated', 'green'); mtLoad(); } });
+    agenticPrompt({
+      title: 'Edit business',
+      label: 'Business name:',
+      value: b.name,
+      okText: 'Next',
+      onOk: function(v) {
+        var name = (v || '').trim();
+        if (!name) return;
+        agenticPrompt({
+          title: 'Brand voice',
+          label: 'Brand voice:',
+          value: b.voice || '',
+          okText: 'Next',
+          onOk: function(v2) {
+            var voice = (v2 || '');
+            agenticPrompt({
+              title: 'Website URL',
+              label: 'Website URL:',
+              value: b.website || '',
+              okText: 'Next',
+              onOk: function(v3) {
+                var website = (v3 || '');
+                agenticPrompt({
+                  title: 'Call to action',
+                  label: 'Call to action / offer:',
+                  value: b.cta_offer || '',
+                  okText: 'Next',
+                  onOk: function(v4) {
+                    var cta = (v4 || '');
+                    agenticPrompt({
+                      title: 'Platforms',
+                      label: 'Generate posts for these platforms (comma-separated: x, linkedin, facebook, instagram). Empty = derive from content types:',
+                      value: (b.social_platforms || []).join(', '),
+                      okText: 'Next',
+                      onOk: function(v5) {
+                        var plats = (v5 || '');
+                        var platforms = plats.split(',').map(function (s) { return s.trim().toLowerCase(); }).filter(Boolean);
+                        agenticPrompt({
+                          title: 'Daily post target',
+                          label: 'Daily post target (mix planner):',
+                          value: String(b.daily_target || 8),
+                          okText: 'Save',
+                          onOk: function(v6) {
+                            var tgt = (v6 || '8');
+                            mtFetch('/businesses/' + bid, { method: 'PUT', body: { name: name, voice: voice, website: website, cta_offer: cta, social_platforms: platforms, daily_target: parseInt(tgt) || 8 } })
+                              .then(function (x) { if (x && x.business) { toast('Business updated', 'green'); mtLoad(); } });
+                          }
+                        });
+                      }
+                    });
+                  }
+                });
+              }
+            });
+          }
+        });
+      }
+    });
   });
 }
 
 function mtDeleteBusiness(bid) {
-  if (!confirm('Delete this business? Its feeds/profiles/content types are detached (not deleted).')) return;
-  mtFetch('/businesses/' + bid, { method: 'DELETE' }).then(function (d) {
-    if (d && d.status === 'ok') { toast('Business deleted', 'green'); mtLoad(); }
+  agenticConfirm({
+    title: 'Delete business',
+    message: 'Delete this business? Its feeds/profiles/content types are detached (not deleted).',
+    okText: 'Delete',
+    danger: true,
+    onOk: function(){
+      mtFetch('/businesses/' + bid, { method: 'DELETE' }).then(function (d) {
+        if (d && d.status === 'ok') { toast('Business deleted', 'green'); mtLoad(); }
+      });
+    }
   });
 }
 
@@ -11045,11 +11420,32 @@ function mtAddContentType(bid) {
   var plats = ($('mtp2-' + bid) || {}).value || '';
   if (!name.trim()) { toast('Content type name required', 'red'); return; }
   var platforms = plats.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
-  var purpose = prompt('Purpose (what is this content for?):', '') || '';
-  var voice = prompt('Voice (optional):', '') || '';
-  var structure = prompt('Structure (optional):', '') || '';
-  mtFetch('/content-types', { method: 'POST', body: { business_id: bid, name: name.trim(), purpose: purpose, voice: voice, structure: structure, platforms: platforms } })
-    .then(function (d) { if (d && d.content_type) { toast('Content type added', 'green'); mtLoad(); } });
+  agenticPrompt({
+    title: 'Content type purpose',
+    label: 'Purpose (what is this content for?):',
+    okText: 'Next',
+    onOk: function(v1) {
+      var purpose = (v1 || '');
+      agenticPrompt({
+        title: 'Voice',
+        label: 'Voice (optional):',
+        okText: 'Next',
+        onOk: function(v2) {
+          var voice = (v2 || '');
+          agenticPrompt({
+            title: 'Structure',
+            label: 'Structure (optional):',
+            okText: 'Add',
+            onOk: function(v3) {
+              var structure = (v3 || '');
+              mtFetch('/content-types', { method: 'POST', body: { business_id: bid, name: name.trim(), purpose: purpose, voice: voice, structure: structure, platforms: platforms } })
+                .then(function (d) { if (d && d.content_type) { toast('Content type added', 'green'); mtLoad(); } });
+            }
+          });
+        }
+      });
+    }
+  });
 }
 
 function mtDeleteContentType(ctid) {
@@ -11080,11 +11476,17 @@ function mtTestWpSite(wsid) {
 }
 
 function mtSeed() {
-  if (!confirm('Import the starter template (AI RepoIndex, Security RepoIndex, CISOvault, WriterStudioAI) as starting data? Fully editable and deletable.')) return;
-  mtFetch('/businesses/seed', { method: 'POST', body: {} }).then(function (d) {
-    if (d && d.status === 'ok') {
-      toast('Template imported: ' + d.created_businesses + ' businesses, ' + d.created_feeds + ' feeds, ' + d.created_content_types + ' content types' + (d.skipped_existing ? ' (' + d.skipped_existing + ' skipped)' : ''), 'green');
-      mtLoad();
+  agenticConfirm({
+    title: 'Import starter template',
+    message: 'Import the starter template (AI RepoIndex, Security RepoIndex, CISOvault, WriterStudioAI) as starting data? Fully editable and deletable.',
+    okText: 'Import',
+    onOk: function(){
+      mtFetch('/businesses/seed', { method: 'POST', body: {} }).then(function (d) {
+        if (d && d.status === 'ok') {
+          toast('Template imported: ' + d.created_businesses + ' businesses, ' + d.created_feeds + ' feeds, ' + d.created_content_types + ' content types' + (d.skipped_existing ? ' (' + d.skipped_existing + ' skipped)' : ''), 'green');
+          mtLoad();
+        }
+      });
     }
   });
 }
@@ -12666,16 +13068,24 @@ function downloadItemModalContent() {
 }
 
 function deleteItemModalEntry() {
-  if (!confirm('Delete this item?')) return;
   var kind = __itemModal.kind, id = __itemModal.id;
-  if (kind === 'memory') {
-    fetch(API + '/api/agentic/memory/' + id, { method: 'DELETE', headers: apiHeaders() })
-      .then(function(r){ return r.json(); }).then(function(d){
-        toast(d && d.status === 'ok' ? 'Memory entry deleted' : 'Delete failed', d && d.status === 'ok' ? 'green' : 'red');
-        closeItemModal();
-        loadAgentMemory();
-      });
-  }
+  var doDelete = function(){
+    if (kind === 'memory') {
+      fetch(API + '/api/agentic/memory/' + id, { method: 'DELETE', headers: apiHeaders() })
+        .then(function(r){ return r.json(); }).then(function(d){
+          toast(d && d.status === 'ok' ? 'Memory entry deleted' : 'Delete failed', d && d.status === 'ok' ? 'green' : 'red');
+          closeItemModal();
+          loadAgentMemory();
+        });
+      }
+  };
+  agenticConfirm({
+    title: 'Delete item',
+    message: 'Delete this item?',
+    okText: 'Delete',
+    danger: true,
+    onOk: doDelete
+  });
 }
 
 function openMemoryItem(id) {
@@ -12831,10 +13241,17 @@ function workPublish(id) {
 }
 
 function workDelete(id) {
-  if (!confirm('Delete this work item?')) return;
-  workFetch('/api/agentic/work/' + encodeURIComponent(id), { method: 'DELETE' }).then(function(){
-    workSelected = null; loadWorkItems();
-    var pv = $('work-preview'); if (pv) pv.innerHTML = '<div style="color:#64748b;font-size:12px;padding:20px 0;text-align:center;">Select an item to review.</div>';
+  agenticConfirm({
+    title: 'Delete work item',
+    message: 'Delete this work item?',
+    okText: 'Delete',
+    danger: true,
+    onOk: function(){
+      workFetch('/api/agentic/work/' + encodeURIComponent(id), { method: 'DELETE' }).then(function(){
+        workSelected = null; loadWorkItems();
+        var pv = $('work-preview'); if (pv) pv.innerHTML = '<div style="color:#64748b;font-size:12px;padding:20px 0;text-align:center;">Select an item to review.</div>';
+      });
+    }
   });
 }
 
@@ -12861,7 +13278,7 @@ function workAddModal() {
 }
 function workAddSave() {
   var title = ($('wa-title') || {}).value || '';
-  if (!title.trim()) { alert('Title required'); return; }
+  if (!title.trim()) { agenticAlert('Title required'); return; }
   workFetch('/api/agentic/work', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
     category: ($('wa-cat') || {}).value || 'other', title: title.trim(),
     content: ($('wa-content') || {}).value || '', image_url: ($('wa-image') || {}).value || '', source: 'manual'
@@ -12884,12 +13301,21 @@ function workEdCmd(cmd, arg) {
   if (ed) ed.focus();
 }
 function workEdLink() {
-  var u = prompt('Link URL (https://…):');
-  if (u) workEdCmd('createLink', u);
+  agenticPrompt({
+    title: 'Insert link',
+    label: 'Link URL (https://…):',
+    value: 'https://',
+    okText: 'Insert',
+    onOk: function(v) { var u = (v || '').trim(); if (u) workEdCmd('createLink', u); }
+  });
 }
 function workEdImage() {
-  var u = prompt('Image URL:');
-  if (u) workEdCmd('insertImage', u);
+  agenticPrompt({
+    title: 'Insert image',
+    label: 'Image URL:',
+    okText: 'Insert',
+    onOk: function(v) { var u = (v || '').trim(); if (u) workEdCmd('insertImage', u); }
+  });
 }
 function workEdBlock(tag) { workEdCmd('formatBlock', tag); }
 
@@ -12954,7 +13380,7 @@ function htmlToMarkdown(html) {
 
 function workEditModal(id) {
   workFetch('/api/agentic/work/' + encodeURIComponent(id)).then(function(d) {
-    if (!d || !d.item) { alert('Item not found'); return; }
+    if (!d || !d.item) { agenticAlert('Item not found'); return; }
     var it = d.item;
     var html = it.image_url ? '' : (mdRender(escapeHtml(it.content || '')) || '');
     var overlay = document.createElement('div');
@@ -12994,7 +13420,7 @@ function workEditSave(id) {
   var ed = $('work-ed');
   var title = (titleEl ? titleEl.value : '').trim();
   var md = htmlToMarkdown(ed ? ed.innerHTML : '');
-  if (!title) { alert('Title required'); return; }
+  if (!title) { agenticAlert('Title required'); return; }
   workFetch('/api/agentic/work/' + encodeURIComponent(id), {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -13004,7 +13430,7 @@ function workEditSave(id) {
       workEditClose();
       loadWorkItems();
       workSelect(id);
-    } else { alert('Save failed'); }
+    } else { agenticAlert('Save failed'); }
   });
 }
 // ===/SPLICE:agentic_work_ui.js===
@@ -13095,15 +13521,23 @@ function metricAdd() {
 }
 
 function missionDelay(tid) {
-  var mins = prompt('Delay this task (minutes):', '1440');
-  if (!mins) return;
-  var n = parseInt(mins, 10);
-  if (!n || n < 1) { if (window.toast) toast('Minutes must be >= 1', 'red'); return; }
-  fetchJSON(API + '/api/agentic/tasks/' + tid + '/delay', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ minutes: n })
-  }).then(function(d){
-    if (window.toast) toast(d && d.status === 'ok' ? '⏰ delayed ' + n + 'm' : '✗ failed', d && d.status === 'ok' ? 'green' : 'red');
-    loadMissions();
+  agenticPrompt({
+    title: 'Delay task',
+    label: 'Delay this task (minutes):',
+    value: '1440',
+    okText: 'Delay',
+    onOk: function(v) {
+      var mins = (v || '').trim();
+      if (!mins) return;
+      var n = parseInt(mins, 10);
+      if (!n || n < 1) { if (window.toast) toast('Minutes must be >= 1', 'red'); return; }
+      fetchJSON(API + '/api/agentic/tasks/' + tid + '/delay', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ minutes: n })
+      }).then(function(d){
+        if (window.toast) toast(d && d.status === 'ok' ? '⏰ delayed ' + n + 'm' : '✗ failed', d && d.status === 'ok' ? 'green' : 'red');
+        loadMissions();
+      });
+    }
   });
 }
 
@@ -13381,7 +13815,7 @@ window.__pipelineCmd = function(cmd){
   else if (cmd === 'code') ch.toggleCodeBlock();
   else if (cmd === 'undo') ch.undo();
   else if (cmd === 'redo') ch.redo();
-  else if (cmd === 'link'){ const url = prompt('Link URL:', 'https://'); if (url) ch.setLink({ href: url }); else return; }
+  else if (cmd === 'link'){ agenticPrompt({ title: 'Insert link', label: 'Link URL:', value: 'https://', okText: 'Insert', onOk: function(v){ var url = (v || '').trim(); if (url) ch.setLink({ href: url }); } }); }
   else if (cmd === 'image'){ window.pipelineImagePicker(); return; }
   else if (cmd === 'visual'){ window.pipelineVisualModal(); return; }
   ch.run();
