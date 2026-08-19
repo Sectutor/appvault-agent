@@ -803,6 +803,35 @@ body ::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 4p
 .agent-sess-row .sess-count { background: rgba(30, 41, 59, 0.8); color: #64748b; border: 1px solid rgba(51, 65, 85, 0.4); }
 .agent-sess-new { border-radius: 6px; font-size: 10.5px; }
 
+/* In-app prompt dialog (replaces native prompt() in Agentic OS) */
+.agentic-prompt-overlay {
+  position: fixed; inset: 0; z-index: 10000;
+  background: rgba(2, 6, 23, 0.7); backdrop-filter: blur(6px);
+  display: flex; align-items: center; justify-content: center; padding: 20px;
+  animation: agentic-fade 0.12s ease;
+}
+.agentic-prompt-card {
+  background: #0f172a; border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 14px;
+  width: 100%; max-width: 420px; padding: 18px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+  animation: agentic-pop 0.16s ease;
+}
+.agentic-prompt-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  font-weight: 600; font-size: 13.5px; color: #f1f5f9; margin-bottom: 12px;
+}
+.agentic-prompt-label { font-size: 11px; color: #94a3b8; margin-bottom: 6px; }
+.agentic-prompt-card input {
+  width: 100%; box-sizing: border-box; background: rgba(30, 41, 59, 0.9);
+  border: 1px solid rgba(71, 85, 105, 0.6); color: #fff; border-radius: 8px;
+  padding: 9px 12px; font-size: 12.5px; outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.agentic-prompt-card input:focus { border-color: rgba(56, 189, 248, 0.6); box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.15); }
+.agentic-prompt-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+@keyframes agentic-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes agentic-pop { from { opacity: 0; transform: translateY(8px) scale(0.98); } to { opacity: 1; transform: none; } }
+
 /* Focus-visible rings (interaction-design: visible affordance, keyboard first) */
 .agentic-btn:focus-visible, .agentic-btn-secondary:focus-visible,
 .agentic-icon-btn:focus-visible, .agentic-more-item:focus-visible,
@@ -4489,18 +4518,25 @@ function loadHermesSessionMessages(sessionId) {
 }
 
 function createNewHermesSession() {
-  var title = prompt('Enter a title for the new Hermes session:', 'Hermes Session ' + (new Date().toLocaleTimeString()));
-  if (title === null || !title.trim()) return;
-
-  fetch(API + '/api/agentic/hermes/sessions', {
-    method: 'POST',
-    headers: Object.assign({'Content-Type': 'application/json'}, apiHeaders()),
-    body: JSON.stringify({title: title})
-  }).then(function(r){ return r.json(); }).then(function(data){
-    toast('New Hermes session created!', 'green');
-    loadHermesSessions();
-  }).catch(function(err){
-    toast('Error creating session: ' + err, 'red');
+  agenticPrompt({
+    title: 'New Hermes session',
+    label: 'Enter a title for the new Hermes session:',
+    value: 'Hermes Session ' + (new Date().toLocaleTimeString()),
+    okText: 'Create',
+    onOk: function(title) {
+      title = (title || '').trim();
+      if (!title) return;
+      fetch(API + '/api/agentic/hermes/sessions', {
+        method: 'POST',
+        headers: Object.assign({'Content-Type': 'application/json'}, apiHeaders()),
+        body: JSON.stringify({title: title})
+      }).then(function(r){ return r.json(); }).then(function(data){
+        toast('New Hermes session created!', 'green');
+        loadHermesSessions();
+      }).catch(function(err){
+        toast('Error creating session: ' + err, 'red');
+      });
+    }
   });
 }
 
@@ -8075,25 +8111,77 @@ function loadAgentThreadMessages(agentId, threadId) {
   });
 }
 
+// Styled in-app prompt (dark themed) — replaces the native browser prompt()
+// in the Agentic OS flows. Returns via callback: onOk(value) or onCancel().
+var _agenticPromptActive = false;
+function agenticPrompt(opts) {
+  if (_agenticPromptActive) return;
+  _agenticPromptActive = true;
+  opts = opts || {};
+  var ov = document.createElement('div');
+  ov.className = 'agentic-prompt-overlay';
+  ov.innerHTML =
+    '<div class="agentic-prompt-card" role="dialog" aria-modal="true">' +
+      '<div class="agentic-prompt-head"><span>' + escapeHtml(opts.title || 'Enter value') + '</span>' +
+        '<button class="agentic-icon-btn" id="agentic-prompt-close" style="width:26px;height:26px;font-size:12px;" aria-label="Close">✕</button></div>' +
+      (opts.label ? '<div class="agentic-prompt-label">' + escapeHtml(opts.label) + '</div>' : '') +
+      '<input id="agentic-prompt-input" type="text" value="' + escapeHtml(opts.value || '') + '" placeholder="' + escapeHtml(opts.placeholder || '') + '">' +
+      '<div class="agentic-prompt-actions">' +
+        '<button class="agentic-btn-secondary" id="agentic-prompt-cancel">Cancel</button>' +
+        '<button class="agentic-btn" id="agentic-prompt-ok">' + escapeHtml(opts.okText || 'OK') + '</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(ov);
+
+  function finish(result) {
+    if (!_agenticPromptActive) return;
+    _agenticPromptActive = false;
+    ov.remove();
+    document.removeEventListener('keydown', escHandler, true);
+    if (result === null) { if (opts.onCancel) opts.onCancel(); }
+    else if (opts.onOk) opts.onOk(result);
+  }
+  function escHandler(e) {
+    if (e.key === 'Escape') { e.preventDefault(); finish(null); }
+    else if (e.key === 'Enter' && document.activeElement && document.activeElement.id === 'agentic-prompt-input') {
+      e.preventDefault(); finish(($('agentic-prompt-input') || {}).value || '');
+    }
+  }
+  var inp = $('agentic-prompt-input');
+  setTimeout(function(){ if (inp) { inp.focus(); inp.select(); } }, 30);
+  ov.addEventListener('mousedown', function(e){ if (e.target === ov) finish(null); });
+  $('agentic-prompt-close').addEventListener('click', function(){ finish(null); });
+  $('agentic-prompt-cancel').addEventListener('click', function(){ finish(null); });
+  $('agentic-prompt-ok').addEventListener('click', function(){ finish((inp || {}).value || ''); });
+  document.addEventListener('keydown', escHandler, true);
+}
+
 function createNewAgentSession(agentId) {
   var targetAgent = (agentId || currentAgentWorkspace || 'hermes').toLowerCase();
   var defaultTitle = 'Topic ' + (new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}));
-  var title = prompt('Enter a title for the new ' + targetAgent.toUpperCase() + ' chat / topic:', defaultTitle);
-  if (title === null || !title.trim()) return;
-
-  fetchJSON(API + '/api/agentic/roster/sessions', {
-    method: 'POST',
-    headers: Object.assign({'Content-Type': 'application/json'}, typeof apiHeaders === 'function' ? apiHeaders() : {}),
-    body: JSON.stringify({agent: targetAgent, title: title.trim()})
-  }).then(function(d){
-    if (d && d.status === 'ok' && d.session_id) {
-      if (typeof toast === 'function') toast('Created new topic: ' + title.trim(), 'green');
-      openAgentSession(targetAgent, d.session_id);
-    } else {
-      alert('Failed to create new topic: ' + JSON.stringify(d));
+  agenticPrompt({
+    title: 'New ' + targetAgent.charAt(0).toUpperCase() + targetAgent.slice(1) + ' topic',
+    label: 'Enter a title for the new chat / topic:',
+    value: defaultTitle,
+    okText: 'Create',
+    onOk: function(title) {
+      title = (title || '').trim();
+      if (!title) return;
+      fetchJSON(API + '/api/agentic/roster/sessions', {
+        method: 'POST',
+        headers: Object.assign({'Content-Type': 'application/json'}, typeof apiHeaders === 'function' ? apiHeaders() : {}),
+        body: JSON.stringify({agent: targetAgent, title: title})
+      }).then(function(d){
+        if (d && d.status === 'ok' && d.session_id) {
+          if (typeof toast === 'function') toast('Created new topic: ' + title, 'green');
+          openAgentSession(targetAgent, d.session_id);
+        } else {
+          alert('Failed to create new topic: ' + JSON.stringify(d));
+        }
+      }).catch(function(err){
+        if (typeof toast === 'function') toast('Error creating topic: ' + err, 'red');
+      });
     }
-  }).catch(function(err){
-    if (typeof toast === 'function') toast('Error creating topic: ' + err, 'red');
   });
 }
 
@@ -8107,23 +8195,30 @@ function renameCurrentAgentSession(agentId, sessionId) {
     currentTitle = sel.selectedOptions[0].text.replace(/\s*\(\d+\s*msgs\)/i, '').trim();
   }
 
-  var newTitle = prompt('Rename this chat topic:', currentTitle);
-  if (newTitle === null || !newTitle.trim() || newTitle.trim() === currentTitle) return;
-
-  fetchJSON(API + '/api/agentic/roster/sessions/' + encodeURIComponent(targetAgent) + '/' + encodeURIComponent(activeSid), {
-    method: 'PUT',
-    headers: Object.assign({'Content-Type': 'application/json'}, typeof apiHeaders === 'function' ? apiHeaders() : {}),
-    body: JSON.stringify({title: newTitle.trim()})
-  }).then(function(d){
-    if (d && d.status === 'ok') {
-      if (typeof toast === 'function') toast('Topic renamed to: ' + newTitle.trim(), 'green');
-      loadAgentSessions(targetAgent, activeSid);
-      if (typeof loadAgentRoster === 'function') loadAgentRoster();
-    } else {
-      alert('Failed to rename topic: ' + JSON.stringify(d));
+  agenticPrompt({
+    title: 'Rename topic',
+    label: 'Rename this chat topic:',
+    value: currentTitle,
+    okText: 'Rename',
+    onOk: function(val) {
+      var t = (val || '').trim();
+      if (!t || t === currentTitle) return;
+      fetchJSON(API + '/api/agentic/roster/sessions/' + encodeURIComponent(targetAgent) + '/' + encodeURIComponent(activeSid), {
+        method: 'PUT',
+        headers: Object.assign({'Content-Type': 'application/json'}, typeof apiHeaders === 'function' ? apiHeaders() : {}),
+        body: JSON.stringify({title: t})
+      }).then(function(d){
+        if (d && d.status === 'ok') {
+          if (typeof toast === 'function') toast('Topic renamed to: ' + t, 'green');
+          loadAgentSessions(targetAgent, activeSid);
+          if (typeof loadAgentRoster === 'function') loadAgentRoster();
+        } else {
+          alert('Failed to rename topic: ' + JSON.stringify(d));
+        }
+      }).catch(function(err){
+        if (typeof toast === 'function') toast('Error renaming topic: ' + err, 'red');
+      });
     }
-  }).catch(function(err){
-    if (typeof toast === 'function') toast('Error renaming topic: ' + err, 'red');
   });
 }
 
