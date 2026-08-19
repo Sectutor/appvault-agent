@@ -3166,8 +3166,18 @@ var _hermesFullTab = 'chat';
 var _hermesSessions = [];
 var _hermesActiveSession = null;
 
+// The Hermes (/hermes/) and OpenClaw (/openclaw/) proxies live on the nginx
+// dashboard at :8090. When this page is served from the agent (:8086) those
+// paths 404 — so resolve console URLs to the :8090 origin explicitly.
+function dashboardOrigin() {
+  var p = window.location.port || '';
+  if (p === '8086' || p === '8090') return 'http://localhost:8090';
+  return '';
+}
+var _dashOrigin = dashboardOrigin();
+
 var HERMES_DOCS_URL = (function(){
-  try { return localStorage.getItem('appvault_hermes_docs_url') || '/hermes/docs'; } catch (e) { return '/hermes/docs'; }
+  try { return localStorage.getItem('appvault_hermes_docs_url') || (_dashOrigin + '/hermes/docs'); } catch (e) { return _dashOrigin + '/hermes/docs'; }
 })();
 function showHermesFull() {
   _hermesFullTab = 'chat';
@@ -3201,7 +3211,7 @@ function hermesOpenExternal() {
 }
 function hermesProbeStatus() {
   var el = $('hermes-console-status');
-  fetch('/hermes/api/v1/config').then(function(r){
+  fetch(_dashOrigin + '/hermes/api/v1/config').then(function(r){
     if (el) el.textContent = '● online — sessions · chat · tools · config · telemetry';
   }).catch(function(){
     if (el) el.textContent = '○ offline — is the hermes-agent container running?';
@@ -3239,7 +3249,7 @@ function hermesDocsLoaded() {
 }
 
 function hermesApi(path, opts) {
-  return fetch('/hermes/api/v1' + path, Object.assign({}, opts || {}, {
+  return fetch(_dashOrigin + '/hermes/api/v1' + path, Object.assign({}, opts || {}, {
     headers: Object.assign({ 'Content-Type': 'application/json' }, (opts || {}).headers || {})
   })).then(function(r){
     return r.json().catch(function(){ return { status: 'error', error: 'non-JSON response HTTP ' + r.status }; });
@@ -3309,11 +3319,12 @@ function dshProbeStatus() {
 var OPENCLAW_URL = (function(){
   // Same-origin proxy through the dashboard nginx (/openclaw/ -> :18789 with
   // frame headers stripped) so the Studio UI renders inside the console. The
-  // direct gateway origin is used for "New Tab".
+  // proxy lives on :8090; when this page is served from :8086 we still target
+  // :8090 so the iframe loads. Direct gateway origin is used for "New Tab".
   try {
     return localStorage.getItem('appvault_openclaw_url') ||
-           (location.origin + '/openclaw/');
-  } catch (e) { return '/openclaw/'; }
+           (_dashOrigin + '/openclaw/');
+  } catch (e) { return _dashOrigin + '/openclaw/'; }
 })();
 var OPENCLAW_EXTERNAL_URL = (function(){
   try { return localStorage.getItem('appvault_openclaw_external_url') || 'http://localhost:18789/'; } catch (e) { return 'http://localhost:18789/'; }
