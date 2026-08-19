@@ -23,6 +23,7 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import xml.etree.ElementTree as ET
+import xml.sax.saxutils as _saxutils
 from datetime import datetime
 
 from flask import Blueprint, request, jsonify, Response
@@ -172,6 +173,22 @@ def _init_db():
         business_id INTEGER DEFAULT NULL,
         name TEXT, site_url TEXT, username TEXT, app_password TEXT,
         enabled INTEGER DEFAULT 1, created TEXT
+    );
+    CREATE TABLE IF NOT EXISTS news_posts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        category TEXT DEFAULT 'update',
+        priority TEXT DEFAULT 'normal',
+        body TEXT DEFAULT '',
+        author TEXT DEFAULT 'Admin',
+        status TEXT DEFAULT 'published',
+        created TEXT, updated TEXT, published_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS news_reads (
+        post_id INTEGER NOT NULL,
+        user_key TEXT NOT NULL,
+        read_at TEXT,
+        PRIMARY KEY (post_id, user_key)
     );
     """)
     conn.commit()
@@ -13539,4 +13556,200 @@ def api_openclaw_dispatch():
         "output": reply,
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     })
+
+
+# ---------------------------------------------------------------------------
+# NEWS & ANNOUNCEMENTS — in-app feed + admin compose + RSS/Atom feed.
+# The admin posts articles (announcements, updates, tutorials, how-tos, tips)
+# once here; every user sees them in the dashboard News page, as a banner for
+# high-priority items, and can subscribe to /feed.xml in any RSS reader —
+# instead of emailing everyone.
+# ---------------------------------------------------------------------------
+_NEWS_CATEGORIES = ("announcement", "update", "tutorial", "how-to", "tip")
+
+def _news_user_key():
+    """Per-reader key from header (X-User-Key), query param (user_key), or body."""
+    k = (request.headers.get("X-User-Key") or request.args.get("user_key") or "").strip()
+    if not k:
+        try:
+            k = str((request.get_json(silent=True) or {}).get("user_key") or "").strip()
+        except Exception:
+            k = ""
+    return (k or "default")[:64]
+
+def _news_admin_ok():
+    """Admin write gate: require X-Api-Key matching the agent API_KEY when
+    API_KEY is configured (mirrors agent.py's global gate). When the agent is
+    running keyless (local LAN), writes are open like the rest of the API."""
+    agent_key = os.environ.get("API_KEY", "").strip()
+    if not agent_key:
+        return True
+    sent = request.headers.get("X-Api-Key", "")
+    try:
+        import hmac
+        return hmac.compare_digest(sent, agent_key)
+    except Exception:
+        return sent == agent_key
+
+def _news_row_to_dict(r, read_set=None):
+    d = dict(r)
+    if read_set is not None:
+        d["read"] = r["id"] in read_set
+    return d
+
+@agentic_bp.route("/api/agentic/news", methods=["GET", "POST", "OPTIONS"])
+def api_news():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    conn = _db()
+    if request.method == "POST":
+        if not _news_admin_ok():
+            conn.close()
+            return jsonify({"error": "Unauthorized", "message": "Valid X-Api-Key header required"}), 401
+        data = request.get_json() or {}
+        title = (data.get("title") or "").strip()
+        if not title:
+            conn.close()
+            return jsonify({"error": "title required"}), 400
+        nid = data.get("id")
+        category = (data.get("category") or "update").strip().lower()
+        if category not in _NEWS_CATEGORIES:
+            category = "update"
+        priority = (data.get("priority") or "normal").strip().lower()
+        if priority not in ("normal", "high"):
+            priority = "normal"
+        status = (data.get("status") or "published").strip().lower()
+        if status not in ("draft", "published"):
+            status = "published"
+        body = data.get("body") or ""
+        author = (data.get("author") or "Admin").strip()[:80]
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if nid:
+            try:
+                nid = int(nid)
+            except Exception:
+                conn.close()
+                return jsonify({"error": "bad id"}), 400
+            conn.execute(
+                "UPDATE news_posts SET title=?, category=?, priority=?, body=?, author=?, status=?, updated=?, "
+                "published_at=COALESCE(published_at, ?) WHERE id=?",
+                (title, category, priority, body, author, status, now, now if status == "published" else None, nid))
+        else:
+            cur = conn.execute(
+                "INSERT INTO news_posts (title, category, priority, body, author, status, created, updated, published_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (title, category, priority, body, author, status, now, now,
+                 now if status == "published" else None))
+            nid = cur.lastrowid
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok", "id": nid})
+
+    # GET — list posts newest first, with read state for this reader.
+    user_key = _news_user_key()
+    show_drafts = request.args.get("drafts") == "1" and _news_admin_ok()
+    rows = conn.execute(
+        "SELECT * FROM news_posts WHERE status='published' OR ? ORDER BY priority DESC, published_at DESC, id DESC",
+        (1 if show_drafts else 0,)).fetchall()
+    read_rows = conn.execute("SELECT post_id FROM news_reads WHERE user_key=?", (user_key,)).fetchall()
+    read_set = {r["post_id"] for r in read_rows}
+    conn.close()
+    return jsonify({"status": "ok", "posts": [_news_row_to_dict(r, read_set) for r in rows]})
+
+
+@agentic_bp.route("/api/agentic/news/unread", methods=["GET", "OPTIONS"])
+def api_news_unread():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    user_key = _news_user_key()
+    conn = _db()
+    total = conn.execute("SELECT COUNT(*) c FROM news_posts WHERE status='published'").fetchone()["c"]
+    read = conn.execute("SELECT COUNT(*) c FROM news_reads WHERE user_key=?", (user_key,)).fetchone()["c"]
+    conn.close()
+    return jsonify({"status": "ok", "unread": max(0, total - read)})
+
+
+@agentic_bp.route("/api/agentic/news/read", methods=["POST", "OPTIONS"])
+def api_news_read():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    user_key = _news_user_key()
+    conn = _db()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ids = data.get("ids") or []
+    if isinstance(ids, (int, str)):
+        ids = [ids]
+    n = 0
+    for pid in ids:
+        try:
+            conn.execute("INSERT OR REPLACE INTO news_reads (post_id, user_key, read_at) VALUES (?,?,?)",
+                         (int(pid), user_key, now))
+            n += 1
+        except Exception:
+            pass
+    if data.get("all"):
+        for row in conn.execute("SELECT id FROM news_posts WHERE status='published'").fetchall():
+            conn.execute("INSERT OR REPLACE INTO news_reads (post_id, user_key, read_at) VALUES (?,?,?)",
+                         (row["id"], user_key, now))
+        n = "all"
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok", "marked": n})
+
+
+@agentic_bp.route("/api/agentic/news/<int:nid>", methods=["DELETE", "OPTIONS"])
+def api_news_delete(nid):
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if not _news_admin_ok():
+        return jsonify({"error": "Unauthorized", "message": "Valid X-Api-Key header required"}), 401
+    conn = _db()
+    conn.execute("DELETE FROM news_posts WHERE id=?", (nid,))
+    conn.execute("DELETE FROM news_reads WHERE post_id=?", (nid,))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok", "deleted": nid})
+
+
+@agentic_bp.route("/feed.xml", methods=["GET", "OPTIONS"])
+def api_news_feed():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    conn = _db()
+    rows = conn.execute(
+        "SELECT * FROM news_posts WHERE status='published' ORDER BY published_at DESC, id DESC LIMIT 50").fetchall()
+    conn.close()
+    base = os.environ.get("PUBLIC_BASE_URL", "http://localhost:8086")
+    now = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S GMT")
+    items = []
+    for r in rows:
+        pub = r["published_at"] or r["created"] or ""
+        try:
+            pub_rfc = datetime.strptime(pub[:19], "%Y-%m-%d %H:%M:%S").strftime("%a, %d %b %Y %H:%M:%S GMT")
+        except Exception:
+            pub_rfc = now
+        link = f"{base}/#news-{r['id']}"
+        items.append(
+            "    <item>\n"
+            f"      <title>{_saxutils.escape(r['title'] or '')}</title>\n"
+            f"      <link>{link}</link>\n"
+            f"      <guid isPermaLink=\"false\">appvault-news-{r['id']}</guid>\n"
+            f"      <pubDate>{pub_rfc}</pubDate>\n"
+            f"      <category>{_saxutils.escape(r['category'] or 'update')}</category>\n"
+            f"      <description>{_saxutils.escape((r['body'] or '')[:500])}</description>\n"
+            "    </item>")
+    rss = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">\n'
+        '  <channel>\n'
+        f"    <title>AppVault — News &amp; Tips</title>\n"
+        f"    <link>{base}</link>\n"
+        f"    <description>Announcements, updates, tutorials and how-to guides for AppVault users.</description>\n"
+        f"    <atom:link href=\"{base}/feed.xml\" rel=\"self\" type=\"application/rss+xml\"/>\n"
+        f"    <lastBuildDate>{now}</lastBuildDate>\n"
+        + "\n".join(items) +
+        "\n  </channel>\n</rss>\n"
+    )
+    return Response(rss, mimetype="application/rss+xml")
 

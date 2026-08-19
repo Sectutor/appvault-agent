@@ -108,7 +108,7 @@ def add_cors_headers(response):
     if _origin_allowed(origin):
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Vary"] = "Origin"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Agent-Id, X-Api-Key"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Agent-Id, X-Api-Key, X-User-Key"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
     return response
 
@@ -117,7 +117,8 @@ def add_cors_headers(response):
 # apps without a pre-provisioned API key. Everything else (including install/
 # uninstall/restart/stop/exec/agentic) requires a valid X-Api-Key when API_KEY is set.
 PUBLIC_READ_PREFIXES = ("/api/catalog", "/api/health", "/api/info", "/api/agent/status", "/api/stats",
-                        "/api/apps/health", "/api/education/", "/api/icon/", "/api/ping/")
+                        "/api/apps/health", "/api/education/", "/api/icon/", "/api/ping/",
+                        "/api/agentic/news")
 
 @app.before_request
 def require_api_key():

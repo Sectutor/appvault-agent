@@ -1265,7 +1265,7 @@ table.data-table tbody tr:last-child td { border-bottom: none; }
         <div class="stat-row"><span class="msr">storage</span><span>Disk</span><span id="stat-disk">&ndash;</span></div>
         <div class="stat-bar"><div id="stat-disk-bar"></div></div>
         <div class="stat-row"><span class="msr">apps</span><span>Apps</span><span id="stat-apps">&ndash;</span></div>
-        <div id="appvault-build-stamp" style="margin-top:10px;padding:6px 8px;font-size:9.5px;color:#475569;border-top:1px solid rgba(51,65,85,0.4);text-align:center;cursor:default;" title="AppVault dashboard build">build 2026.08.19-h17</div>
+        <div id="appvault-build-stamp" style="margin-top:10px;padding:6px 8px;font-size:9.5px;color:#475569;border-top:1px solid rgba(51,65,85,0.4);text-align:center;cursor:default;" title="AppVault dashboard build">build 2026.08.19-h18</div>
       </div>
     </div>
     <div id="nav-backdrop" class="nav-backdrop" style="display:none;"></div>
@@ -1298,6 +1298,7 @@ var NAV_SECTIONS = [
     ]},
     { id: 'core', title: 'Core', items: [
       { id: 'agentic', route: 'agentic', label: 'Agentic OS', subtitle: 'Workstation & chat', icon: 'assistant', color: '#38bdf8' },
+      { id: 'news', route: 'news', label: 'News & Tips', subtitle: 'Announcements & tutorials', icon: 'campaign', color: '#fbbf24', badge: 'news' },
       { id: 'missions', route: 'missions', label: 'Missions', subtitle: 'Goals → plans → done', icon: 'rocket_launch', color: '#fb7185' },
       { id: 'identity', route: 'identity', label: 'Identity', subtitle: 'Profiles & souls', icon: 'person', color: '#a78bfa' },
       { id: 'goals', route: 'goals', label: 'Goals', subtitle: 'Objectives & tracking', icon: 'flag', color: 'var(--amber)' }
@@ -2010,6 +2011,9 @@ var NavSystem = (function(){
     });
     fetchJSON(API + '/api/agentic/work').then(function(d){
       if (d && d.items) setBadge('work', d.items.length > 0 ? String(d.items.length) : '');
+    });
+    fetchJSON(API + '/api/agentic/news/unread', { headers: newsHeaders() }).then(function(d){
+      if (d && typeof d.unread === 'number') setBadge('news', d.unread > 0 ? String(d.unread) : '');
     });
   }
   function pollHealth() {
@@ -3135,6 +3139,7 @@ function nav(page) {
   else if (page === 'deepseek-harness') { showAgentPage('deepseek-harness'); }
   else if (page === 'deerflow') { showAgentPage('deerflow'); }
   else if (page === 'missions') showMissionsPage();
+  else if (page === 'news') showNewsPage();
   else if (page === 'identity') showIdentityPage();
   else if (page === 'goals') showGoalsPage();
   else if (page === 'artifacts') showArtifactsPage();
@@ -10642,6 +10647,191 @@ function loadHelp() {
   });
 }
 
+// ── NEWS & ANNOUNCEMENTS — in-app feed + admin composer + RSS ──
+// The admin posts once here (dashboard or via the API); every user sees the
+// feed in the News page, high-priority posts as a banner, unread badges, and
+// can subscribe to the RSS feed (API + '/feed.xml') in any reader.
+var NEWS_CATEGORY_META = {
+  announcement: { label: '📣 Announcement', color: '#fb7185' },
+  update:       { label: '🔄 Update',       color: '#38bdf8' },
+  tutorial:     { label: '📚 Tutorial',     color: '#34d399' },
+  'how-to':     { label: '🛠 How-To',       color: '#fbbf24' },
+  tip:          { label: '💡 Tip',          color: '#a78bfa' }
+};
+var _newsPosts = [];
+var _newsFilter = 'all';
+function newsUserKey() {
+  try {
+    var k = localStorage.getItem('appvault_news_key');
+    if (!k) { k = 'user-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10); localStorage.setItem('appvault_news_key', k); }
+    return k;
+  } catch (e) { return 'default'; }
+}
+function newsHeaders() {
+  var h = Object.assign({ 'X-User-Key': newsUserKey() }, apiHeaders());
+  return h;
+}
+function newsMarkRead(ids, all) {
+  var body = {};
+  if (all) body.all = true;
+  else if (ids) body.ids = ids;
+  fetchJSON(API + '/api/agentic/news/read', { method: 'POST', headers: newsHeaders(), body: JSON.stringify(body) }).then(function(){
+    refreshNewsBadge();
+  });
+}
+function refreshNewsBadge() {
+  fetchJSON(API + '/api/agentic/news/unread', { headers: newsHeaders() }).then(function(d){
+    if (d && typeof d.unread === 'number') setBadge('news', d.unread > 0 ? String(d.unread) : '');
+  });
+}
+function showNewsPage() {
+  var c = $('content');
+  c.innerHTML = `
+    <div class="agentic-wrap" style="padding:18px 22px;">
+      <div class="agentic-subbar">
+        <div class="agentic-status-group">
+          <span class="agentic-badge-live" style="background:rgba(251,191,36,0.12);border-color:rgba(251,191,36,0.35);color:#fcd34d;">📢 News & Tips</span>
+          <span style="font-size:11px;color:#64748b;">Announcements, updates & tutorials from the admin</span>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <button class="agentic-btn" style="padding:6px 12px;font-size:11px;" onclick="newsMarkRead(null, true); loadNewsList();" title="Mark every post as read">✓ Mark all read</button>
+          <button class="agentic-btn" style="padding:6px 12px;font-size:11px;" onclick="window.open(API + '/feed.xml', '_blank')" title="Subscribe to the RSS feed in any reader">📡 RSS Feed</button>
+          <button class="agentic-btn primary" style="padding:6px 12px;font-size:11px;" onclick="newsComposer()" title="Publish a new post (admin)">＋ New Post</button>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px;">
+        ${Object.keys(NEWS_CATEGORY_META).map(function(k){
+          return '<button class="agentic-btn' + (_newsFilter === k ? ' active' : '') + '" style="font-size:11px;padding:5px 11px;" onclick="_newsFilter=\'' + k + '\';loadNewsList()">' + NEWS_CATEGORY_META[k].label + '</button>';
+        }).join('')}
+        <button class="agentic-btn' + (_newsFilter === 'all' ? ' active' : '') + '" style="font-size:11px;padding:5px 11px;" onclick="_newsFilter=\'all\';loadNewsList()">All</button>
+      </div>
+      <div id="news-list" style="display:flex;flex-direction:column;gap:12px;max-width:860px;">
+        <div class="loading">Loading news…</div>
+      </div>
+    </div>`;
+  loadNewsList();
+}
+function loadNewsList() {
+  var list = $('news-list');
+  fetchJSON(API + '/api/agentic/news', { headers: newsHeaders() }).then(function(d){
+    _newsPosts = (d && d.posts) || [];
+    if (!list) return;
+    var posts = _newsFilter === 'all' ? _newsPosts : _newsPosts.filter(function(p){ return p.category === _newsFilter; });
+    if (!posts.length) {
+      list.innerHTML = '<div style="font-size:12px;color:#94a3b8;padding:24px;text-align:center;">No posts yet — check back soon, or click "＋ New Post" to publish the first one.</div>';
+      return;
+    }
+    list.innerHTML = posts.map(function(p){
+      var meta = NEWS_CATEGORY_META[p.category] || NEWS_CATEGORY_META.update;
+      var unread = !p.read;
+      return `<div class="agentic-card" style="padding:14px 16px;border-color:${p.priority === 'high' ? 'rgba(251,191,36,0.5)' : 'var(--border)'};${unread ? 'background:rgba(56,189,248,0.05);' : ''}">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px;">
+          <span style="font-size:10.5px;font-weight:700;color:${meta.color};background:rgba(255,255,255,0.04);border:1px solid ${meta.color}44;padding:2px 8px;border-radius:999px;">${meta.label}</span>
+          ${p.priority === 'high' ? '<span style="font-size:10px;font-weight:700;color:#fbbf24;border:1px solid rgba(251,191,36,0.5);padding:1px 6px;border-radius:4px;">HIGH</span>' : ''}
+          ${unread ? '<span class="pulse-dot" style="width:8px;height:8px;"></span>' : ''}
+          <span style="margin-left:auto;font-size:10.5px;color:#64748b;">${escapeHtml(String(p.published_at || p.created || '').slice(0, 16))} · by ${escapeHtml(p.author || 'Admin')}</span>
+        </div>
+        <div style="font-size:15px;font-weight:700;color:#f8fafc;margin-bottom:8px;">${escapeHtml(p.title || '')}</div>
+        <div style="font-size:13px;line-height:1.6;color:#cbd5e1;white-space:pre-wrap;">${mdToHtml(p.body || '')}</div>
+        <div style="display:flex;gap:8px;margin-top:10px;">
+          <button class="agentic-btn-secondary" style="font-size:10.5px;padding:4px 10px;" onclick="newsMarkRead([${p.id}]); loadNewsList();">✓ Mark read</button>
+          <button class="agentic-btn-secondary" style="font-size:10.5px;padding:4px 10px;" onclick="newsComposer(${p.id})">✏️ Edit</button>
+          <button class="agentic-btn-secondary" style="font-size:10.5px;padding:4px 10px;color:#f87171;" onclick="newsDelete(${p.id})">🗑 Delete</button>
+        </div>
+      </div>`;
+    }).join('');
+  }).catch(function(){
+    if (list) list.innerHTML = '<div style="font-size:12px;color:#f87171;">Could not load news — is the agent API reachable?</div>';
+  });
+}
+function newsComposer(id) {
+  var existing = id ? (_newsPosts.find(function(p){ return p.id === id; }) || null) : null;
+  agenticPrompt(
+    '📢 ' + (existing ? 'Edit post' : 'New post'),
+    'Title',
+    existing ? existing.title : ''
+  ).then(function(title){
+    if (title == null || !String(title).trim()) return;
+    agenticPrompt(
+      'Category (announcement / update / tutorial / how-to / tip)',
+      'Category',
+      existing ? existing.category : 'update'
+    ).then(function(cat){
+      if (cat == null || !cat.trim()) return;
+      agenticPrompt(
+        'Priority (normal / high) — high shows as a banner + toast',
+        'Priority',
+        existing ? existing.priority : 'normal'
+      ).then(function(prio){
+        if (prio == null || !prio.trim()) return;
+        agenticPrompt(
+          'Body (markdown supported)',
+          'Body',
+          existing ? existing.body : ''
+        ).then(function(body){
+          if (body == null) return;
+          fetchJSON(API + '/api/agentic/news', {
+            method: 'POST',
+            headers: newsHeaders(),
+            body: JSON.stringify({
+              id: existing ? existing.id : null,
+              title: String(title).trim(),
+              category: String(cat).trim().toLowerCase(),
+              priority: String(prio).trim().toLowerCase(),
+              body: body,
+              status: 'published'
+            })
+          }).then(function(d){
+            if (d && d.status === 'ok') { toast('Post ' + (existing ? 'updated' : 'published'), 'green'); loadNewsList(); refreshNewsBadge(); }
+            else toast('Failed: ' + ((d && d.error) || 'unknown'), 'red');
+          });
+        });
+      });
+    });
+  });
+}
+function newsDelete(id) {
+  agenticConfirm('Delete this post?').then(function(ok){
+    if (!ok) return;
+    fetchJSON(API + '/api/agentic/news/' + id, { method: 'DELETE', headers: newsHeaders() }).then(function(d){
+      if (d && d.status === 'ok') { toast('Post deleted', 'green'); loadNewsList(); refreshNewsBadge(); }
+      else toast('Delete failed: ' + ((d && d.error) || 'unknown'), 'red');
+    });
+  });
+}
+function newsBanner() {
+  // High-priority unread posts → slim dismissible banner under the topbar.
+  fetchJSON(API + '/api/agentic/news', { headers: newsHeaders() }).then(function(d){
+    var posts = (d && d.posts) || [];
+    var hi = posts.filter(function(p){ return p.priority === 'high' && !p.read; });
+    if (!hi.length) return;
+    var dismissed = {};
+    try { dismissed = JSON.parse(localStorage.getItem('appvault_news_dismissed') || '{}'); } catch (e) {}
+    var p = hi[0];
+    if (dismissed['p' + p.id]) return;
+    var bar = document.createElement('div');
+    bar.id = 'news-banner';
+    bar.style.cssText = 'display:flex;align-items:center;gap:10px;padding:9px 16px;background:linear-gradient(90deg,rgba(251,191,36,0.16),rgba(251,191,36,0.05));border-bottom:1px solid rgba(251,191,36,0.35);font-size:12.5px;color:#fde68a;cursor:pointer;';
+    bar.innerHTML = '<span style="font-size:15px;">📣</span><span style="font-weight:700;">' + escapeHtml(p.title) + '</span>'
+      + '<span style="color:#fcd34d;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(String(p.body || '').replace(/[#*`>\-]/g, '').slice(0, 120)) + '</span>'
+      + '<button class="agentic-btn-secondary" style="font-size:10.5px;padding:3px 10px;flex:none;" onclick="event.stopPropagation();newsDismiss(this, ' + p.id + ')">Dismiss</button>';
+    bar.addEventListener('click', function(){ nav('news'); });
+    var topbar = document.querySelector('.topbar');
+    if (topbar && topbar.nextSibling) topbar.parentNode.insertBefore(bar, topbar.nextSibling);
+    else document.body.insertBefore(bar, document.body.firstChild);
+    toast('📣 ' + p.title, 'amber');
+  }).catch(function(){});
+}
+function newsDismiss(btn, id) {
+  var el = btn && btn.closest ? btn.closest('#news-banner') : null;
+  if (el) el.remove();
+  var dismissed = {};
+  try { dismissed = JSON.parse(localStorage.getItem('appvault_news_dismissed') || '{}'); } catch (e) {}
+  dismissed['p' + id] = true;
+  try { localStorage.setItem('appvault_news_dismissed', JSON.stringify(dismissed)); } catch (e) {}
+  newsMarkRead([id]);
+}
+
 // ── Content Pipeline page (signal → brief → draft → refine → approval → publish) ──
 var pipelineItems = [];
 var pipelineTab = 'queue';
@@ -12988,6 +13178,8 @@ document.querySelectorAll('.topbar .links a').forEach(function(a){
 
 // ── Start ──
 nav('agentic');
+// Show high-priority unread announcements as a banner (after the first paint).
+setTimeout(function(){ newsBanner(); }, 1200);
 
 // Extra guard: keep the screen on the current tab across the app's stop/restart.
 window.addEventListener('pageshow', function(ev){
