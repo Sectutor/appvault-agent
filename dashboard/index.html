@@ -1884,7 +1884,9 @@ document.addEventListener('DOMContentLoaded', function(){ NavSystem.init(); });
 
 </script>
 <script>
-var API = localStorage.getItem('appvault_api') || '';
+// API base: explicit override wins; else same-origin when served by the agent
+// (:8086/dashboard), else the local agent (served from :8090/nginx or file).
+var API = localStorage.getItem('appvault_api') || (window.location.port === '8086' ? '' : 'http://localhost:8086');
 function mediaUrl(u) {
   if (!u) return u;
   return (u.indexOf('http://') === 0 || u.indexOf('https://') === 0) ? u : API + u;
