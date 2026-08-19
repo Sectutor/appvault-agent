@@ -3398,6 +3398,39 @@ function agenticBackToChat() {
   nav(agent === 'hermes' ? 'agentic' : agent);
 }
 
+// Collapse / expand the right-hand Memory & Vault column.
+var _rightPanelClosed = false;
+function toggleRightPanel(force) {
+  var grid = $('agentic-grid');
+  var col = $('right-panel-col');
+  var reopen = $('right-panel-reopen');
+  if (!grid || !col) return;
+  var shouldClose = (typeof force === 'boolean') ? force : !_rightPanelClosed;
+  _rightPanelClosed = shouldClose;
+  if (shouldClose) {
+    grid.style.gridTemplateColumns = '270px 1fr';
+    col.style.display = 'none';
+    var ch = $('right-panel-chev');
+    if (ch) { ch.textContent = '▸'; ch.title = 'Show memory & vault'; }
+    if (reopen) reopen.style.display = '';
+    try { localStorage.setItem('appvault_right_panel', 'closed'); } catch (e) {}
+  } else {
+    grid.style.gridTemplateColumns = '270px 1fr 320px';
+    col.style.display = '';
+    var ch2 = $('right-panel-chev');
+    if (ch2) { ch2.textContent = '▸'; ch2.title = 'Hide memory & vault'; }
+    if (reopen) reopen.style.display = 'none';
+    try { localStorage.setItem('appvault_right_panel', 'open'); } catch (e) {}
+    if (typeof loadAgentMemory === 'function') loadAgentMemory();
+  }
+}
+// Restore the user's last panel state when the workspace mounts.
+function restoreRightPanelState() {
+  try {
+    if (localStorage.getItem('appvault_right_panel') === 'closed') toggleRightPanel(true);
+  } catch (e) {}
+}
+
 function showAgentPage(agentId) {
   agentId = (agentId || 'hermes').toLowerCase();
   currentAgentWorkspace = agentId;
@@ -3423,6 +3456,7 @@ function showAgentPage(agentId) {
         </div>
         <div style="display:flex;gap:8px;align-items:center;">
           <button class="agentic-btn" style="padding:6px 12px;font-size:11px;" onclick="previewRecentWork()">👁️ Live Preview</button>
+          <button class="agentic-btn-secondary" id="right-panel-reopen" style="display:none;padding:6px 10px;font-size:11px;" onclick="toggleRightPanel(false)" title="Show memory & vault panel">▸ Memory & Vault</button>
           <button class="agentic-icon-btn" style="font-size:15px;width:32px;height:32px;" onclick="agenticMoreMenu(this, agenticSubbarItems('${agentId}'))" title="More options" aria-label="More options">⋯</button>
         </div>
       </div>
@@ -3455,7 +3489,7 @@ function showAgentPage(agentId) {
       </div>
 
       <!-- DEDICATED AGENT WORKSPACE GRID (Left: Roster & Topics · Center: Active Agent · Right: Shared Memory) -->
-      <div class="agentic-grid" style="grid-template-columns: 270px 1fr 320px; gap: 14px;">
+      <div class="agentic-grid" id="agentic-grid" style="grid-template-columns: 270px 1fr 320px; gap: 14px;">
 
         <!-- COLUMN 1: AGENT ROSTER & THREAD TOPICS (LEFT PANEL) -->
         <div class="agentic-card" style="display:flex;flex-direction:column;min-height:620px;padding:0;background:rgba(15,23,42,0.92);">
@@ -3476,13 +3510,16 @@ function showAgentPage(agentId) {
         </div>
 
         <!-- COLUMN 3: UNIFIED SHARED MEMORY & LOGS -->
-        <div class="agentic-card" style="padding:0;overflow:hidden;">
+        <div class="agentic-card" id="right-panel-col" style="padding:0;overflow:hidden;">
           <div style="padding:10px 12px;display:flex;justify-content:space-between;align-items:center;gap:8px;border-bottom:1px solid rgba(51,65,85,0.4);flex-wrap:wrap;">
             <div class="agentic-seg">
               <button class="seg-btn active" id="tab-btn-mem" style="font-size:10.5px;padding:4px 10px;" onclick="switchRightPanelTab('mem')">🧠 Memory</button>
               <button class="seg-btn" id="tab-btn-vault" style="font-size:10.5px;padding:4px 10px;" onclick="switchRightPanelTab('vault')">📖 Vault</button>
             </div>
-            <span style="font-size:10px;color:#22c55e;display:flex;align-items:center;gap:4px;"><span style="width:6px;height:6px;border-radius:50%;background:#22c55e;display:inline-block;"></span>Sync active</span>
+            <span style="display:flex;align-items:center;gap:6px;">
+              <span style="font-size:10px;color:#22c55e;display:flex;align-items:center;gap:4px;"><span style="width:6px;height:6px;border-radius:50%;background:#22c55e;display:inline-block;"></span>Sync active</span>
+              <button class="agentic-icon-btn" id="right-panel-chev" style="width:26px;height:26px;font-size:12px;" onclick="toggleRightPanel()" title="Hide memory & vault" aria-label="Toggle memory panel">▸</button>
+            </span>
           </div>
 
           <div id="right-panel-mem-view">
@@ -3532,6 +3569,7 @@ function showAgentPage(agentId) {
   loadAgentWorkspace(agentId);
   loadAgenticStatus();
   loadAgentRoster();
+  restoreRightPanelState();
 }
 
 function showAgenticOS() {
