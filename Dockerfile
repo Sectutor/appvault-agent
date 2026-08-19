@@ -24,6 +24,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY agent.py heimdall_bridge.py cloud_sync.py mcp_gateway.py agentic_plane.py ./
 COPY static/ ./static/
 COPY templates/ ./templates/
+COPY dashboard/ ./static/dashboard/
 
 EXPOSE 8086 8087
 

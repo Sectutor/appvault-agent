@@ -3656,6 +3656,25 @@ def index():
     host = request.host.split(":")[0] if request.host else "localhost"
     return redirect(f"http://{host}:8085/", code=302)
 
+@app.route("/dashboard")
+@app.route("/dashboard/")
+def serve_dashboard():
+    """Serve the complete AppVault user dashboard (Apps, Agentic OS, Missions,
+    Memory, Crews, Pipeline, ...) from the agent itself — same origin as its
+    APIs, so the full menu works on every agent with no extra container."""
+    dash_dir = os.path.join(BASE_DIR, "static", "dashboard")
+    if os.path.exists(os.path.join(dash_dir, "index.html")):
+        return send_from_directory(dash_dir, "index.html")
+    host = request.host.split(":")[0] if request.host else "localhost"
+    return redirect(f"http://{host}:8085/", code=302)
+
+@app.route("/msr.woff2")
+def serve_dashboard_font():
+    dash_dir = os.path.join(BASE_DIR, "static", "dashboard")
+    if os.path.exists(os.path.join(dash_dir, "msr.woff2")):
+        return send_from_directory(dash_dir, "msr.woff2")
+    return "", 404
+
 @app.route("/custom.js")
 def serve_custom_js():
     """Serve custom.js for Heimdall injection."""

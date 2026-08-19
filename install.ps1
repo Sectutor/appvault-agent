@@ -443,7 +443,7 @@ try {
       -e WATCHTOWER_POLL_INTERVAL=3600 `
       -e WATCHTOWER_INCLUDE_STOPPED=false `
       -e DOCKER_API_VERSION=1.40 `
-      containrrr/watchtower:latest appvault-agent appvault-heimdall 2>$null | Out-Null
+      containrrr/watchtower:latest appvault-agent appvault-heimdall appvault-hermes-agent appvault-crewai-runner appvault-litellm appvault-memory-mcp 2>$null | Out-Null
     if ($LASTEXITCODE -eq 0) {
         Success "Auto-update enabled — checks hourly for new agent/store images"
     } else {
