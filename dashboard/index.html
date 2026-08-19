@@ -1265,7 +1265,7 @@ table.data-table tbody tr:last-child td { border-bottom: none; }
         <div class="stat-row"><span class="msr">storage</span><span>Disk</span><span id="stat-disk">&ndash;</span></div>
         <div class="stat-bar"><div id="stat-disk-bar"></div></div>
         <div class="stat-row"><span class="msr">apps</span><span>Apps</span><span id="stat-apps">&ndash;</span></div>
-        <div id="appvault-build-stamp" style="margin-top:10px;padding:6px 8px;font-size:9.5px;color:#475569;border-top:1px solid rgba(51,65,85,0.4);text-align:center;cursor:default;" title="AppVault dashboard build">build 2026.08.19-h12</div>
+        <div id="appvault-build-stamp" style="margin-top:10px;padding:6px 8px;font-size:9.5px;color:#475569;border-top:1px solid rgba(51,65,85,0.4);text-align:center;cursor:default;" title="AppVault dashboard build">build 2026.08.19-h13</div>
       </div>
     </div>
     <div id="nav-backdrop" class="nav-backdrop" style="display:none;"></div>
@@ -3127,7 +3127,7 @@ function nav(page) {
   var sb = $('sidebar');
   if (sb) sb.style.display = '';
   if (page !== 'home' && page !== 'store') { currentCat = 'all'; }
-  if (page === 'hermes' || page === 'agentic') { showAgentPage('hermes'); }
+  if (page === 'hermes' || page === 'agentic') { showHermesFull(); }
   else if (page === 'openclaw') { showAgentPage('openclaw'); }
   else if (page === 'buzz') { showAgentPage('buzz'); }
   else if (page === 'goose') { showAgentPage('goose'); }
@@ -3940,7 +3940,9 @@ function showAgentPage(agentId) {
 }
 
 function showAgenticOS() {
-  showAgentPage('hermes');
+  // Agentic OS is the Hermes agent workstation — open the full console
+  // (sessions + chat, tools, config, telemetry) instead of the old chat page.
+  showHermesFull();
 }
 
 var currentAgentWorkspace = 'hermes';
