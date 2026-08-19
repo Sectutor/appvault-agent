@@ -1265,7 +1265,7 @@ table.data-table tbody tr:last-child td { border-bottom: none; }
         <div class="stat-row"><span class="msr">storage</span><span>Disk</span><span id="stat-disk">&ndash;</span></div>
         <div class="stat-bar"><div id="stat-disk-bar"></div></div>
         <div class="stat-row"><span class="msr">apps</span><span>Apps</span><span id="stat-apps">&ndash;</span></div>
-        <div id="appvault-build-stamp" style="margin-top:10px;padding:6px 8px;font-size:9.5px;color:#475569;border-top:1px solid rgba(51,65,85,0.4);text-align:center;cursor:default;" title="AppVault dashboard build">build 2026.08.19-h18</div>
+        <div id="appvault-build-stamp" style="margin-top:10px;padding:6px 8px;font-size:9.5px;color:#475569;border-top:1px solid rgba(51,65,85,0.4);text-align:center;cursor:default;" title="AppVault dashboard build">build 2026.08.19-h19</div>
       </div>
     </div>
     <div id="nav-backdrop" class="nav-backdrop" style="display:none;"></div>
@@ -10552,6 +10552,9 @@ function showSettings() {
     + '<div class="row"><label>Key</label><span class="val"><input id="api-key-input" type="password" value="' + API_KEY + '" style="width:230px;padding:4px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg-hover);color:var(--text-primary);" placeholder="Paste your API key"></span></div>'
     + '<div class="row"><label></label><span class="val"><button class="btn btn-blue" onclick="saveApiKey()">Save Key</button></span></div>'
     + '</div>'
+    + '<div class="section"><h3>📢 News Manager <span style="font-size:10px;font-weight:400;color:#94a3b8;">— admin only: write announcements, updates, tutorials & tips. Users see them in News & Tips + RSS.</span></h3>'
+    + '<div id="news-manager"><div class="loading" style="padding:10px;">Loading…</div></div>'
+    + '</div>'
     + '<div class="section"><h3>🔑 License</h3>'
 + '<div class="row"><label>Key</label><span class="val"><input id="license-input" type="text" value="' + (licenseKey || '') + '" style="width:320px;padding:4px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg-hover);color:var(--text-primary);" placeholder="APPVAULT-XXXX-XXXX-XXXX-XXXX"></span></div>'
 + '<div class="row"><label></label><span class="val"><button class="btn btn-blue" onclick="saveLicenseKey()">Apply License</button> <span id="license-status"></span></span></div>'
@@ -10575,6 +10578,7 @@ function showSettings() {
     setTimeout(updateLicenseStatusUI, 50);
     setTimeout(loadCloudStatus, 100);
     setTimeout(loadSecStat, 200);
+    setTimeout(renderNewsManager, 300);
   });
 }
 
@@ -10696,7 +10700,6 @@ function showNewsPage() {
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
           <button class="agentic-btn" style="padding:6px 12px;font-size:11px;" onclick="newsMarkRead(null, true); loadNewsList();" title="Mark every post as read">✓ Mark all read</button>
           <button class="agentic-btn" style="padding:6px 12px;font-size:11px;" onclick="window.open(API + '/feed.xml', '_blank')" title="Subscribe to the RSS feed in any reader">📡 RSS Feed</button>
-          <button class="agentic-btn primary" style="padding:6px 12px;font-size:11px;" onclick="newsComposer()" title="Publish a new post (admin)">＋ New Post</button>
         </div>
       </div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px;">
@@ -10733,68 +10736,152 @@ function loadNewsList() {
         </div>
         <div style="font-size:15px;font-weight:700;color:#f8fafc;margin-bottom:8px;">${escapeHtml(p.title || '')}</div>
         <div style="font-size:13px;line-height:1.6;color:#cbd5e1;white-space:pre-wrap;">${mdToHtml(p.body || '')}</div>
-        <div style="display:flex;gap:8px;margin-top:10px;">
-          <button class="agentic-btn-secondary" style="font-size:10.5px;padding:4px 10px;" onclick="newsMarkRead([${p.id}]); loadNewsList();">✓ Mark read</button>
-          <button class="agentic-btn-secondary" style="font-size:10.5px;padding:4px 10px;" onclick="newsComposer(${p.id})">✏️ Edit</button>
-          <button class="agentic-btn-secondary" style="font-size:10.5px;padding:4px 10px;color:#f87171;" onclick="newsDelete(${p.id})">🗑 Delete</button>
-        </div>
+        ${unread ? '<div style="margin-top:10px;"><button class="agentic-btn-secondary" style="font-size:10.5px;padding:4px 10px;" onclick="newsMarkRead([' + p.id + ']); loadNewsList();">✓ Mark read</button></div>' : ''}
       </div>`;
     }).join('');
   }).catch(function(){
     if (list) list.innerHTML = '<div style="font-size:12px;color:#f87171;">Could not load news — is the agent API reachable?</div>';
   });
 }
-function newsComposer(id) {
-  var existing = id ? (_newsPosts.find(function(p){ return p.id === id; }) || null) : null;
-  agenticPrompt(
-    '📢 ' + (existing ? 'Edit post' : 'New post'),
-    'Title',
-    existing ? existing.title : ''
-  ).then(function(title){
-    if (title == null || !String(title).trim()) return;
-    agenticPrompt(
-      'Category (announcement / update / tutorial / how-to / tip)',
-      'Category',
-      existing ? existing.category : 'update'
-    ).then(function(cat){
-      if (cat == null || !cat.trim()) return;
-      agenticPrompt(
-        'Priority (normal / high) — high shows as a banner + toast',
-        'Priority',
-        existing ? existing.priority : 'normal'
-      ).then(function(prio){
-        if (prio == null || !prio.trim()) return;
-        agenticPrompt(
-          'Body (markdown supported)',
-          'Body',
-          existing ? existing.body : ''
-        ).then(function(body){
-          if (body == null) return;
-          fetchJSON(API + '/api/agentic/news', {
-            method: 'POST',
-            headers: newsHeaders(),
-            body: JSON.stringify({
-              id: existing ? existing.id : null,
-              title: String(title).trim(),
-              category: String(cat).trim().toLowerCase(),
-              priority: String(prio).trim().toLowerCase(),
-              body: body,
-              status: 'published'
-            })
-          }).then(function(d){
-            if (d && d.status === 'ok') { toast('Post ' + (existing ? 'updated' : 'published'), 'green'); loadNewsList(); refreshNewsBadge(); }
-            else toast('Failed: ' + ((d && d.error) || 'unknown'), 'red');
-          });
-        });
+// ── NEWS ADMIN (manager) — lives ONLY in Settings (admin area). Users never
+// see compose/edit/delete controls; the News page is read-only for them.
+var _newsEditId = null;
+function renderNewsManager() {
+  var box = $('news-manager');
+  if (!box) return;
+  box.innerHTML = `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:10px 0;">
+      <div>
+        <label style="font-size:11px;color:#94a3b8;">Title *</label>
+        <input id="nm-title" placeholder="Post title" style="width:100%;padding:8px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg-hover);color:var(--text-primary);font-size:12.5px;margin-top:3px;">
+      </div>
+      <div>
+        <label style="font-size:11px;color:#94a3b8;">Category</label>
+        <select id="nm-category" style="width:100%;padding:8px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg-hover);color:var(--text-primary);font-size:12.5px;margin-top:3px;">
+          <option value="announcement">📣 Announcement</option>
+          <option value="update">🔄 Update</option>
+          <option value="tutorial">📚 Tutorial</option>
+          <option value="how-to">🛠 How-To</option>
+          <option value="tip">💡 Tip</option>
+        </select>
+      </div>
+      <div>
+        <label style="font-size:11px;color:#94a3b8;">Priority</label>
+        <select id="nm-priority" style="width:100%;padding:8px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg-hover);color:var(--text-primary);font-size:12.5px;margin-top:3px;">
+          <option value="normal">Normal</option>
+          <option value="high">High (banner + toast)</option>
+        </select>
+      </div>
+      <div>
+        <label style="font-size:11px;color:#94a3b8;">Status</label>
+        <select id="nm-status" style="width:100%;padding:8px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg-hover);color:var(--text-primary);font-size:12.5px;margin-top:3px;">
+          <option value="published">Published (visible to users)</option>
+          <option value="draft">Draft (hidden)</option>
+        </select>
+      </div>
+      <div style="grid-column:1/-1;">
+        <label style="font-size:11px;color:#94a3b8;">Body (markdown supported)</label>
+        <textarea id="nm-body" rows="5" placeholder="Write the article, tutorial, or announcement…" style="width:100%;padding:8px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg-hover);color:var(--text-primary);font-size:12.5px;margin-top:3px;font-family:inherit;resize:vertical;"></textarea>
+      </div>
+      <div style="grid-column:1/-1;display:flex;gap:8px;align-items:center;">
+        <button class="agentic-btn primary" style="padding:7px 16px;font-size:12px;" onclick="newsManagerSave()">💾 Save Post</button>
+        <button class="agentic-btn-secondary" style="padding:7px 12px;font-size:11.5px;" onclick="newsManagerReset()">＋ New</button>
+        <span id="nm-status-msg" style="font-size:11px;color:#94a3b8;"></span>
+      </div>
+    </div>
+    <div style="margin-top:6px;font-size:11.5px;font-weight:700;color:#e2e8f0;">All posts (including drafts)</div>
+    <div id="nm-list" style="margin-top:6px;display:flex;flex-direction:column;gap:6px;"></div>`;
+  loadNewsManagerList();
+}
+function loadNewsManagerList() {
+  var list = $('nm-list');
+  if (!list) return;
+  fetchJSON(API + '/api/agentic/news?drafts=1', { headers: newsHeaders() }).then(function(d){
+    var posts = (d && d.posts) || [];
+    if (!posts.length) { list.innerHTML = '<div style="font-size:11.5px;color:#64748b;">No posts yet — write one above and click Save.</div>'; return; }
+    list.innerHTML = posts.map(function(p){
+      var meta = NEWS_CATEGORY_META[p.category] || NEWS_CATEGORY_META.update;
+      return `<div class="row" style="cursor:pointer;" onclick="newsManagerEdit(${p.id})">
+        <label style="color:${p.status === 'draft' ? '#94a3b8' : '#e2e8f0'};">${p.status === 'draft' ? '🕓 ' : ''}${escapeHtml(p.title || '')}</label>
+        <span class="val" style="font-size:10.5px;">
+          <span style="color:${meta.color};">${meta.label}</span>
+          ${p.priority === 'high' ? ' <span style="color:#fbbf24;">HIGH</span>' : ''}
+          <span style="color:#64748b;"> · ${escapeHtml(String(p.published_at || p.created || '').slice(0, 10))}</span>
+          <button class="agentic-btn-secondary" style="font-size:10px;padding:2px 8px;margin-left:8px;" onclick="event.stopPropagation();newsManagerEdit(${p.id})">✏️ Edit</button>
+          <button class="agentic-btn-secondary" style="font-size:10px;padding:2px 8px;color:#f87171;" onclick="event.stopPropagation();newsDelete(${p.id})">🗑 Delete</button>
+        </span>
+      </div>`;
+    }).join('');
+  });
+}
+function newsManagerEdit(id) {
+  fetchJSON(API + '/api/agentic/news', { headers: newsHeaders() }).then(function(d){
+    var posts = (d && d.posts) || [];
+    var p = posts.find(function(x){ return x.id === id; });
+    if (!p) { // drafts come via drafts=1
+      return fetchJSON(API + '/api/agentic/news?drafts=1', { headers: newsHeaders() }).then(function(d2){
+        var p2 = ((d2 && d2.posts) || []).find(function(x){ return x.id === id; });
+        if (p2) fillNewsForm(p2);
       });
-    });
+    }
+    fillNewsForm(p);
+  });
+}
+function fillNewsForm(p) {
+  _newsEditId = p.id;
+  var t = $('nm-title'), cat = $('nm-category'), prio = $('nm-priority'), st = $('nm-status'), body = $('nm-body');
+  if (t) t.value = p.title || '';
+  if (cat) cat.value = p.category || 'update';
+  if (prio) prio.value = p.priority || 'normal';
+  if (st) st.value = p.status || 'published';
+  if (body) body.value = p.body || '';
+  var msg = $('nm-status-msg');
+  if (msg) msg.textContent = 'Editing: ' + (p.title || p.id);
+}
+function newsManagerReset() {
+  _newsEditId = null;
+  ['nm-title','nm-body'].forEach(function(id){ var el = $(id); if (el) el.value = ''; });
+  ['nm-category','nm-priority','nm-status'].forEach(function(id){ var el = $(id); if (el) el.value = ''; });
+  var cat = $('nm-category'); if (cat) cat.value = 'update';
+  var prio = $('nm-priority'); if (prio) prio.value = 'normal';
+  var st = $('nm-status'); if (st) st.value = 'published';
+  var msg = $('nm-status-msg'); if (msg) msg.textContent = '';
+}
+function newsManagerSave() {
+  var title = ($('nm-title') || {}).value || '';
+  if (!title.trim()) { toast('Title is required', 'amber'); return; }
+  var body = ($('nm-body') || {}).value || '';
+  var category = ($('nm-category') || {}).value || 'update';
+  var priority = ($('nm-priority') || {}).value || 'normal';
+  var status = ($('nm-status') || {}).value || 'published';
+  var msg = $('nm-status-msg'); if (msg) msg.textContent = 'saving…';
+  fetchJSON(API + '/api/agentic/news', {
+    method: 'POST',
+    headers: newsHeaders(),
+    body: JSON.stringify({
+      id: _newsEditId,
+      title: title.trim(),
+      category: category,
+      priority: priority,
+      body: body,
+      status: status,
+      author: 'Admin'
+    })
+  }).then(function(d){
+    if (d && d.status === 'ok') {
+      toast('Post ' + (_newsEditId ? 'updated' : 'published'), 'green');
+      _newsEditId = null;
+      newsManagerReset();
+      loadNewsManagerList();
+      refreshNewsBadge();
+    } else toast('Save failed: ' + ((d && d.error) || 'unknown'), 'red');
   });
 }
 function newsDelete(id) {
-  agenticConfirm('Delete this post?').then(function(ok){
+  agenticConfirm('Delete this post? This cannot be undone.').then(function(ok){
     if (!ok) return;
     fetchJSON(API + '/api/agentic/news/' + id, { method: 'DELETE', headers: newsHeaders() }).then(function(d){
-      if (d && d.status === 'ok') { toast('Post deleted', 'green'); loadNewsList(); refreshNewsBadge(); }
+      if (d && d.status === 'ok') { toast('Post deleted', 'green'); if (_newsEditId === id) newsManagerReset(); loadNewsManagerList(); refreshNewsBadge(); }
       else toast('Delete failed: ' + ((d && d.error) || 'unknown'), 'red');
     });
   });
