@@ -1265,7 +1265,7 @@ table.data-table tbody tr:last-child td { border-bottom: none; }
         <div class="stat-row"><span class="msr">storage</span><span>Disk</span><span id="stat-disk">&ndash;</span></div>
         <div class="stat-bar"><div id="stat-disk-bar"></div></div>
         <div class="stat-row"><span class="msr">apps</span><span>Apps</span><span id="stat-apps">&ndash;</span></div>
-        <div id="appvault-build-stamp" style="margin-top:10px;padding:6px 8px;font-size:9.5px;color:#475569;border-top:1px solid rgba(51,65,85,0.4);text-align:center;cursor:default;" title="AppVault dashboard build">build 2026.08.19-h16</div>
+        <div id="appvault-build-stamp" style="margin-top:10px;padding:6px 8px;font-size:9.5px;color:#475569;border-top:1px solid rgba(51,65,85,0.4);text-align:center;cursor:default;" title="AppVault dashboard build">build 2026.08.19-h17</div>
       </div>
     </div>
     <div id="nav-backdrop" class="nav-backdrop" style="display:none;"></div>
@@ -3197,6 +3197,7 @@ function showHermesFull() {
         <div class="agentic-status-group">
           <span class="agentic-badge-live" style="background:rgba(34,211,238,0.12);border-color:rgba(34,211,238,0.35);color:#67e8f9;">● Hermes Agent — Original Console</span>
           <span id="hermes-console-status" style="font-size:11px;color:#64748b;">loading Hermes Agent…</span>
+          <span style="font-size:11px;color:#94a3b8;" title="Hermes Agent sign-in credentials">🔑 <code style="color:#cbd5e1;">hermes</code> / <code style="color:#cbd5e1;">appvault-hermes-2026</code></span>
         </div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
           <button class="agentic-btn" style="padding:6px 12px;font-size:11px;" onclick="window.open(HERMES_URL, '_blank')" title="Open Hermes Agent in a new tab">↗ New Tab</button>
@@ -10631,7 +10632,9 @@ function loadHelp() {
     if (!body) return;
     var sub = $('help-sub');
     if (sub && d && d.updated) sub.textContent = 'The whole system in plain English. Updated ' + d.updated + ' — source in your vault: GRC-Brain/AGENTIC_OS_HELP.md';
-    body.innerHTML = mdToHtml((d && d.markdown) || '# Help unavailable');
+    body.innerHTML = '<div style="margin-bottom:16px;padding:12px 14px;border:1px solid rgba(34,211,238,0.35);border-radius:10px;background:rgba(34,211,238,0.06);font-size:12.5px;color:#cbd5e1;line-height:1.6;">'
+      + '<strong style="color:#67e8f9;">🔑 Agent console sign-in</strong> — Hermes Agent (original console): user <code style="background:#0f172a;border-radius:4px;padding:1px 5px;color:#7dd3fc;">hermes</code> / password <code style="background:#0f172a;border-radius:4px;padding:1px 5px;color:#7dd3fc;">appvault-hermes-2026</code>. Sign in once inside the console; the session persists.</div>'
+      + mdToHtml((d && d.markdown) || '# Help unavailable');
     body.scrollTop = 0;
   }).catch(function(){
     var body = $('help-body');
