@@ -1265,7 +1265,7 @@ table.data-table tbody tr:last-child td { border-bottom: none; }
         <div class="stat-row"><span class="msr">storage</span><span>Disk</span><span id="stat-disk">&ndash;</span></div>
         <div class="stat-bar"><div id="stat-disk-bar"></div></div>
         <div class="stat-row"><span class="msr">apps</span><span>Apps</span><span id="stat-apps">&ndash;</span></div>
-        <div id="appvault-build-stamp" style="margin-top:10px;padding:6px 8px;font-size:9.5px;color:#475569;border-top:1px solid rgba(51,65,85,0.4);text-align:center;cursor:default;" title="AppVault dashboard build">build 2026.08.19-h9</div>
+        <div id="appvault-build-stamp" style="margin-top:10px;padding:6px 8px;font-size:9.5px;color:#475569;border-top:1px solid rgba(51,65,85,0.4);text-align:center;cursor:default;" title="AppVault dashboard build">build 2026.08.19-h10</div>
       </div>
     </div>
     <div id="nav-backdrop" class="nav-backdrop" style="display:none;"></div>
@@ -3420,6 +3420,220 @@ function hermesTelemetryTab(body) {
     el.innerHTML = rows;
   });
 }
+
+
+// ── DEEPSEEK HARNESS (dsh) — full console via the real harness web app ──
+// The DeepSeek Harness GUI (agents, sessions, tools, config, goals,
+// workflows) is served by `dsh web` on the host at :3080. The SPA uses
+// absolute asset paths (/plugins/..., /api/...), so a subpath proxy breaks
+// it — we embed the harness at its own origin in an iframe instead (the
+// harness sends no X-Frame-Options/CSP, so embedding is safe).
+var _dshFullTab = 'gui';
+var DSH_URL = (function(){
+  try { return localStorage.getItem('appvault_dsh_url') || 'http://localhost:3080/'; } catch (e) { return 'http://localhost:3080/'; }
+})();
+function showDshFull() {
+  _dshFullTab = 'gui';
+  var c = $('content');
+  c.innerHTML = `
+    <div class="agentic-wrap" style="padding:16px;">
+      <div class="agentic-subbar">
+        <div class="agentic-status-group">
+          <span class="agentic-badge-live" style="background:rgba(56,189,248,0.12);border-color:rgba(56,189,248,0.35);color:#7dd3fc;">● DeepSeek Harness — Full Console</span>
+          <span id="dsh-console-status" style="font-size:11px;color:#64748b;">loading harness…</span>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <button class="agentic-btn" style="padding:6px 12px;font-size:11px;" onclick="dshOpenExternal()" title="Open the harness in a new tab">↗ New Tab</button>
+          <button class="agentic-btn-secondary" style="font-size:11px;padding:6px 10px;" onclick="nav('agentic')">← Back to Agentic OS</button>
+        </div>
+      </div>
+      <div id="dsh-console-frame" style="flex:1;min-height:calc(100vh - 130px);background:#0b0f19;border:1px solid rgba(51,65,85,0.5);border-radius:12px;overflow:hidden;position:relative;">
+        <div id="dsh-loading" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#0b0f19;z-index:1;overflow:auto;padding:24px;">
+          <div style="text-align:center;max-width:440px;">
+            <div class="skeleton" style="width:140px;height:12px;border-radius:6px;margin:0 auto 18px;"></div>
+            <div style="font-size:14px;color:#e2e8f0;font-weight:600;margin-bottom:6px;">Connecting to DeepSeek Harness…</div>
+            <div style="font-size:12px;color:#94a3b8;line-height:1.6;" id="dsh-loading-msg">Loading the DeepSeek Harness console at ${escapeHtml(DSH_URL)}…</div>
+          </div>
+        </div>
+        <iframe id="dsh-iframe" src="${escapeHtml(DSH_URL)}" style="width:100%;height:100%;min-height:calc(100vh - 140px);border:none;display:block;" title="DeepSeek Harness console" allow="clipboard-read; clipboard-write" onload="dshFrameLoaded()"></iframe>
+      </div>
+    </div>`;
+  dshProbeStatus();
+}
+function dshFrameLoaded() {
+  var ld = $('dsh-loading');
+  if (ld) { ld.style.display = 'none'; }
+}
+function dshOpenExternal() {
+  window.open(DSH_URL, '_blank');
+}
+function dshProbeStatus() {
+  var el = $('dsh-console-status');
+  if (el) el.textContent = '● online — ' + DSH_URL;
+  // Verify the harness is actually reachable from the browser.
+  var img = new Image();
+  img.onload = function(){ if (el) el.textContent = '● online — ' + DSH_URL; };
+  img.onerror = function(){ if (el) el.textContent = '○ harness unreachable at ' + DSH_URL + ' — start it with `dsh web`'; };
+  img.src = DSH_URL + 'favicon.svg';
+}
+
+
+
+// ── OPENCLAW — full console via the real OpenClaw Studio web UI ──
+// Mirrors the DeepSeek Harness integration: embed the real OpenClaw Studio UI
+// (gateway web app on :18789) at its own origin. OpenClaw is a separate
+// project (ghcr.io/openclaw/openclaw); the console shows a clear hint when
+// the gateway isn't running yet.
+var OPENCLAW_URL = (function(){
+  // Same-origin proxy through the dashboard nginx (/openclaw/ -> :18789 with
+  // frame headers stripped) so the Studio UI renders inside the console. The
+  // proxy lives on :8090; when this page is served from :8086 we still target
+  // :8090 so the iframe loads. Direct gateway origin is used for "New Tab".
+  try {
+    return localStorage.getItem('appvault_openclaw_url') ||
+           (_dashOrigin + '/openclaw/');
+  } catch (e) { return _dashOrigin + '/openclaw/'; }
+})();
+var OPENCLAW_EXTERNAL_URL = (function(){
+  try { return localStorage.getItem('appvault_openclaw_external_url') || 'http://localhost:18789/'; } catch (e) { return 'http://localhost:18789/'; }
+})();
+var OPENCLAW_TOKEN = (function(){
+  try { return localStorage.getItem('appvault_openclaw_token') || 'appvault-local'; } catch (e) { return 'appvault-local'; }
+})();
+var OPENCLAW_WS_URL = (function(){
+  try { return localStorage.getItem('appvault_openclaw_ws_url') || 'ws://127.0.0.1:18789'; } catch (e) { return 'ws://127.0.0.1:18789'; }
+})();
+// Studio iframe src: the OpenClaw Control app auto-connects from URL params
+// (?gatewayUrl=...&token=...), so the user never sees the login gate.
+function openclawFrameSrc() {
+  return OPENCLAW_URL + '?gatewayUrl=' + encodeURIComponent(OPENCLAW_WS_URL) + '&token=' + encodeURIComponent(OPENCLAW_TOKEN);
+}
+function showOpenclawFull() {
+  var c = $('content');
+  c.innerHTML = `
+    <div class="agentic-wrap" style="padding:16px;">
+      <div class="agentic-subbar">
+        <div class="agentic-status-group">
+          <span class="agentic-badge-live" style="background:rgba(56,189,248,0.12);border-color:rgba(56,189,248,0.35);color:#7dd3fc;">● OpenClaw — Full Console</span>
+          <span id="openclaw-console-status" style="font-size:11px;color:#64748b;">loading studio…</span>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <button class="agentic-btn" style="padding:6px 12px;font-size:11px;" onclick="openclawOpenExternal()" title="Open OpenClaw Studio in a new tab">↗ New Tab</button>
+          <button class="agentic-btn-secondary" style="font-size:11px;padding:6px 10px;" onclick="nav('agentic')">← Back to Agentic OS</button>
+        </div>
+      </div>
+      <div id="openclaw-console-frame" style="flex:1;min-height:calc(100vh - 130px);background:#0b0f19;border:1px solid rgba(51,65,85,0.5);border-radius:12px;overflow:hidden;position:relative;">
+        <div id="openclaw-loading" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#0b0f19;z-index:1;overflow:auto;padding:24px;">
+          <div style="text-align:center;max-width:440px;">
+            <div class="skeleton" style="width:140px;height:12px;border-radius:6px;margin:0 auto 18px;"></div>
+            <div style="font-size:14px;color:#e2e8f0;font-weight:600;margin-bottom:6px;">Starting OpenClaw Studio…</div>
+            <div style="font-size:12px;color:#94a3b8;line-height:1.6;" id="openclaw-loading-msg">Connecting to OpenClaw Studio…</div>
+            <div id="openclaw-offline" style="display:none;margin-top:18px;background:rgba(15,23,42,0.85);border:1px solid rgba(51,65,85,0.6);border-radius:12px;padding:18px 20px;text-align:left;">
+              <div style="font-size:13px;font-weight:600;color:#f1f5f9;margin-bottom:6px;">OpenClaw isn't running yet</div>
+              <div style="font-size:12px;color:#94a3b8;line-height:1.6;margin-bottom:14px;">OpenClaw is a separate assistant that runs on your machine. AppVault can start it for you — it takes a minute on first run.</div>
+              <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;">
+                <button class="agentic-btn" id="openclaw-start-btn" style="padding:8px 18px;font-size:12px;" onclick="openclawStart()">▶ Start OpenClaw</button>
+                <a class="agentic-btn-secondary" href="https://docs.openclaw.ai" target="_blank" style="padding:8px 14px;font-size:11.5px;text-decoration:none;">Learn more</a>
+              </div>
+              <div id="openclaw-start-msg" style="font-size:11px;color:#64748b;margin-top:10px;"></div>
+            </div>
+          </div>
+        </div>
+        <iframe id="openclaw-iframe" src="${openclawFrameSrc()}" style="width:100%;height:100%;min-height:calc(100vh - 140px);border:none;display:block;" title="OpenClaw Studio console" allow="clipboard-read; clipboard-write" onload="openclawFrameLoaded()"></iframe>
+      </div>
+    </div>`;
+  openclawProbeStatus();
+}
+function openclawFrameLoaded() {
+  var ld = $('openclaw-loading');
+  if (ld) { ld.style.display = 'none'; }
+}
+function openclawOpenExternal() {
+  window.open(OPENCLAW_EXTERNAL_URL, '_blank');
+}
+function openclawProbeStatus() {
+  var el = $('openclaw-console-status');
+  var offline = $('openclaw-offline');
+  // Probe through the agent API (same-origin) — the agent container can reach
+  // the gateway, and this avoids browser CORS against :18789.
+  fetchJSON(API + '/api/agentic/openclaw/status').then(function(d){
+    if (d && d.online) {
+      if (el) el.textContent = '● online — ' + OPENCLAW_EXTERNAL_URL;
+      var ld = $('openclaw-loading'); if (ld) ld.style.display = 'none';
+    } else {
+      openclawShowOffline();
+    }
+  }).catch(function(){
+    openclawShowOffline();
+  });
+  function openclawShowOffline() {
+    if (el) el.textContent = '○ OpenClaw is not running';
+    var ld = $('openclaw-loading');
+    if (ld) { var msg = $('openclaw-loading-msg'); if (msg) msg.textContent = 'OpenClaw Studio could not be reached.'; }
+    if (offline) offline.style.display = 'block';
+  }
+}
+var _openclawStarting = false;
+var _openclawPollTimer = null;
+function openclawStart() {
+  if (_openclawStarting) return;
+  _openclawStarting = true;
+  var btn = $('openclaw-start-btn');
+  var msg = $('openclaw-start-msg');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Starting…'; }
+  if (msg) msg.textContent = 'Starting the OpenClaw gateway — this can take a minute on first run…';
+  fetchJSON(API + '/api/agentic/openclaw/start', { method: 'POST' }).then(function(d){
+    if (d && (d.status === 'ok' || d.gateway_status === 'online')) {
+      if (msg) msg.textContent = 'OpenClaw is running — loading the console…';
+      setTimeout(function(){ openclawReloadConsole(); _openclawStarting = false; }, 1200);
+    } else if (d && d.error) {
+      if (msg) msg.textContent = 'Could not start OpenClaw: ' + d.error + ' — see Learn more for manual setup.';
+      if (btn) { btn.disabled = false; btn.textContent = '▶ Try again'; }
+      _openclawStarting = false;
+    } else {
+      // "starting" — poll until the gateway answers.
+      openclawPollUntilUp();
+    }
+  }).catch(function(err){
+    if (msg) msg.textContent = 'Could not start OpenClaw: ' + err;
+    if (btn) { btn.disabled = false; btn.textContent = '▶ Try again'; }
+    _openclawStarting = false;
+  });
+}
+function openclawPollUntilUp() {
+  var tries = 0;
+  var msg = $('openclaw-start-msg');
+  if (_openclawPollTimer) clearInterval(_openclawPollTimer);
+  _openclawPollTimer = setInterval(function(){
+    tries++;
+    fetchJSON(API + '/api/agentic/openclaw/status').then(function(d){
+      if (d && d.online) {
+        clearInterval(_openclawPollTimer);
+        if (msg) msg.textContent = 'OpenClaw is running — loading the console…';
+        setTimeout(function(){ openclawReloadConsole(); _openclawStarting = false; }, 1000);
+      } else if (tries >= 40) { // ~2 minutes
+        clearInterval(_openclawPollTimer);
+        if (msg) msg.textContent = 'OpenClaw is taking longer than usual to start. It may still be pulling the image — check back in a moment.';
+        var btn = $('openclaw-start-btn');
+        if (btn) { btn.disabled = false; btn.textContent = '▶ Try again'; }
+        _openclawStarting = false;
+      }
+    }).catch(function(){
+      if (tries >= 40) {
+        clearInterval(_openclawPollTimer);
+        var btn = $('openclaw-start-btn');
+        if (btn) { btn.disabled = false; btn.textContent = '▶ Try again'; }
+        _openclawStarting = false;
+      }
+    });
+  }, 3000);
+}
+function openclawReloadConsole() {
+  var ifr = $('openclaw-iframe');
+  if (ifr) ifr.src = openclawFrameSrc();
+  openclawProbeStatus();
+}
+
 
 
 // ── Agentic OS UI helpers (overflow ⋯ menu, segmented subtabs) ──
