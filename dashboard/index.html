@@ -1265,7 +1265,7 @@ table.data-table tbody tr:last-child td { border-bottom: none; }
         <div class="stat-row"><span class="msr">storage</span><span>Disk</span><span id="stat-disk">&ndash;</span></div>
         <div class="stat-bar"><div id="stat-disk-bar"></div></div>
         <div class="stat-row"><span class="msr">apps</span><span>Apps</span><span id="stat-apps">&ndash;</span></div>
-        <div id="appvault-build-stamp" style="margin-top:10px;padding:6px 8px;font-size:9.5px;color:#475569;border-top:1px solid rgba(51,65,85,0.4);text-align:center;cursor:default;" title="AppVault dashboard build">build 2026.08.19-h10</div>
+        <div id="appvault-build-stamp" style="margin-top:10px;padding:6px 8px;font-size:9.5px;color:#475569;border-top:1px solid rgba(51,65,85,0.4);text-align:center;cursor:default;" title="AppVault dashboard build">build 2026.08.19-h11</div>
       </div>
     </div>
     <div id="nav-backdrop" class="nav-backdrop" style="display:none;"></div>
@@ -1290,10 +1290,14 @@ var NAV_SECTIONS = [
   { id: 'launch', showTitle: false, items: [
     { id: 'home', route: 'home', label: 'Apps', subtitle: 'Installed & desktop apps', icon: 'grid_view', color: '#38bdf8' }
   ]},
-  { id: 'workstation', title: 'Workstation', defaultPinned: true, groups: [
+  { id: 'workstation', title: 'Agentic OS', defaultPinned: true, groups: [
+    { id: 'agents', title: 'Agents', items: [
+      { id: 'hermes-full', route: 'hermes-full', label: 'Hermes Agent', subtitle: 'Full Hermes console', icon: 'terminal', color: '#22d3ee' },
+      { id: 'dsh-full', route: 'dsh-full', label: 'DeepSeek Harness', subtitle: 'Full DSH console & agents', icon: 'memory', color: '#38bdf8' },
+      { id: 'openclaw-full', route: 'openclaw-full', label: 'OpenClaw', subtitle: 'OpenClaw Studio console', icon: 'hub', color: '#38bdf8' }
+    ]},
     { id: 'core', title: 'Core', items: [
       { id: 'agentic', route: 'agentic', label: 'Agentic OS', subtitle: 'Workstation & chat', icon: 'assistant', color: '#38bdf8' },
-      { id: 'hermes-full', route: 'hermes-full', label: 'Hermes', subtitle: 'Full Hermes console & agents', icon: 'terminal', color: '#22d3ee' },
       { id: 'missions', route: 'missions', label: 'Missions', subtitle: 'Goals → plans → done', icon: 'rocket_launch', color: '#fb7185' },
       { id: 'identity', route: 'identity', label: 'Identity', subtitle: 'Profiles & souls', icon: 'person', color: '#a78bfa' },
       { id: 'goals', route: 'goals', label: 'Goals', subtitle: 'Objectives & tracking', icon: 'flag', color: 'var(--amber)' }
@@ -1305,9 +1309,7 @@ var NAV_SECTIONS = [
     ]}
   ]},
   { id: 'automation', title: 'Automation', defaultPinned: true, items: [
-    { id: 'n8n', route: 'n8n', label: 'n8n Automation', subtitle: 'Workflows & triggers', icon: 'bolt', color: '#ff6d5a' },
-    { id: 'openclaw-full', route: 'openclaw-full', label: 'OpenClaw', subtitle: 'OpenClaw Studio console', icon: 'hub', color: '#38bdf8' },
-    { id: 'dsh-full', route: 'dsh-full', label: 'DeepSeek Harness', subtitle: 'Full DSH console & agents', icon: 'memory', color: '#38bdf8' }
+    { id: 'n8n', route: 'n8n', label: 'n8n Automation', subtitle: 'Workflows & triggers', icon: 'bolt', color: '#ff6d5a' }
   ]},
   { id: 'pipeline', title: 'Pipeline', items: [
     { id: 'crews', route: 'crews', label: 'Crews', subtitle: 'Agent teams', icon: 'groups', color: '#fb923c' },
