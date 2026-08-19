@@ -3306,8 +3306,28 @@ function dshProbeStatus() {
 // project (ghcr.io/openclaw/openclaw); the console shows a clear hint when
 // the gateway isn't running yet.
 var OPENCLAW_URL = (function(){
-  try { return localStorage.getItem('appvault_openclaw_url') || 'http://localhost:18789/'; } catch (e) { return 'http://localhost:18789/'; }
+  // Same-origin proxy through the dashboard nginx (/openclaw/ -> :18789 with
+  // frame headers stripped) so the Studio UI renders inside the console. The
+  // direct gateway origin is used for "New Tab".
+  try {
+    return localStorage.getItem('appvault_openclaw_url') ||
+           (location.origin + '/openclaw/');
+  } catch (e) { return '/openclaw/'; }
 })();
+var OPENCLAW_EXTERNAL_URL = (function(){
+  try { return localStorage.getItem('appvault_openclaw_external_url') || 'http://localhost:18789/'; } catch (e) { return 'http://localhost:18789/'; }
+})();
+var OPENCLAW_TOKEN = (function(){
+  try { return localStorage.getItem('appvault_openclaw_token') || 'appvault-local'; } catch (e) { return 'appvault-local'; }
+})();
+var OPENCLAW_WS_URL = (function(){
+  try { return localStorage.getItem('appvault_openclaw_ws_url') || 'ws://127.0.0.1:18789'; } catch (e) { return 'ws://127.0.0.1:18789'; }
+})();
+// Studio iframe src: the OpenClaw Control app auto-connects from URL params
+// (?gatewayUrl=...&token=...), so the user never sees the login gate.
+function openclawFrameSrc() {
+  return OPENCLAW_URL + '?gatewayUrl=' + encodeURIComponent(OPENCLAW_WS_URL) + '&token=' + encodeURIComponent(OPENCLAW_TOKEN);
+}
 function showOpenclawFull() {
   var c = $('content');
   c.innerHTML = `
@@ -3339,7 +3359,7 @@ function showOpenclawFull() {
             </div>
           </div>
         </div>
-        <iframe id="openclaw-iframe" src="${escapeHtml(OPENCLAW_URL)}" style="width:100%;height:100%;min-height:calc(100vh - 140px);border:none;display:block;" title="OpenClaw Studio console" allow="clipboard-read; clipboard-write" onload="openclawFrameLoaded()"></iframe>
+        <iframe id="openclaw-iframe" src="${openclawFrameSrc()}" style="width:100%;height:100%;min-height:calc(100vh - 140px);border:none;display:block;" title="OpenClaw Studio console" allow="clipboard-read; clipboard-write" onload="openclawFrameLoaded()"></iframe>
       </div>
     </div>`;
   openclawProbeStatus();
@@ -3349,7 +3369,7 @@ function openclawFrameLoaded() {
   if (ld) { ld.style.display = 'none'; }
 }
 function openclawOpenExternal() {
-  window.open(OPENCLAW_URL, '_blank');
+  window.open(OPENCLAW_EXTERNAL_URL, '_blank');
 }
 function openclawProbeStatus() {
   var el = $('openclaw-console-status');
@@ -3358,7 +3378,7 @@ function openclawProbeStatus() {
   // the gateway, and this avoids browser CORS against :18789.
   fetchJSON(API + '/api/agentic/openclaw/status').then(function(d){
     if (d && d.online) {
-      if (el) el.textContent = '● online — ' + OPENCLAW_URL;
+      if (el) el.textContent = '● online — ' + OPENCLAW_EXTERNAL_URL;
       var ld = $('openclaw-loading'); if (ld) ld.style.display = 'none';
     } else {
       openclawShowOffline();
@@ -3430,7 +3450,7 @@ function openclawPollUntilUp() {
 }
 function openclawReloadConsole() {
   var ifr = $('openclaw-iframe');
-  if (ifr) ifr.src = OPENCLAW_URL;
+  if (ifr) ifr.src = openclawFrameSrc();
   openclawProbeStatus();
 }
 
