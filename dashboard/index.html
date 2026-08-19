@@ -4011,6 +4011,7 @@ function loadAgentWorkspace(agentId, threadId) {
           <select id="agent-session-select" onchange="switchAgentSession('hermes', this.value)" style="background:rgba(30,41,59,0.9);border:1px solid rgba(71,85,105,0.55);color:#fff;font-size:11px;border-radius:8px;padding:5px 8px;max-width:150px;">
             <option value="session-default">Default Session</option>
           </select>
+          <button class="agentic-btn" style="padding:5px 10px;font-size:11px;" onclick="nav('hermes-full')" title="Open the full Hermes console">🛠 Full Hermes</button>
           <button class="agentic-btn" style="padding:5px 10px;font-size:11px;" onclick="createNewAgentSession('hermes')" title="Create a new chat / topic">New Topic</button>
           <button class="agentic-icon-btn" style="font-size:14px;width:30px;height:30px;" onclick="agenticMoreMenu(this, agenticTopicItems('hermes'))" title="Topic options" aria-label="Topic options">⋯</button>
         </div>
@@ -5532,6 +5533,11 @@ function loadAgentRoster() {
           } else if (ag.id === 'openclaw') {
             actionBtn = `<button class="agent-row-action primary" onclick="nav('openclaw-full')">Open</button>
             <button class="agent-row-action" onclick="openAgentSession('openclaw')">Chat</button>`;
+          } else if (ag.id === 'hermes') {
+            // Hermes gets the full-console treatment like DeepSeek Harness:
+            // Open goes straight to the full console; Chat opens the workspace.
+            actionBtn = `<button class="agent-row-action primary" onclick="nav('hermes-full')">Open</button>
+            <button class="agent-row-action" onclick="openAgentSession('hermes')">Chat</button>`;
           } else if (ag.id === 'openwebui' || ag.id === 'ollama') {
             actionBtn = `<button class="agent-row-action" onclick="nav('store')">Install</button>`;
           } else if (ag.id === 'deerflow') {
