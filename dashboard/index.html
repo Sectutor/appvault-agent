@@ -1265,7 +1265,7 @@ table.data-table tbody tr:last-child td { border-bottom: none; }
         <div class="stat-row"><span class="msr">storage</span><span>Disk</span><span id="stat-disk">&ndash;</span></div>
         <div class="stat-bar"><div id="stat-disk-bar"></div></div>
         <div class="stat-row"><span class="msr">apps</span><span>Apps</span><span id="stat-apps">&ndash;</span></div>
-        <div id="appvault-build-stamp" style="margin-top:10px;padding:6px 8px;font-size:9.5px;color:#475569;border-top:1px solid rgba(51,65,85,0.4);text-align:center;cursor:default;" title="AppVault dashboard build">build 2026.08.19-h8</div>
+        <div id="appvault-build-stamp" style="margin-top:10px;padding:6px 8px;font-size:9.5px;color:#475569;border-top:1px solid rgba(51,65,85,0.4);text-align:center;cursor:default;" title="AppVault dashboard build">build 2026.08.19-h9</div>
       </div>
     </div>
     <div id="nav-backdrop" class="nav-backdrop" style="display:none;"></div>
@@ -3061,10 +3061,8 @@ function liveUrl(port, path, url) {
 }
 
 function launch(port, path, name, url, launch_url) {
-  // Agentic OS apps open their control plane INSIDE the store — the Hermes
-  // card launches the Agentic OS page (full workstation chat, hub-routed),
-  // not the bare API port (which has no UI).
-  if (name === 'hermes-agent' || name === 'Hermes Agent') { nav('agentic'); return; }
+  // The Hermes card opens the full Hermes console (not the bare API port).
+  if (name === 'hermes-agent' || name === 'Hermes Agent') { nav('hermes-full'); return; }
   var u = liveUrl(port, path, url);
   if (u) { window.open(u, '_blank'); }
   // First app launch: guide REMOTE installs to a secure Tailscale environment.
@@ -5167,13 +5165,10 @@ function loadAgentRoster() {
               actionBtn = `<span class="agent-row-status">● ${ag.status}</span>`;
             }
           } else if (ag.id === 'hermes') {
-            // Hermes gets the full-console treatment like DeepSeek Harness:
-            // Open goes straight to the full console; Chat opens the workspace.
-            // MUST come before the generic matchApp branch — hermes-agent is in
-            // the catalog as installed and would otherwise hit launch() which
-            // redirects to the generic Agentic OS page.
+            // Hermes behaves exactly like DeepSeek Harness: Open AND Chat both
+            // go to the full console (the old workspace chat is replaced).
             actionBtn = `<button class="agent-row-action primary" onclick="nav('hermes-full')">Open</button>
-            <button class="agent-row-action" onclick="openAgentSession('hermes')">Chat</button>`;
+            <button class="agent-row-action" onclick="nav('hermes-full')">Chat</button>`;
           } else if (ag.id === 'deepseek-harness') {
             // Same: full-console Open must win over the catalog match.
             actionBtn = `<button class="agent-row-action primary" onclick="nav('dsh-full')">Open</button>
