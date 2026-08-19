@@ -3219,19 +3219,28 @@ def _docker_restart(container_name):
         return False, str(e)
 
 
+_UPTIME_CACHE = {}
+
 def _container_uptime(container_name):
-    """Seconds since the container started (None if missing)."""
+    """Seconds since the container started (None if missing). Cached 30s —
+    docker inspect per call made /api/agentic/health take ~10s."""
+    now = time.time()
+    hit = _UPTIME_CACHE.get(container_name)
+    if hit and now - hit[0] < 30:
+        return hit[1]
+    uptime = None
     try:
         import subprocess
         r = subprocess.run(["docker", "inspect", "-f", "{{.State.StartedAt}}", container_name],
-                           capture_output=True, text=True, timeout=15)
-        if r.returncode != 0:
-            return None
-        from datetime import datetime as _dt
-        started = _dt.strptime(r.stdout.strip()[:19], "%Y-%m-%dT%H:%M:%S")
-        return (datetime.now() - started).total_seconds()
+                           capture_output=True, text=True, timeout=8)
+        if r.returncode == 0:
+            from datetime import datetime as _dt
+            started = _dt.strptime(r.stdout.strip()[:19], "%Y-%m-%dT%H:%M:%S")
+            uptime = (datetime.now() - started).total_seconds()
     except Exception:
-        return None
+        uptime = None
+    _UPTIME_CACHE[container_name] = (now, uptime)
+    return uptime
 
 
 def _log_health_event(service, action, detail):
@@ -3311,7 +3320,7 @@ if os.environ.get("APPVAULT_WATCHDOG", "1") != "0":
 def api_health():
     if request.method == "OPTIONS":
         return jsonify({"status": "ok"})
-    probes = _probe_all(force=True)
+    probes = _probe_all()  # cached 5s — never force on a GET (was ~10s per request)
     services = []
     for sid, name, _, cat, role, path, _ in SERVICES:
         st = probes.get(sid, {})

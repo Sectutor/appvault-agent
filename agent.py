@@ -2792,16 +2792,16 @@ def _is_app_alive(cname, internal_port):
         if hhit[1] == "unhealthy":
             return False
     # 1) native docker healthcheck — the image's own probe is authoritative
-    okh, hout = _docker("inspect", "--format", "{{.State.Health.Status}}", cname, capture=True, timeout=15)
+    okh, hout = _docker("inspect", "--format", "{{.State.Health.Status}}", cname, capture=True, timeout=5)
     if okh and hout.strip() == "healthy":
         return True
     # 2) wget — exit 0 = any HTTP response (2xx/3xx/4xx all fine). No body
     #    length requirement: redirect/error pages can be tiny.
-    ok, _ = _docker("exec", cname, "wget", "-q", "-O", "/dev/null", "--timeout=5", url, capture=True, timeout=10)
+    ok, _ = _docker("exec", cname, "wget", "-q", "-O", "/dev/null", "--timeout=2", url, capture=True, timeout=5)
     if ok:
         return True
     # 3) curl fallback
-    ok, out = _docker("exec", cname, "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "5", url, capture=True, timeout=10)
+    ok, out = _docker("exec", cname, "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "3", url, capture=True, timeout=6)
     if ok and out.strip().isdigit():
         code = int(out.strip())
         if 200 <= code < 500:
@@ -2810,7 +2810,7 @@ def _is_app_alive(cname, internal_port):
     for runner in ("node", "bun"):
         ok, _ = _docker("exec", cname, runner, "-e",
                         "fetch(process.argv[1]).then(r=>process.exit(r.status<500?0:1)).catch(()=>process.exit(1))",
-                        url, capture=True, timeout=10)
+                        url, capture=True, timeout=6)
         if ok:
             return True
     return False
@@ -3257,17 +3257,18 @@ def api_monitoring():
 
 @app.route("/api/apps/health")
 def api_apps_health():
-    """Check and report health of all installed apps (response cached 15s —
-    the per-app probes are expensive; the sidebar doesn't need them fresh)."""
+    """Check and report health of all installed apps (response cached 30s; the
+    per-app probes run in parallel so a cold build is a few seconds, not 30+)."""
     global _APPS_HEALTH_CACHE, _APPS_HEALTH_TS
     now = time.time()
-    if _APPS_HEALTH_CACHE is not None and now - _APPS_HEALTH_TS < 15:
+    if _APPS_HEALTH_CACHE is not None and now - _APPS_HEALTH_TS < 30:
         return Response(_APPS_HEALTH_CACHE, mimetype="application/json")
     results = []
     ok, out = _docker("ps", "--filter", "name=app-", "--format", "{{.Names}}", capture=True)
     if ok and out:
         containers = [l.strip() for l in out.strip().split('\n') if l.strip()]
-        for cname in containers:
+
+        def _check(cname):
             app_id = cname.replace("app-", "", 1)
             app_def = None
             for a in catalog_cache.get("apps", []):
@@ -3275,9 +3276,9 @@ def api_apps_health():
                     app_def = a
                     break
             if not app_def:
-                continue
+                return None
             port = get_container_host_port(cname) or _stable_host_port(cname, app_id, app_def.get("container_port", 80))
-            # Check response (running state from the bulk snapshot — no docker call)
+            # running state from the bulk snapshot — no docker call
             cr = _PORT_CACHE.get(("cr", cname))
             is_running = bool(cr and cr[1]) if cr else container_running(cname)
             alive = False
@@ -3287,13 +3288,23 @@ def api_apps_health():
                     alive = _is_app_alive(cname, internal_port)
                 else:
                     alive = True  # DB apps considered alive if running
-            results.append({
-                "id": app_id,
-                "name": app_def.get("name", app_id),
-                "status": "running" if is_running else "stopped",
-                "port": port,
-                "responsive": alive
-            })
+            return {"id": app_id, "name": app_def.get("name", app_id),
+                    "status": "running" if is_running else "stopped",
+                    "port": port, "responsive": alive}
+
+        # Parallel probes: docker exec per app is the expensive part and the
+        # GIL is released while waiting on subprocesses, so threads scale it.
+        try:
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+                for r in ex.map(_check, containers):
+                    if r:
+                        results.append(r)
+        except Exception:
+            for cname in containers:
+                r = _check(cname)
+                if r:
+                    results.append(r)
     body = json.dumps({"apps": results, "total": len(results), "healthy": sum(1 for r in results if r["responsive"])})
     _APPS_HEALTH_CACHE = body
     _APPS_HEALTH_TS = now

@@ -62,11 +62,19 @@ def sync_loop():
 
 def register_routes(app):
     """Register cloud sync API routes on the Flask app."""
-    
+    _cloud_status_cache = {"ts": 0.0, "data": None}
+
     @app.route("/api/cloud/status")
     def cloud_status():
+        # cached 30s — rclone version probing was costing seconds per request
+        import time as _t
+        _now = _t.time()
+        if _cloud_status_cache["data"] is not None and _now - _cloud_status_cache["ts"] < 30:
+            return jsonify(_cloud_status_cache["data"])
         c = load_config()
         c["rclone_version"] = get_version()
+        _cloud_status_cache["ts"] = _now
+        _cloud_status_cache["data"] = c
         return jsonify(c)
 
     @app.route("/api/cloud/configure", methods=["POST"])
