@@ -5528,16 +5528,23 @@ function loadAgentRoster() {
             } else {
               actionBtn = `<span class="agent-row-status">● ${ag.status}</span>`;
             }
+          } else if (ag.id === 'hermes') {
+            // Hermes gets the full-console treatment like DeepSeek Harness:
+            // Open goes straight to the full console; Chat opens the workspace.
+            // MUST come before the generic matchApp branch — hermes-agent is in
+            // the catalog as installed and would otherwise hit launch() which
+            // redirects to the generic Agentic OS page.
+            actionBtn = `<button class="agent-row-action primary" onclick="nav('hermes-full')">Open</button>
+            <button class="agent-row-action" onclick="openAgentSession('hermes')">Chat</button>`;
+          } else if (ag.id === 'deepseek-harness') {
+            // Same: full-console Open must win over the catalog match.
+            actionBtn = `<button class="agent-row-action primary" onclick="nav('dsh-full')">Open</button>
+            <button class="agent-row-action" onclick="openAgentSession('deepseek-harness')">Chat</button>`;
           } else if (matchApp && matchApp.status === 'installed') {
             actionBtn = `<button class="agent-row-action primary" onclick="launch('${matchApp.host_port||''}','${matchApp.web_path||'/'}','${matchApp.name}','${matchApp.launch_url||''}')">Open</button>`;
           } else if (ag.id === 'openclaw') {
             actionBtn = `<button class="agent-row-action primary" onclick="nav('openclaw-full')">Open</button>
             <button class="agent-row-action" onclick="openAgentSession('openclaw')">Chat</button>`;
-          } else if (ag.id === 'hermes') {
-            // Hermes gets the full-console treatment like DeepSeek Harness:
-            // Open goes straight to the full console; Chat opens the workspace.
-            actionBtn = `<button class="agent-row-action primary" onclick="nav('hermes-full')">Open</button>
-            <button class="agent-row-action" onclick="openAgentSession('hermes')">Chat</button>`;
           } else if (ag.id === 'openwebui' || ag.id === 'ollama') {
             actionBtn = `<button class="agent-row-action" onclick="nav('store')">Install</button>`;
           } else if (ag.id === 'deerflow') {
@@ -5547,9 +5554,6 @@ function loadAgentRoster() {
               actionBtn = `<button class="agent-row-action primary" onclick="launchDeerFlow()">Launch</button>`;
             }
             actionBtn += ` <button class="agent-row-action" onclick="openAgentSession('deerflow')">Chat</button>`;
-          } else if (ag.id === 'deepseek-harness') {
-            actionBtn = `<button class="agent-row-action primary" onclick="nav('dsh-full')">Open</button>
-            <button class="agent-row-action" onclick="openAgentSession('deepseek-harness')">Chat</button>`;
           } else {
             actionBtn = `<button class="agent-row-action primary" onclick="openAgentSession('${ag.id}')">Chat</button>`;
           }
