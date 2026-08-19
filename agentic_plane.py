@@ -13494,10 +13494,14 @@ def api_openclaw_start():
         cmd = ["docker", "run", "-d", "--name", "openclaw-gateway", "--restart", "unless-stopped",
                "-p", "18789:18789",
                "-v", cfg_dir + ":/home/node/.openclaw",
-               "ghcr.io/openclaw/openclaw:latest"]
+               "ghcr.io/openclaw/openclaw:2026.7.1-2"]
         rc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         if rc.returncode != 0:
-            return jsonify({"status": "error", "error": (rc.stderr or rc.stdout or "docker run failed").strip()}), 500
+            # fall back to latest if the pinned patch tag is unavailable
+            cmd[-1] = "ghcr.io/openclaw/openclaw:latest"
+            rc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if rc.returncode != 0:
+                return jsonify({"status": "error", "error": (rc.stderr or rc.stdout or "docker run failed").strip()}), 500
     return jsonify({"status": "starting", "gateway_status": "starting",
                     "message": "OpenClaw is starting — the console will load once it's ready (a minute on first run)."})
 
