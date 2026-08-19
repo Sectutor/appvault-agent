@@ -1265,7 +1265,7 @@ table.data-table tbody tr:last-child td { border-bottom: none; }
         <div class="stat-row"><span class="msr">storage</span><span>Disk</span><span id="stat-disk">&ndash;</span></div>
         <div class="stat-bar"><div id="stat-disk-bar"></div></div>
         <div class="stat-row"><span class="msr">apps</span><span>Apps</span><span id="stat-apps">&ndash;</span></div>
-        <div id="appvault-build-stamp" style="margin-top:10px;padding:6px 8px;font-size:9.5px;color:#475569;border-top:1px solid rgba(51,65,85,0.4);text-align:center;cursor:default;" title="AppVault dashboard build">build 2026.08.19-h6</div>
+        <div id="appvault-build-stamp" style="margin-top:10px;padding:6px 8px;font-size:9.5px;color:#475569;border-top:1px solid rgba(51,65,85,0.4);text-align:center;cursor:default;" title="AppVault dashboard build">build 2026.08.19-h7</div>
       </div>
     </div>
     <div id="nav-backdrop" class="nav-backdrop" style="display:none;"></div>
@@ -1305,8 +1305,8 @@ var NAV_SECTIONS = [
   ]},
   { id: 'automation', title: 'Automation', defaultPinned: true, items: [
     { id: 'n8n', route: 'n8n', label: 'n8n Automation', subtitle: 'Workflows & triggers', icon: 'bolt', color: '#ff6d5a' },
-    { id: 'hermes-full', route: 'hermes-full', label: 'Hermes (Full)', subtitle: 'Real Hermes dashboard console', icon: 'terminal', color: '#22d3ee' },
-    { id: 'openclaw-full', route: 'openclaw-full', label: 'OpenClaw (Full)', subtitle: 'OpenClaw Studio console', icon: 'hub', color: '#38bdf8' },
+    { id: 'hermes-full', route: 'hermes-full', label: 'Hermes', subtitle: 'Full Hermes console & agents', icon: 'terminal', color: '#22d3ee' },
+    { id: 'openclaw-full', route: 'openclaw-full', label: 'OpenClaw', subtitle: 'OpenClaw Studio console', icon: 'hub', color: '#38bdf8' },
     { id: 'dsh-full', route: 'dsh-full', label: 'DeepSeek Harness', subtitle: 'Full DSH console & agents', icon: 'memory', color: '#38bdf8' }
   ]},
   { id: 'pipeline', title: 'Pipeline', items: [
@@ -3760,7 +3760,7 @@ function loadAgentWorkspace(agentId, threadId) {
           <select id="agent-session-select" onchange="switchAgentSession('hermes', this.value)" style="background:rgba(30,41,59,0.9);border:1px solid rgba(71,85,105,0.55);color:#fff;font-size:11px;border-radius:8px;padding:5px 8px;max-width:150px;">
             <option value="session-default">Default Session</option>
           </select>
-          <button class="agentic-btn" style="padding:5px 10px;font-size:11px;" onclick="nav('hermes-full')" title="Open the Hermes dashboard">🛠 Full Hermes</button>
+          <button class="agentic-btn" style="padding:5px 10px;font-size:11px;" onclick="nav('hermes-full')" title="Open the full Hermes console">🛠 Full Hermes</button>
           <button class="agentic-btn" style="padding:5px 10px;font-size:11px;" onclick="createNewAgentSession('hermes')" title="Create a new chat / topic">New Topic</button>
           <button class="agentic-icon-btn" style="font-size:14px;width:30px;height:30px;" onclick="agenticMoreMenu(this, agenticTopicItems('hermes'))" title="Topic options" aria-label="Topic options">⋯</button>
         </div>
