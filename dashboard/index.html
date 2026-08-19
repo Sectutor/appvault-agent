@@ -3078,7 +3078,7 @@ function hermesApi(path, opts) {
 function hermesChatTab(body) {
   body.innerHTML = `<div style="display:grid;grid-template-columns:240px 1fr;gap:14px;min-height:calc(100vh - 235px);">
     <div class="agentic-card" style="display:flex;flex-direction:column;padding:0;">
-      <div class="agentic-card-header"><span>🗂 SESSIONS</span>
+      <div class="agentic-card-header"><span>🗂 Sessions</span>
         <button class="agentic-btn" style="padding:2px 8px;font-size:10px;" onclick="hermesNewSession()">＋ New</button>
       </div>
       <div id="hermes-sessions-list" style="flex:1;overflow-y:auto;padding:6px;"></div>
@@ -3178,7 +3178,7 @@ var _hermesTools = [
 ];
 function hermesToolsTab(body) {
   body.innerHTML = `<div class="agentic-card">
-    <div class="agentic-card-header"><span>🛠 HERMES TOOLS</span><span style="font-size:10px;color:#94a3b8;">executed by Hermes' sandbox</span></div>
+    <div class="agentic-card-header"><span>🛠 Hermes Tools</span><span style="font-size:10px;color:#94a3b8;">executed by Hermes' sandbox</span></div>
     <div id="hermes-tools-list" style="padding:12px;display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px;"></div>
     <div id="hermes-tools-result" style="padding:0 12px 12px;"></div>
   </div>`;
@@ -3212,7 +3212,7 @@ function hermesRunTool(name) {
 
 // ── CONFIG ──
 function hermesConfigTab(body) {
-  body.innerHTML = `<div class="agentic-card"><div class="agentic-card-header"><span>⚙️ HERMES CONFIG</span></div>
+  body.innerHTML = `<div class="agentic-card"><div class="agentic-card-header"><span>⚙️ Hermes Config</span></div>
     <div id="hermes-config-form" style="padding:12px;display:grid;grid-template-columns:1fr 1fr;gap:12px;"></div></div>`;
   hermesApi('/config').then(function(d){
     var cfg = d && d.config ? d.config : (d || {});
@@ -3248,7 +3248,7 @@ function hermesSaveConfig() {
 
 // ── TELEMETRY ──
 function hermesTelemetryTab(body) {
-  body.innerHTML = '<div class="agentic-card"><div class="agentic-card-header"><span>📊 HERMES TELEMETRY</span></div><div id="hermes-telemetry" style="padding:12px;"></div></div>';
+  body.innerHTML = '<div class="agentic-card"><div class="agentic-card-header"><span>📊 Hermes Telemetry</span></div><div id="hermes-telemetry" style="padding:12px;"></div></div>';
   hermesApi('/telemetry').then(function(d){
     var el = $('hermes-telemetry'); if (!el) return;
     var rows = Object.keys(d || {}).map(function(k){
