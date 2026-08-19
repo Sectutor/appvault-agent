@@ -2089,9 +2089,15 @@ function toast(msg, type) {
 
 function fetchJSON(url, opts) {
   var o = opts || {};
-  return fetch(url, Object.assign({}, o, { headers: Object.assign(apiHeaders(), o.headers || {}) })).then(function(r){ return r.json(); }).catch(function(e){
-    return { error: e.message };
-  });
+  return fetch(url, Object.assign({}, o, { headers: Object.assign(apiHeaders(), o.headers || {}) }))
+    .then(function(r){
+      if (!r.ok) return { error: 'HTTP ' + r.status, status: r.status };
+      return r.json().catch(function(){
+        // non-JSON body (e.g. a proxy/error page while the agent starts)
+        return { error: 'Agent returned a non-JSON response (HTTP ' + r.status + ')', status: r.status };
+      });
+    })
+    .catch(function(e){ return { error: e.message }; });
 }
 
 function saveApiKey() {
@@ -9315,35 +9321,52 @@ function showManage() {
 }
 
 // ── STORE ──
+var _storeRetryTimer = null;
 function showStore() {
   var c = $('content');
   c.innerHTML = '<div class="store-header"><h2>📦 App Store</h2><span class="sub" id="store-sub">Loading...</span><input class="search-box" id="srch" placeholder="Search..." onkeyup="filterStore()"></div>' + catChipsHtml() + '<div class="loading">Loading...</div>';
+  if (_storeRetryTimer) { clearTimeout(_storeRetryTimer); _storeRetryTimer = null; }
+  loadStoreCatalog(1);
+}
+
+function loadStoreCatalog(attempt) {
+  var c = $('content');
   fetchJSON(API + '/api/catalog').then(function(data){
-    if (!data || !data.apps) {
-      var isAuthError = data && (data.error === 'Unauthorized' || data.status === 401);
-      var msg = isAuthError 
-        ? (API_KEY ? 'Invalid API key.' : 'Access requires an API key.') 
-        : 'Connecting to AppVault Agent (' + (data && data.error ? data.error : 'Initial startup in progress') + ').';
-      c.innerHTML = '<div class="store-header"><h2>📦 App Store</h2></div>'
-        + '<div style="margin:24px auto;max-width:540px;padding:18px 20px;background:rgba(56,189,248,0.08);border:1px solid rgba(56,189,248,0.35);border-radius:10px;font-size:13.5px;color:var(--text-primary);text-align:left;">'
-        + '⏳ ' + msg + ' <a href="#" onclick="showStore();return false;" style="color:var(--accent-from);font-weight:600;margin-left:8px;">⚡ Retry</a>'
-        + '<div style="margin-top:10px;font-size:12px;color:var(--text-muted);">'
-        + (isAuthError ? 'If you set a custom API key, configure it in <a href="#" onclick="showSettings();return false;" style="color:var(--accent-from);">Settings</a>.' : 'If the agent container just started, it will finish loading shortly.')
-        + '</div></div>';
+    if (data && data.apps) {
+      allApps = data.apps || [];
+      var counts = {};
+      allApps.forEach(function(a){
+        var cat = a.category || 'other';
+        counts[cat] = (counts[cat] || 0) + 1;
+      });
+      counts.all = allApps.length;
+      ['all','ai','automation','database','development','media','networking','productivity'].forEach(function(cat){
+        var el = $('cat-' + cat);
+        if (el) el.textContent = counts[cat] || 0;
+      });
+      renderStore();
       return;
     }
-    allApps = data.apps || [];
-    var counts = {};
-    allApps.forEach(function(a){
-      var cat = a.category || 'other';
-      counts[cat] = (counts[cat] || 0) + 1;
-    });
-    counts.all = allApps.length;
-    ['all','ai','automation','database','development','media','networking','productivity'].forEach(function(cat){
-      var el = $('cat-' + cat);
-      if (el) el.textContent = counts[cat] || 0;
-    });
-    renderStore();
+    // Agent not ready yet — auto-retry for up to ~60s so a just-started agent
+    // finishes loading instead of dead-ending on a transient parse error.
+    if (attempt < 20) {
+      var retrying = 'Connecting to AppVault Agent… (attempt ' + attempt + '/20) — the agent is still starting';
+      if (c) c.innerHTML = '<div class="store-header"><h2>📦 App Store</h2></div>'
+        + '<div style="margin:24px auto;max-width:540px;padding:18px 20px;background:rgba(56,189,248,0.08);border:1px solid rgba(56,189,248,0.35);border-radius:10px;font-size:13.5px;color:var(--text-primary);text-align:left;">'
+        + '⏳ ' + retrying + ' <a href="#" onclick="showStore();return false;" style="color:var(--accent-from);font-weight:600;margin-left:8px;">⚡ Retry now</a></div>';
+      _storeRetryTimer = setTimeout(function(){ loadStoreCatalog(attempt + 1); }, 3000);
+      return;
+    }
+    var isAuthError = data && (data.error === 'Unauthorized' || data.status === 401);
+    var msg = isAuthError 
+      ? (API_KEY ? 'Invalid API key.' : 'Access requires an API key.') 
+      : 'Connecting to AppVault Agent (' + (data && data.error ? data.error : 'Initial startup in progress') + ').';
+    if (c) c.innerHTML = '<div class="store-header"><h2>📦 App Store</h2></div>'
+      + '<div style="margin:24px auto;max-width:540px;padding:18px 20px;background:rgba(56,189,248,0.08);border:1px solid rgba(56,189,248,0.35);border-radius:10px;font-size:13.5px;color:var(--text-primary);text-align:left;">'
+      + '⏳ ' + msg + ' <a href="#" onclick="showStore();return false;" style="color:var(--accent-from);font-weight:600;margin-left:8px;">⚡ Retry</a>'
+      + '<div style="margin-top:10px;font-size:12px;color:var(--text-muted);">'
+      + (isAuthError ? 'If you set a custom API key, configure it in <a href="#" onclick="showSettings();return false;" style="color:var(--accent-from);">Settings</a>.' : 'If the agent container just started, it will finish loading shortly.')
+      + '</div></div>';
   });
 }
 
