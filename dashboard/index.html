@@ -655,6 +655,114 @@ body ::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 4p
 }
 .agentic-chip:hover { background: rgba(56, 189, 248, 0.2); }
 
+/* ── Agentic OS polish — taste-skill · ui-craft · interaction-design · shadcn ──
+   Dials: variance 4 (symmetric, dashboard-safe) · motion 3 (hover-only) · density 4 (calm)
+   One accent (cyan #38bdf8), neutral slate base, segmented controls, restrained shadows. */
+.agentic-wrap {
+  background: radial-gradient(circle at top right, #0f172a, #0b0f19 85%);
+}
+.agentic-subbar {
+  background: rgba(15, 23, 42, 0.72); border-color: rgba(51, 65, 85, 0.55);
+  box-shadow: 0 1px 0 rgba(255,255,255,0.03) inset, 0 10px 30px rgba(0,0,0,0.28);
+  backdrop-filter: blur(14px);
+}
+.agentic-status-group { font-size: 11.5px; color: #64748b; }
+.agentic-badge-live {
+  background: rgba(34, 197, 94, 0.1); border-color: rgba(34, 197, 94, 0.3);
+  color: #4ade80; font-weight: 600; font-size: 10.5px; letter-spacing: 0.04em;
+}
+.agentic-btn {
+  background: linear-gradient(135deg, #0ea5e9, #0284c7); border: none;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.35), 0 0 0 1px rgba(56,189,248,0.18) inset;
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+.agentic-btn:hover { transform: none; box-shadow: 0 2px 10px rgba(14,165,233,0.4), 0 0 0 1px rgba(56,189,248,0.25) inset; }
+.agentic-btn-secondary {
+  background: rgba(30, 41, 59, 0.75); color: #cbd5e1; border-color: rgba(71, 85, 105, 0.55);
+}
+.agentic-btn-secondary:hover { background: rgba(56, 189, 248, 0.12); border-color: rgba(56,189,248,0.45); color: #e2e8f0; }
+.agentic-card {
+  background: rgba(15, 23, 42, 0.78); border-color: rgba(51, 65, 85, 0.5);
+  box-shadow: 0 1px 0 rgba(255,255,255,0.02) inset, 0 8px 24px rgba(0,0,0,0.22);
+}
+.agentic-card-header { font-weight: 600; letter-spacing: 0.02em; }
+.agentic-chat-container { border-color: rgba(51, 65, 85, 0.55); background: rgba(15, 23, 42, 0.9); box-shadow: 0 8px 24px rgba(0,0,0,0.2); }
+.agentic-msg-bubble { font-size: 12.5px; line-height: 1.55; }
+.agentic-msg-user { background: rgba(14, 165, 233, 0.14); border-color: rgba(56,189,248,0.35); }
+.agentic-msg-agent { background: rgba(30, 41, 59, 0.9); border-color: rgba(51, 65, 85, 0.75); }
+.agentic-prompt-bar { background: rgba(15, 23, 42, 0.95); border-top-color: rgba(51, 65, 85, 0.55); }
+.agentic-chip {
+  background: transparent; border-color: rgba(71, 85, 105, 0.4); color: #94a3b8;
+  border-radius: 999px; font-size: 10.5px;
+}
+.agentic-chip:hover { background: rgba(56, 189, 248, 0.1); border-color: rgba(56,189,248,0.4); color: #7dd3fc; }
+
+/* Segmented control (subtabs / right-panel tabs / memory tiers) */
+.agentic-seg {
+  display: inline-flex; align-items: center; gap: 2px; padding: 3px;
+  background: rgba(15, 23, 42, 0.8); border: 1px solid rgba(51, 65, 85, 0.5);
+  border-radius: 10px; flex-wrap: nowrap;
+}
+.agentic-seg .seg-btn {
+  border: none; background: transparent; color: #94a3b8; font-weight: 500;
+  font-size: 11px; padding: 5px 12px; border-radius: 7px; cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease; white-space: nowrap; line-height: 1.3;
+}
+.agentic-seg .seg-btn:hover { background: rgba(56, 189, 248, 0.1); color: #e2e8f0; }
+.agentic-seg .seg-btn.active { background: rgba(56, 189, 248, 0.16); color: #38bdf8; }
+
+/* Overflow menu (⋯) */
+.agentic-more-overlay { position: fixed; inset: 0; z-index: 9990; }
+.agentic-more-menu {
+  position: fixed; min-width: 190px; z-index: 9991; box-sizing: border-box;
+  background: rgba(15, 23, 42, 0.98); border: 1px solid rgba(71, 85, 105, 0.7);
+  border-radius: 10px; padding: 5px; box-shadow: 0 12px 40px rgba(0,0,0,0.55);
+  animation: agentic-menu-in 0.12s ease;
+}
+@keyframes agentic-menu-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+.agentic-more-item {
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  background: transparent; border: none; color: #cbd5e1; font-size: 12px;
+  padding: 8px 10px; border-radius: 7px; cursor: pointer; text-decoration: none;
+  box-sizing: border-box; transition: background 0.12s ease, color 0.12s ease;
+}
+.agentic-more-item:hover { background: rgba(56, 189, 248, 0.12); color: #f1f5f9; }
+.agentic-more-item.danger { color: #f87171; }
+.agentic-more-item.danger:hover { background: rgba(239, 68, 68, 0.12); }
+.agentic-more-item .mi-icon { width: 17px; text-align: center; flex-shrink: 0; font-size: 12px; }
+.agentic-more-item .mi-spacer { flex: 1; }
+
+/* Quiet icon button (toolbar) */
+.agentic-icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; border-radius: 8px; flex-shrink: 0;
+  background: rgba(30, 41, 59, 0.6); border: 1px solid rgba(51, 65, 85, 0.5);
+  color: #94a3b8; cursor: pointer; transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+  font-size: 13px; padding: 0;
+}
+.agentic-icon-btn:hover { color: #38bdf8; border-color: rgba(56,189,248,0.4); background: rgba(56,189,248,0.08); }
+.agentic-icon-btn.active { color: #38bdf8; background: rgba(56,189,248,0.16); border-color: rgba(56,189,248,0.4); }
+
+/* Workspace header layout */
+.agentic-ws-head {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap; width: 100%;
+}
+.agentic-ws-title { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.agentic-ws-title .name { font-weight: 700; font-size: 13.5px; color: #f8fafc; line-height: 1.25; }
+.agentic-ws-title .sub { font-size: 10.5px; color: #64748b; margin-top: 2px; }
+.agentic-ws-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-wrap: wrap; }
+
+/* Focus-visible rings (interaction-design: visible affordance, keyboard first) */
+.agentic-btn:focus-visible, .agentic-btn-secondary:focus-visible,
+.agentic-icon-btn:focus-visible, .agentic-more-item:focus-visible,
+.agentic-seg .seg-btn:focus-visible, .agentic-chip:focus-visible {
+  outline: 2px solid rgba(56, 189, 248, 0.7); outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .agentic-badge-live::before { animation: none; }
+  *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+}
+
 /* ── Universal Live Preview Drawer Styles ── */
 #preview-backdrop {
   position: fixed; inset: 0; background: rgba(0, 0, 0, 0.65); backdrop-filter: blur(4px);
@@ -2925,15 +3033,17 @@ function showHermesFull() {
     <div class="agentic-wrap">
       <div class="agentic-subbar">
         <div class="agentic-status-group">
-          <span class="agentic-badge-live" style="background:rgba(34,211,238,0.15);color:#22d3ee;">● HERMES — FULL AGENT CONSOLE</span>
-          <span id="hermes-console-status" style="font-size:11px;color:#94a3b8;">sessions · chat · tools · config · telemetry</span>
+          <span class="agentic-badge-live">● Hermes — Full Agent Console</span>
+          <span id="hermes-console-status" style="font-size:11px;color:#64748b;">sessions · chat · tools · config · telemetry</span>
         </div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-          <button class="agentic-btn" style="background:#22d3ee;padding:6px 12px;font-size:11px;" onclick="hermesFullTab('chat')">💬 Chat</button>
-          <button class="agentic-btn-secondary" style="font-size:11px;padding:6px 10px;" onclick="hermesFullTab('tools')">🛠 Tools</button>
-          <button class="agentic-btn-secondary" style="font-size:11px;padding:6px 10px;" onclick="hermesFullTab('config')">⚙️ Config</button>
-          <button class="agentic-btn-secondary" style="font-size:11px;padding:6px 10px;" onclick="hermesFullTab('telemetry')">📊 Telemetry</button>
-          <a class="agentic-btn-secondary" target="_blank" href="/hermes/docs" style="text-decoration:none;font-size:11px;padding:6px 10px;">📚 API Reference</a>
+          <div class="agentic-seg">
+            <button class="seg-btn active" id="hf-tab-chat" onclick="hermesFullTab('chat')">💬 Chat</button>
+            <button class="seg-btn" id="hf-tab-tools" onclick="hermesFullTab('tools')">🛠 Tools</button>
+            <button class="seg-btn" id="hf-tab-config" onclick="hermesFullTab('config')">⚙️ Config</button>
+            <button class="seg-btn" id="hf-tab-telemetry" onclick="hermesFullTab('telemetry')">📊 Telemetry</button>
+          </div>
+          <a class="agentic-btn-secondary" target="_blank" href="/hermes/docs" style="text-decoration:none;font-size:11px;padding:6px 10px;">API Reference</a>
           <button class="agentic-btn-secondary" style="font-size:11px;padding:6px 10px;" onclick="nav('agentic')">← Back to Agentic OS</button>
         </div>
       </div>
@@ -2946,6 +3056,10 @@ function hermesFullTab(tab) {
   _hermesFullTab = tab;
   var body = $('hermes-console-body');
   if (!body) return;
+  ['chat','tools','config','telemetry'].forEach(function(t){
+    var b = $('hf-tab-' + t);
+    if (b) b.classList.toggle('active', t === tab);
+  });
   if (tab === 'chat') hermesChatTab(body);
   else if (tab === 'tools') hermesToolsTab(body);
   else if (tab === 'config') hermesConfigTab(body);
@@ -3153,14 +3267,129 @@ function hermesWorkspacePanel(tab) {
   var body = $('hermes-panel-body');
   if (!panel || !body) return;
   panel.style.display = '';
-  if (tab === 'tools') { if (title) title.textContent = '🛠 HERMES TOOLS'; hermesToolsTab(body); }
-  else if (tab === 'config') { if (title) title.textContent = '⚙️ HERMES CONFIG'; hermesConfigTab(body); }
-  else if (tab === 'telemetry') { if (title) title.textContent = '📊 HERMES TELEMETRY'; hermesTelemetryTab(body); }
+  if (tab === 'tools') { if (title) title.textContent = '🛠 Hermes Tools'; hermesToolsTab(body); }
+  else if (tab === 'config') { if (title) title.textContent = '⚙️ Hermes Config'; hermesConfigTab(body); }
+  else if (tab === 'telemetry') { if (title) title.textContent = '📊 Hermes Telemetry'; hermesTelemetryTab(body); }
   try { panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } catch (e) {}
 }
 function hermesClosePanel() {
   var panel = $('hermes-panel');
   if (panel) panel.style.display = 'none';
+}
+
+// ── Agentic OS UI helpers (overflow ⋯ menu, segmented subtabs) ──
+function agenticMoreMenu(btn, items) {
+  var existing = $('agentic-more-overlay');
+  if (existing) existing.remove();
+  var r = btn.getBoundingClientRect();
+  var overlay = document.createElement('div');
+  overlay.className = 'agentic-more-overlay';
+  overlay.id = 'agentic-more-overlay';
+  var menu = document.createElement('div');
+  menu.className = 'agentic-more-menu';
+  var html = '';
+  (items || []).forEach(function(it){
+    var cls = 'agentic-more-item' + (it.danger ? ' danger' : '');
+    var icon = it.icon ? '<span class="mi-icon">' + it.icon + '</span>' : '';
+    if (it.href) {
+      html += '<a class="' + cls + '" href="' + it.href + '" target="_blank" rel="noopener">' + icon + '<span>' + it.label + '</span></a>';
+    } else {
+      html += '<button type="button" class="' + cls + '" onclick="' + it.onclick + '">' + icon + '<span>' + it.label + '</span></button>';
+    }
+  });
+  menu.innerHTML = html;
+  overlay.appendChild(menu);
+  document.body.appendChild(overlay);
+  var mw = 200;
+  var left = Math.min(r.right - mw, window.innerWidth - mw - 8);
+  left = Math.max(8, left);
+  menu.style.top = (r.bottom + 6) + 'px';
+  menu.style.left = left + 'px';
+  setTimeout(function(){
+    var closer = function(ev){
+      if (!menu.contains(ev.target) && ev.target !== btn) {
+        agenticMoreClose();
+        document.removeEventListener('click', closer, true);
+      }
+    };
+    document.addEventListener('click', closer, true);
+    document.addEventListener('keydown', function esc(e){ if (e.key === 'Escape') { agenticMoreClose(); document.removeEventListener('keydown', esc); } });
+  }, 0);
+}
+function agenticMoreClose() {
+  var o = $('agentic-more-overlay');
+  if (o) o.remove();
+}
+function agenticSubbarItems(agentId) {
+  var items = [
+    { icon: '🔮', label: 'Oracle Feeds', onclick: 'showOracleStudio()' },
+    { icon: '⚙️', label: 'LLM & API Keys', onclick: "nav('config')" }
+  ];
+  if (agentId === 'hermes') {
+    items = items.concat([
+      { icon: '🛠', label: 'Hermes Tools', onclick: "hermesWorkspacePanel('tools')" },
+      { icon: '⚙️', label: 'Hermes Config', onclick: "hermesWorkspacePanel('config')" },
+      { icon: '📊', label: 'Hermes Telemetry', onclick: "hermesWorkspacePanel('telemetry')" },
+      { icon: '🚀', label: 'Full Hermes Console', onclick: "nav('hermes-full')" }
+    ]);
+  }
+  return items;
+}
+function agenticTopicItems(agentId) {
+  agentId = (agentId || 'hermes').toLowerCase();
+  var items = [
+    { icon: '✏️', label: 'Rename Topic', onclick: "renameCurrentAgentSession('" + agentId + "')" },
+    { icon: '🗑️', label: 'Delete Topic', onclick: "deleteCurrentAgentSession('" + agentId + "')", danger: true }
+  ];
+  var extras = [];
+  if (agentId === 'hermes') {
+    extras = [
+      { icon: '📚', label: 'Skills', onclick: 'goToSkills()' },
+      { icon: '📡', label: 'Telegram & Integrations', onclick: "nav('gov')" },
+      { icon: '⚙️', label: 'Settings', onclick: "nav('config')" }
+    ];
+  } else if (agentId === 'openclaw') {
+    extras = [
+      { icon: '⚙️', label: 'Configure API Key & Model', onclick: "nav('config')" },
+      { icon: '📡', label: 'Telegram & Integrations', onclick: "nav('gov')" },
+      { icon: '🔄', label: 'Refresh', onclick: "loadAgentWorkspace('openclaw', currentThreadId)" },
+      { icon: '🐙', label: 'GitHub', href: 'https://github.com/openclaw/openclaw' }
+    ];
+  } else if (agentId === 'buzz') {
+    extras = [
+      { icon: '🚀', label: 'Open Buzz Web UI', onclick: "launch('35522','/','Buzz Workspace','','')" },
+      { icon: '📡', label: 'Telegram & Integrations', onclick: "nav('gov')" },
+      { icon: '🔄', label: 'Refresh', onclick: "loadAgentWorkspace('buzz', currentThreadId)" },
+      { icon: '🐙', label: 'GitHub', href: 'https://github.com/block/buzz' }
+    ];
+  } else if (agentId === 'goose') {
+    extras = [
+      { icon: '📡', label: 'Telegram & Integrations', onclick: "nav('gov')" },
+      { icon: '⚙️', label: 'Configure API Key & Model', onclick: "nav('config')" },
+      { icon: '🔄', label: 'Refresh', onclick: "loadAgentWorkspace('goose', currentThreadId)" },
+      { icon: '🐙', label: 'GitHub', href: 'https://github.com/aaif-goose/goose' }
+    ];
+  } else if (agentId === 'deepseek-harness') {
+    extras = [
+      { icon: '📡', label: 'Telegram & Integrations', onclick: "nav('gov')" },
+      { icon: '⚙️', label: 'Configure API Key & Model', onclick: "nav('config')" },
+      { icon: '🔄', label: 'Refresh', onclick: "loadAgentWorkspace('deepseek-harness', currentThreadId)" },
+      { icon: '🐙', label: 'GitHub', href: 'https://github.com/deepseek-ai' }
+    ];
+  } else if (agentId === 'deerflow') {
+    extras = [
+      { icon: '🚀', label: 'Open DeerFlow UI', onclick: "launch('2026','/','DeerFlow','','')" },
+      { icon: '📡', label: 'Telegram & Integrations', onclick: "nav('gov')" },
+      { icon: '🔄', label: 'Refresh', onclick: "loadAgentWorkspace('deerflow', currentThreadId)" },
+      { icon: '⚙️', label: 'Settings', onclick: "nav('config')" }
+    ];
+  } else {
+    extras = [
+      { icon: '⚙️', label: 'Configure API Key & Model', onclick: "nav('config')" },
+      { icon: '🔄', label: 'Refresh', onclick: "loadAgentWorkspace('" + agentId + "', currentThreadId)" }
+    ];
+  }
+  return items.concat(extras);
 }
 
 function showAgentPage(agentId) {
@@ -3182,22 +3411,20 @@ function showAgentPage(agentId) {
       <!-- SUBBAR -->
       <div class="agentic-subbar">
         <div class="agentic-status-group">
-          <span class="agentic-badge-live">● ${dispName.toUpperCase()}</span>
-          <span>Shared Memory MCP: <strong id="mcp-status-badge" style="color:#22c55e;">ONLINE (:3001)</strong></span>
-          <span>Sync Target: <code style="color:#38bdf8;font-size:11px;">D:/ObsidianVault</code></span>
+          <span class="agentic-badge-live">● ${dispName}</span>
+          <span>Memory MCP: <strong id="mcp-status-badge" style="color:#22c55e;">ONLINE (:3001)</strong></span>
+          <span>Sync: <code style="color:#64748b;font-size:11px;">D:/ObsidianVault</code></span>
         </div>
         <div style="display:flex;gap:8px;align-items:center;">
-          <button class="agentic-btn" style="background:#0ea5e9;padding:6px 12px;font-size:11px;" onclick="previewRecentWork()">👁️ Live Preview</button>
-          <button class="agentic-btn-secondary" onclick="showOracleStudio()">🔮 Oracle Feeds</button>
-          <button class="agentic-btn" onclick="nav('config')">⚙️ LLM & API Keys</button>
-          ${agentId === 'hermes' ? '<button class="agentic-btn-secondary" style="font-size:11px;padding:6px 10px;" onclick="hermesWorkspacePanel(\'tools\')">🛠 Tools</button><button class="agentic-btn-secondary" style="font-size:11px;padding:6px 10px;" onclick="hermesWorkspacePanel(\'config\')">⚙️ Hermes Config</button><button class="agentic-btn-secondary" style="font-size:11px;padding:6px 10px;" onclick="hermesWorkspacePanel(\'telemetry\')">📊 Telemetry</button><button class="agentic-btn" style="background:#22d3ee;padding:6px 12px;font-size:11px;" onclick="nav(\'hermes-full\')">🚀 Full Hermes</button>' : ''}
+          <button class="agentic-btn" style="padding:6px 12px;font-size:11px;" onclick="previewRecentWork()">👁️ Live Preview</button>
+          <button class="agentic-icon-btn" style="font-size:15px;width:32px;height:32px;" onclick="agenticMoreMenu(this, agenticSubbarItems('${agentId}'))" title="More options" aria-label="More options">⋯</button>
         </div>
       </div>
 
       <!-- HERMES POWER PANEL (tools / config / telemetry inside the workspace) -->
       <div id="hermes-panel" class="agentic-card" style="display:none;margin-bottom:16px;">
         <div class="agentic-card-header" style="flex-wrap:wrap;gap:8px;">
-          <span id="hermes-panel-title">🛠 HERMES TOOLS</span>
+          <span id="hermes-panel-title">🛠 Hermes Tools</span>
           <span style="margin-left:auto;display:flex;gap:6px;align-items:center;">
             <button class="agentic-btn-secondary" style="padding:2px 10px;font-size:10px;" onclick="hermesClosePanel()" title="Close">▲ Close</button>
           </span>
@@ -3208,7 +3435,7 @@ function showAgentPage(agentId) {
       <!-- ORACLE STUDIO: configurable feeds -> multi-source sweep -> article -> n8n schedule -->
       <div id="oracle-studio-card" class="agentic-card" style="display:none;margin-bottom:16px;">
         <div class="agentic-card-header" style="flex-wrap:wrap;gap:8px;">
-          <span>🔮 ORACLE STUDIO <span style="font-size:9px;color:#22c55e;background:rgba(34,197,94,0.12);padding:1px 6px;border-radius:4px;vertical-align:middle;">v3</span></span>
+          <span>🔮 Oracle Studio <span style="font-size:9px;color:#22c55e;background:rgba(34,197,94,0.12);padding:1px 6px;border-radius:4px;vertical-align:middle;">v3</span></span>
           <span style="font-size:11px;color:#94a3b8;">Parallel 5-source sweep · draft→review→publish · digest</span>
           <span style="margin-left:auto;display:flex;gap:6px;align-items:center;">
             <button class="agentic-btn-secondary" style="padding:2px 8px;font-size:10px;" onclick="sweepAllFeeds()">📬 Sweep All</button>
@@ -3227,10 +3454,10 @@ function showAgentPage(agentId) {
         <!-- COLUMN 1: AGENT ROSTER & THREAD TOPICS (LEFT PANEL) -->
         <div class="agentic-card" style="display:flex;flex-direction:column;min-height:620px;padding:0;background:rgba(15,23,42,0.92);">
           <div class="agentic-card-header" style="border-bottom:1px solid rgba(51,65,85,0.6);padding:10px 12px;display:flex;justify-content:space-between;align-items:center;">
-            <div style="font-weight:700;font-size:12px;color:#f8fafc;display:flex;align-items:center;gap:6px;">
-              <span>🤖 AGENTS & TOPICS</span>
+            <div style="font-weight:600;font-size:12px;color:#e2e8f0;display:flex;align-items:center;gap:6px;">
+              <span>Agents & Topics</span>
             </div>
-            <button class="agentic-btn" style="padding:3px 8px;font-size:10px;background:#0284c7;" onclick="createNewAgentSession(currentAgentWorkspace)" title="Create a new chat / topic on active agent">➕ New Chat</button>
+            <button class="agentic-btn" style="padding:3px 8px;font-size:10px;" onclick="createNewAgentSession(currentAgentWorkspace)" title="Create a new chat / topic on active agent">New Chat</button>
           </div>
           <div id="agent-roster-container" class="agentic-roster-list" style="padding:8px 10px;flex:1;overflow-y:auto;">
             <div class="loading">Loading agents and threads...</div>
@@ -3243,13 +3470,13 @@ function showAgentPage(agentId) {
         </div>
 
         <!-- COLUMN 3: UNIFIED SHARED MEMORY & LOGS -->
-        <div class="agentic-card">
-          <div class="agentic-card-header" style="flex-wrap:wrap;gap:6px;">
-            <div style="display:flex;gap:4px;">
-              <button class="agentic-btn-secondary" id="tab-btn-mem" style="padding:2px 8px;font-size:11px;background:rgba(56,189,248,0.2);color:#38bdf8;" onclick="switchRightPanelTab('mem')">🧠 Shared Memory</button>
-              <button class="agentic-btn-secondary" id="tab-btn-vault" style="padding:2px 8px;font-size:11px;" onclick="switchRightPanelTab('vault')">📖 Vault Inspector</button>
+        <div class="agentic-card" style="padding:0;overflow:hidden;">
+          <div style="padding:10px 12px;display:flex;justify-content:space-between;align-items:center;gap:8px;border-bottom:1px solid rgba(51,65,85,0.4);flex-wrap:wrap;">
+            <div class="agentic-seg">
+              <button class="seg-btn active" id="tab-btn-mem" style="font-size:10.5px;padding:4px 10px;" onclick="switchRightPanelTab('mem')">🧠 Memory</button>
+              <button class="seg-btn" id="tab-btn-vault" style="font-size:10.5px;padding:4px 10px;" onclick="switchRightPanelTab('vault')">📖 Vault</button>
             </div>
-            <span style="font-size:10px;color:#22c55e;">Sync Active</span>
+            <span style="font-size:10px;color:#22c55e;display:flex;align-items:center;gap:4px;"><span style="width:6px;height:6px;border-radius:50%;background:#22c55e;display:inline-block;"></span>Sync active</span>
           </div>
 
           <div id="right-panel-mem-view">
@@ -3264,11 +3491,11 @@ function showAgentPage(agentId) {
                 <button class="agentic-btn" onclick="postToMemory()" style="padding:6px 16px;font-size:11px;flex-shrink:0;">＋ Add</button>
               </div>
             </div>
-            <div style="display:flex;gap:4px;margin-bottom:8px;flex-wrap:wrap;" id="mem-tier-filters">
-              <button class="agentic-btn-secondary" id="memf-all" style="padding:2px 8px;font-size:10px;background:rgba(56,189,248,0.2);color:#38bdf8;" onclick="loadAgentMemory('')">All</button>
-              <button class="agentic-btn-secondary" id="memf-core" style="padding:2px 8px;font-size:10px;" onclick="loadAgentMemory('core')">⭐ Core</button>
-              <button class="agentic-btn-secondary" id="memf-working" style="padding:2px 8px;font-size:10px;" onclick="loadAgentMemory('working')">💼 Working</button>
-              <button class="agentic-btn-secondary" id="memf-auto" style="padding:2px 8px;font-size:10px;" onclick="loadAgentMemory('auto')">🤖 Auto</button>
+            <div class="agentic-seg" style="flex-wrap:wrap;" id="mem-tier-filters">
+              <button class="seg-btn" id="memf-all" style="font-size:10px;padding:3px 9px;background:rgba(56,189,248,0.2);color:#38bdf8;" onclick="loadAgentMemory('')">All</button>
+              <button class="seg-btn" id="memf-core" style="font-size:10px;padding:3px 9px;" onclick="loadAgentMemory('core')">⭐ Core</button>
+              <button class="seg-btn" id="memf-working" style="font-size:10px;padding:3px 9px;" onclick="loadAgentMemory('working')">💼 Working</button>
+              <button class="seg-btn" id="memf-auto" style="font-size:10px;padding:3px 9px;" onclick="loadAgentMemory('auto')">🤖 Auto</button>
             </div>
             <div class="agentic-mem-stream" id="agentic-memory-container">
               <div class="loading">Loading memory stream...</div>
@@ -3318,28 +3545,23 @@ function loadAgentWorkspace(agentId, threadId) {
         <div style="display:flex;align-items:center;gap:10px;">
           <span style="font-size:16px;">🤖</span>
           <div>
-            <span style="font-weight:700;font-size:14px;color:#f8fafc;">Hermes Agent Workstation</span>
-            <span style="font-size:11px;color:#38bdf8;margin-left:8px;" id="ws-agent-model">Ollama (llama3)</span>
+            <span style="font-weight:700;font-size:14px;color:#f8fafc;">Hermes Agent</span>
+            <span style="font-size:11px;color:#64748b;margin-left:8px;" id="ws-agent-model">Ollama (llama3)</span>
           </div>
         </div>
 
-        <!-- Hermes Mode Subtabs: Chat, Signal Radar, Tool Sandbox -->
-        <div style="display:flex;gap:4px;background:rgba(15,23,42,0.8);padding:3px;border-radius:8px;border:1px solid rgba(51,65,85,0.6);flex-wrap:wrap;">
-          <button id="hermes-subtab-chat" class="agentic-btn" style="padding:4px 10px;font-size:11px;" onclick="switchHermesSubtab('chat')">💬 Hermes Chat</button>
-          <button id="hermes-subtab-radar" class="agentic-btn-secondary" style="padding:4px 10px;font-size:11px;color:#fbbf24;" onclick="switchHermesSubtab('radar')">🔮 Signal Radar</button>
-          <button id="hermes-subtab-tools" class="agentic-btn-secondary" style="padding:4px 10px;font-size:11px;color:#a78bfa;" onclick="switchHermesSubtab('tools')">🛠️ Tool Sandbox</button>
+        <div class="agentic-seg" style="margin-left:6px;">
+          <button id="hermes-subtab-chat" class="seg-btn active" onclick="switchHermesSubtab('chat')">💬 Chat</button>
+          <button id="hermes-subtab-radar" class="seg-btn" onclick="switchHermesSubtab('radar')">🔮 Radar</button>
+          <button id="hermes-subtab-tools" class="seg-btn" onclick="switchHermesSubtab('tools')">🛠️ Tools</button>
         </div>
 
-        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-left:auto;">
-          <button class="agentic-btn" style="padding:4px 10px;font-size:11px;background:#0ea5e9;" onclick="nav('gov')">📡 Telegram & Integrations</button>
-          <select id="agent-session-select" onchange="switchAgentSession('hermes', this.value)" style="background:rgba(30,41,59,0.9);border:1px solid rgba(56,189,248,0.3);color:#fff;font-size:11px;border-radius:6px;padding:4px 8px;max-width:180px;">
+        <div class="agentic-ws-actions">
+          <select id="agent-session-select" onchange="switchAgentSession('hermes', this.value)" style="background:rgba(30,41,59,0.9);border:1px solid rgba(71,85,105,0.55);color:#fff;font-size:11px;border-radius:8px;padding:5px 8px;max-width:150px;">
             <option value="session-default">Default Session</option>
           </select>
-          <button class="agentic-btn-secondary" style="padding:4px 10px;font-size:11px;" onclick="createNewAgentSession('hermes')" title="Create a new chat / topic">➕ New Topic</button>
-          <button class="agentic-btn-secondary" style="padding:4px 8px;font-size:11px;" onclick="renameCurrentAgentSession('hermes')" title="Rename this topic">✏️</button>
-          <button class="agentic-btn-secondary" style="padding:4px 8px;font-size:11px;color:#ef4444;border-color:rgba(239,68,68,0.4);" onclick="deleteCurrentAgentSession('hermes')" title="Delete this topic">🗑️</button>
-          <button class="agentic-btn-secondary" style="padding:4px 10px;font-size:11px;" onclick="goToSkills()" title="Jump to your skills">📚 Skills</button>
-          <button class="agentic-btn-secondary" style="padding:4px 10px;font-size:11px;" onclick="nav('config')">⚙️ Config</button>
+          <button class="agentic-btn" style="padding:5px 10px;font-size:11px;" onclick="createNewAgentSession('hermes')" title="Create a new chat / topic">New Topic</button>
+          <button class="agentic-icon-btn" style="font-size:14px;width:30px;height:30px;" onclick="agenticMoreMenu(this, agenticTopicItems('hermes'))" title="Topic options" aria-label="Topic options">⋯</button>
         </div>
       </div>
 
@@ -3356,15 +3578,15 @@ function loadAgentWorkspace(agentId, threadId) {
               <span class="agentic-chip" onclick="quickPrompt('🧠 Query active Obsidian Vault memory')">🧠 Query Obsidian</span>
               <span class="agentic-chip" onclick="quickPrompt('📝 Summarize today project notes')">📝 Summarize Notes</span>
             </div>
-            <div style="display:flex;gap:8px;">
-              <textarea id="agent-msg-input" placeholder="Talk to Hermes Agent... (type / for commands, @ for skills)" style="flex:1;height:42px;background:rgba(15,23,42,0.9);border:1px solid rgba(51,65,85,0.6);border-radius:8px;padding:8px 12px;color:#fff;font-size:12px;resize:none;" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendAgentMessage();}"></textarea>
-              <button class="agentic-btn-secondary" id="voice-btn" onclick="toggleVoiceInput()" style="padding:8px 10px;font-size:12px;" title="🎙️ Voice input (Web Speech API)">🎙️</button>
-              <button class="agentic-btn-secondary" id="tts-btn" onclick="toggleTTS()" style="padding:8px 10px;font-size:11px;" title="🔊 Read agent replies aloud">🔇 Off</button>
-              <button class="agentic-btn-secondary" onclick="exportSessionMenu(this)" style="padding:8px 10px;font-size:11px;" title="Export session (.md / .json / PDF)">📤</button>
-              <label class="agentic-btn-secondary" style="padding:8px 12px;font-size:11px;cursor:pointer;display:flex;align-items:center;" title="Attach Markdown / Code File to context">
+            <div style="display:flex;gap:6px;">
+              <textarea id="agent-msg-input" placeholder="Talk to Hermes Agent... (type / for commands, @ for skills)" style="flex:1;height:42px;background:rgba(15,23,42,0.9);border:1px solid rgba(51,65,85,0.6);border-radius:10px;padding:8px 12px;color:#fff;font-size:12px;resize:none;" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendAgentMessage();}"></textarea>
+              <button class="agentic-icon-btn" id="voice-btn" onclick="toggleVoiceInput()" title="Voice input (Web Speech API)" aria-label="Voice input">🎙️</button>
+              <button class="agentic-icon-btn" id="tts-btn" onclick="toggleTTS()" title="Read agent replies aloud" aria-label="Toggle speech">🔇</button>
+              <button class="agentic-icon-btn" onclick="exportSessionMenu(this)" title="Export session (.md / .json / PDF)" aria-label="Export session">📤</button>
+              <label class="agentic-icon-btn" title="Attach Markdown / Code File to context" aria-label="Attach file" style="cursor:pointer;">
                 📎 <input type="file" style="display:none;" onchange="handlePromptFileUpload(event)">
               </label>
-              <button class="agentic-btn" onclick="sendAgentMessage()" style="padding:8px 16px;">Send</button>
+              <button class="agentic-btn" onclick="sendAgentMessage()" style="padding:0 18px;height:34px;">Send</button>
             </div>
           </div>
         </div>
@@ -3453,21 +3675,16 @@ function loadAgentWorkspace(agentId, threadId) {
         <div style="display:flex;align-items:center;gap:10px;">
           <span style="font-size:20px;">🦞</span>
           <div>
-            <span style="font-weight:700;font-size:14px;color:#f8fafc;">OpenClaw Autonomous Workstation</span>
-            <span style="font-size:11px;color:#38bdf8;margin-left:8px;" id="openclaw-model-badge">DeepSeek / OpenAI (Ready)</span>
+            <span style="font-weight:700;font-size:14px;color:#f8fafc;">OpenClaw</span>
+            <span style="font-size:11px;color:#64748b;margin-left:8px;" id="openclaw-model-badge">DeepSeek / OpenAI (Ready)</span>
           </div>
         </div>
-        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-left:auto;">
-          <button class="agentic-btn" style="padding:4px 12px;font-size:11px;background:#0ea5e9;" onclick="nav('gov')">📡 Telegram & Integrations</button>
-          <select id="agent-session-select" onchange="switchAgentSession('openclaw', this.value)" style="background:rgba(30,41,59,0.9);border:1px solid rgba(56,189,248,0.3);color:#fff;font-size:11px;border-radius:6px;padding:4px 8px;max-width:180px;">
+        <div class="agentic-ws-actions">
+          <select id="agent-session-select" onchange="switchAgentSession('openclaw', this.value)" style="background:rgba(30,41,59,0.9);border:1px solid rgba(71,85,105,0.55);color:#fff;font-size:11px;border-radius:8px;padding:5px 8px;max-width:150px;">
             <option value="main">Main Chat</option>
           </select>
-          <button class="agentic-btn-secondary" style="padding:4px 10px;font-size:11px;" onclick="createNewAgentSession('openclaw')" title="Create a new chat / topic">➕ New Topic</button>
-          <button class="agentic-btn-secondary" style="padding:4px 8px;font-size:11px;" onclick="renameCurrentAgentSession('openclaw')" title="Rename this topic">✏️</button>
-          <button class="agentic-btn-secondary" style="padding:4px 8px;font-size:11px;color:#ef4444;border-color:rgba(239,68,68,0.4);" onclick="deleteCurrentAgentSession('openclaw')" title="Delete this topic">🗑️</button>
-          <button class="agentic-btn" style="padding:4px 12px;font-size:11px;background:#0284c7;" onclick="nav('config')">⚙️ Configure API Key & Model</button>
-          <button class="agentic-btn-secondary" style="padding:4px 10px;font-size:11px;" onclick="loadAgentWorkspace('openclaw', currentThreadId)">🔄 Refresh</button>
-          <a href="https://github.com/openclaw/openclaw" target="_blank" class="agentic-btn-secondary" style="padding:4px 10px;font-size:11px;text-decoration:none;">GitHub ↗</a>
+          <button class="agentic-btn" style="padding:5px 10px;font-size:11px;" onclick="createNewAgentSession('openclaw')" title="Create a new chat / topic">New Topic</button>
+          <button class="agentic-icon-btn" style="font-size:14px;width:30px;height:30px;" onclick="agenticMoreMenu(this, agenticTopicItems('openclaw'))" title="Topic options" aria-label="Topic options">⋯</button>
         </div>
       </div>
 
@@ -3485,13 +3702,7 @@ function loadAgentWorkspace(agentId, threadId) {
           </div>
           <div style="display:flex;gap:8px;">
             <textarea id="agent-msg-input" placeholder="Talk to OpenClaw Autonomous Agent... (type / for commands, @ for skills)" style="flex:1;height:42px;background:rgba(15,23,42,0.9);border:1px solid rgba(51,65,85,0.6);border-radius:8px;padding:8px 12px;color:#fff;font-size:12px;resize:none;" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendAgentMessage();}"></textarea>
-            <button class="agentic-btn-secondary" id="voice-btn" onclick="toggleVoiceInput()" style="padding:8px 10px;font-size:12px;" title="🎙️ Voice input (Web Speech API)">🎙️</button>
-            <button class="agentic-btn-secondary" id="tts-btn" onclick="toggleTTS()" style="padding:8px 10px;font-size:11px;" title="🔊 Read agent replies aloud">🔇 Off</button>
-            <button class="agentic-btn-secondary" onclick="exportSessionMenu(this)" style="padding:8px 10px;font-size:11px;" title="Export session (.md / .json / PDF)">📤</button>
-            <label class="agentic-btn-secondary" style="padding:8px 12px;font-size:11px;cursor:pointer;display:flex;align-items:center;" title="Attach File">
-              📎 <input type="file" style="display:none;" onchange="handlePromptFileUpload(event)">
-            </label>
-            <button class="agentic-btn" onclick="sendAgentMessage()" style="padding:8px 16px;background:#0284c7;">Send</button>
+            <button class="agentic-icon-btn" id="voice-btn" onclick="toggleVoiceInput()" title="Voice input (Web Speech API)" aria-label="Voice input">🎙️</button><button class="agentic-icon-btn" id="tts-btn" onclick="toggleTTS()" title="Read agent replies aloud" aria-label="Toggle speech">🔇</button><button class="agentic-icon-btn" onclick="exportSessionMenu(this)" title="Export session (.md / .json / PDF)" aria-label="Export session">📤</button><label class="agentic-icon-btn" title="Attach Markdown / Code File to context" aria-label="Attach file" style="cursor:pointer;">📎 <input type="file" style="display:none;" onchange="handlePromptFileUpload(event)"></label><button class="agentic-btn" onclick="sendAgentMessage()" style="padding:0 18px;height:34px;">Send</button>
           </div>
         </div>
       </div>
@@ -3521,21 +3732,16 @@ function loadAgentWorkspace(agentId, threadId) {
         <div style="display:flex;align-items:center;gap:10px;">
           <span style="font-size:20px;">🐝</span>
           <div>
-            <span style="font-weight:700;font-size:14px;color:#f8fafc;">Buzz Human + Agent Collaborative Workspace</span>
-            <span style="font-size:10px;background:rgba(234,179,8,0.18);color:#facc15;padding:2px 8px;border-radius:4px;font-weight:600;margin-left:8px;">Nostr Relay & ACP Harness</span>
+            <span style="font-weight:700;font-size:14px;color:#f8fafc;">Buzz</span>
+            <span style="font-size:10px;color:#64748b;margin-left:8px;">Nostr Relay & ACP Harness</span>
           </div>
         </div>
-        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-left:auto;">
-          <button class="agentic-btn" style="padding:4px 12px;font-size:11px;background:#eab308;color:#0f172a;font-weight:700;" onclick="launch('35522','/','Buzz Workspace','','')">🚀 Open Buzz Web UI</button>
-          <select id="agent-session-select" onchange="switchAgentSession('buzz', this.value)" style="background:rgba(30,41,59,0.9);border:1px solid rgba(234,179,8,0.4);color:#fff;font-size:11px;border-radius:6px;padding:4px 8px;max-width:180px;">
+        <div class="agentic-ws-actions">
+          <select id="agent-session-select" onchange="switchAgentSession('buzz', this.value)" style="background:rgba(30,41,59,0.9);border:1px solid rgba(71,85,105,0.55);color:#fff;font-size:11px;border-radius:8px;padding:5px 8px;max-width:150px;">
             <option value="main">Main Chat</option>
           </select>
-          <button class="agentic-btn-secondary" style="padding:4px 10px;font-size:11px;" onclick="createNewAgentSession('buzz')" title="Create a new chat / topic">➕ New Topic</button>
-          <button class="agentic-btn-secondary" style="padding:4px 8px;font-size:11px;" onclick="renameCurrentAgentSession('buzz')" title="Rename this topic">✏️</button>
-          <button class="agentic-btn-secondary" style="padding:4px 8px;font-size:11px;color:#ef4444;border-color:rgba(239,68,68,0.4);" onclick="deleteCurrentAgentSession('buzz')" title="Delete this topic">🗑️</button>
-          <button class="agentic-btn" style="padding:4px 12px;font-size:11px;background:#0ea5e9;" onclick="nav('gov')">📡 Telegram & Integrations</button>
-          <button class="agentic-btn-secondary" style="padding:4px 10px;font-size:11px;" onclick="loadAgentWorkspace('buzz', currentThreadId)">🔄 Refresh</button>
-          <a href="https://github.com/block/buzz" target="_blank" class="agentic-btn-secondary" style="padding:4px 10px;font-size:11px;text-decoration:none;">GitHub ↗</a>
+          <button class="agentic-btn" style="padding:5px 10px;font-size:11px;" onclick="createNewAgentSession('buzz')" title="Create a new chat / topic">New Topic</button>
+          <button class="agentic-icon-btn" style="font-size:14px;width:30px;height:30px;" onclick="agenticMoreMenu(this, agenticTopicItems('buzz'))" title="Topic options" aria-label="Topic options">⋯</button>
         </div>
       </div>
 
@@ -3553,13 +3759,7 @@ function loadAgentWorkspace(agentId, threadId) {
           </div>
           <div style="display:flex;gap:8px;">
             <textarea id="agent-msg-input" placeholder="Talk to Buzz Workspace Coordinator... (type / for commands, @ for skills)" style="flex:1;height:42px;background:rgba(15,23,42,0.9);border:1px solid rgba(51,65,85,0.6);border-radius:8px;padding:8px 12px;color:#fff;font-size:12px;resize:none;" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendAgentMessage();}"></textarea>
-            <button class="agentic-btn-secondary" id="voice-btn" onclick="toggleVoiceInput()" style="padding:8px 10px;font-size:12px;" title="🎙️ Voice input (Web Speech API)">🎙️</button>
-            <button class="agentic-btn-secondary" id="tts-btn" onclick="toggleTTS()" style="padding:8px 10px;font-size:11px;" title="🔊 Read agent replies aloud">🔇 Off</button>
-            <button class="agentic-btn-secondary" onclick="exportSessionMenu(this)" style="padding:8px 10px;font-size:11px;" title="Export session (.md / .json / PDF)">📤</button>
-            <label class="agentic-btn-secondary" style="padding:8px 12px;font-size:11px;cursor:pointer;display:flex;align-items:center;" title="Attach File">
-              📎 <input type="file" style="display:none;" onchange="handlePromptFileUpload(event)">
-            </label>
-            <button class="agentic-btn" onclick="sendAgentMessage()" style="padding:8px 16px;background:#eab308;color:#0f172a;font-weight:700;">Send</button>
+            <button class="agentic-icon-btn" id="voice-btn" onclick="toggleVoiceInput()" title="Voice input (Web Speech API)" aria-label="Voice input">🎙️</button><button class="agentic-icon-btn" id="tts-btn" onclick="toggleTTS()" title="Read agent replies aloud" aria-label="Toggle speech">🔇</button><button class="agentic-icon-btn" onclick="exportSessionMenu(this)" title="Export session (.md / .json / PDF)" aria-label="Export session">📤</button><label class="agentic-icon-btn" title="Attach Markdown / Code File to context" aria-label="Attach file" style="cursor:pointer;">📎 <input type="file" style="display:none;" onchange="handlePromptFileUpload(event)"></label><button class="agentic-btn" onclick="sendAgentMessage()" style="padding:0 18px;height:34px;">Send</button>
           </div>
         </div>
       </div>
@@ -3589,21 +3789,16 @@ function loadAgentWorkspace(agentId, threadId) {
         <div style="display:flex;align-items:center;gap:10px;">
           <span style="font-size:20px;">🪿</span>
           <div>
-            <span style="font-weight:700;font-size:14px;color:#f8fafc;">Goose Developer Workstation</span>
-            <span style="font-size:10px;background:rgba(245,158,11,0.18);color:#fbbf24;padding:2px 8px;border-radius:4px;font-weight:600;margin-left:8px;">Open Developer Agent (Block)</span>
+            <span style="font-weight:700;font-size:14px;color:#f8fafc;">Goose</span>
+            <span style="font-size:10px;color:#64748b;margin-left:8px;">Open Developer Agent (Block)</span>
           </div>
         </div>
-        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-left:auto;">
-          <select id="agent-session-select" onchange="switchAgentSession('goose', this.value)" style="background:rgba(30,41,59,0.9);border:1px solid rgba(245,158,11,0.4);color:#fff;font-size:11px;border-radius:6px;padding:4px 8px;max-width:180px;">
+        <div class="agentic-ws-actions">
+          <select id="agent-session-select" onchange="switchAgentSession('goose', this.value)" style="background:rgba(30,41,59,0.9);border:1px solid rgba(71,85,105,0.55);color:#fff;font-size:11px;border-radius:8px;padding:5px 8px;max-width:150px;">
             <option value="main">Main Chat</option>
           </select>
-          <button class="agentic-btn-secondary" style="padding:4px 10px;font-size:11px;" onclick="createNewAgentSession('goose')" title="Create a new chat / topic">➕ New Topic</button>
-          <button class="agentic-btn-secondary" style="padding:4px 8px;font-size:11px;" onclick="renameCurrentAgentSession('goose')" title="Rename this topic">✏️</button>
-          <button class="agentic-btn-secondary" style="padding:4px 8px;font-size:11px;color:#ef4444;border-color:rgba(239,68,68,0.4);" onclick="deleteCurrentAgentSession('goose')" title="Delete this topic">🗑️</button>
-          <button class="agentic-btn" style="padding:4px 12px;font-size:11px;background:#0ea5e9;" onclick="nav('gov')">📡 Telegram & Integrations</button>
-          <button class="agentic-btn" style="padding:4px 12px;font-size:11px;background:#d97706;" onclick="nav('config')">⚙️ Configure API Key & Model</button>
-          <button class="agentic-btn-secondary" style="padding:4px 10px;font-size:11px;" onclick="loadAgentWorkspace('goose', currentThreadId)">🔄 Refresh</button>
-          <a href="https://github.com/aaif-goose/goose" target="_blank" class="agentic-btn-secondary" style="padding:4px 10px;font-size:11px;text-decoration:none;">GitHub ↗</a>
+          <button class="agentic-btn" style="padding:5px 10px;font-size:11px;" onclick="createNewAgentSession('goose')" title="Create a new chat / topic">New Topic</button>
+          <button class="agentic-icon-btn" style="font-size:14px;width:30px;height:30px;" onclick="agenticMoreMenu(this, agenticTopicItems('goose'))" title="Topic options" aria-label="Topic options">⋯</button>
         </div>
       </div>
 
@@ -3621,13 +3816,7 @@ function loadAgentWorkspace(agentId, threadId) {
           </div>
           <div style="display:flex;gap:8px;">
             <textarea id="agent-msg-input" placeholder="Talk to Goose Developer Agent... (type / for commands, @ for skills)" style="flex:1;height:42px;background:rgba(15,23,42,0.9);border:1px solid rgba(51,65,85,0.6);border-radius:8px;padding:8px 12px;color:#fff;font-size:12px;resize:none;" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendAgentMessage();}"></textarea>
-            <button class="agentic-btn-secondary" id="voice-btn" onclick="toggleVoiceInput()" style="padding:8px 10px;font-size:12px;" title="🎙️ Voice input (Web Speech API)">🎙️</button>
-            <button class="agentic-btn-secondary" id="tts-btn" onclick="toggleTTS()" style="padding:8px 10px;font-size:11px;" title="🔊 Read agent replies aloud">🔇 Off</button>
-            <button class="agentic-btn-secondary" onclick="exportSessionMenu(this)" style="padding:8px 10px;font-size:11px;" title="Export session (.md / .json / PDF)">📤</button>
-            <label class="agentic-btn-secondary" style="padding:8px 12px;font-size:11px;cursor:pointer;display:flex;align-items:center;" title="Attach File">
-              📎 <input type="file" style="display:none;" onchange="handlePromptFileUpload(event)">
-            </label>
-            <button class="agentic-btn" onclick="sendAgentMessage()" style="padding:8px 16px;background:#d97706;">Send</button>
+            <button class="agentic-icon-btn" id="voice-btn" onclick="toggleVoiceInput()" title="Voice input (Web Speech API)" aria-label="Voice input">🎙️</button><button class="agentic-icon-btn" id="tts-btn" onclick="toggleTTS()" title="Read agent replies aloud" aria-label="Toggle speech">🔇</button><button class="agentic-icon-btn" onclick="exportSessionMenu(this)" title="Export session (.md / .json / PDF)" aria-label="Export session">📤</button><label class="agentic-icon-btn" title="Attach Markdown / Code File to context" aria-label="Attach file" style="cursor:pointer;">📎 <input type="file" style="display:none;" onchange="handlePromptFileUpload(event)"></label><button class="agentic-btn" onclick="sendAgentMessage()" style="padding:0 18px;height:34px;">Send</button>
           </div>
         </div>
       </div>
@@ -3657,21 +3846,16 @@ function loadAgentWorkspace(agentId, threadId) {
         <div style="display:flex;align-items:center;gap:10px;">
           <span style="font-size:20px;">🐋</span>
           <div>
-            <span style="font-weight:700;font-size:14px;color:#f8fafc;">DeepSeek Harness Reasoning Engine</span>
-            <span style="font-size:10px;background:rgba(2,132,199,0.18);color:#38bdf8;padding:2px 8px;border-radius:4px;font-weight:600;margin-left:8px;">DeepSeek Reasoning Engine</span>
+            <span style="font-weight:700;font-size:14px;color:#f8fafc;">DeepSeek Harness</span>
+            <span style="font-size:10px;color:#64748b;margin-left:8px;">Reasoning Engine</span>
           </div>
         </div>
-        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-left:auto;">
-          <select id="agent-session-select" onchange="switchAgentSession('deepseek-harness', this.value)" style="background:rgba(30,41,59,0.9);border:1px solid rgba(2,132,199,0.4);color:#fff;font-size:11px;border-radius:6px;padding:4px 8px;max-width:180px;">
+        <div class="agentic-ws-actions">
+          <select id="agent-session-select" onchange="switchAgentSession('deepseek-harness', this.value)" style="background:rgba(30,41,59,0.9);border:1px solid rgba(71,85,105,0.55);color:#fff;font-size:11px;border-radius:8px;padding:5px 8px;max-width:150px;">
             <option value="main">Main Chat</option>
           </select>
-          <button class="agentic-btn-secondary" style="padding:4px 10px;font-size:11px;" onclick="createNewAgentSession('deepseek-harness')" title="Create a new chat / topic">➕ New Topic</button>
-          <button class="agentic-btn-secondary" style="padding:4px 8px;font-size:11px;" onclick="renameCurrentAgentSession('deepseek-harness')" title="Rename this topic">✏️</button>
-          <button class="agentic-btn-secondary" style="padding:4px 8px;font-size:11px;color:#ef4444;border-color:rgba(239,68,68,0.4);" onclick="deleteCurrentAgentSession('deepseek-harness')" title="Delete this topic">🗑️</button>
-          <button class="agentic-btn" style="padding:4px 12px;font-size:11px;background:#0ea5e9;" onclick="nav('gov')">📡 Telegram & Integrations</button>
-          <button class="agentic-btn" style="padding:4px 12px;font-size:11px;background:#0284c7;" onclick="nav('config')">⚙️ Configure API Key & Model</button>
-          <button class="agentic-btn-secondary" style="padding:4px 10px;font-size:11px;" onclick="loadAgentWorkspace('deepseek-harness', currentThreadId)">🔄 Refresh</button>
-          <a href="https://github.com/deepseek-ai" target="_blank" class="agentic-btn-secondary" style="padding:4px 10px;font-size:11px;text-decoration:none;">GitHub ↗</a>
+          <button class="agentic-btn" style="padding:5px 10px;font-size:11px;" onclick="createNewAgentSession('deepseek-harness')" title="Create a new chat / topic">New Topic</button>
+          <button class="agentic-icon-btn" style="font-size:14px;width:30px;height:30px;" onclick="agenticMoreMenu(this, agenticTopicItems('deepseek-harness'))" title="Topic options" aria-label="Topic options">⋯</button>
         </div>
       </div>
 
@@ -3689,13 +3873,7 @@ function loadAgentWorkspace(agentId, threadId) {
           </div>
           <div style="display:flex;gap:8px;">
             <textarea id="agent-msg-input" placeholder="Talk to DeepSeek Reasoning Harness... (type / for commands, @ for skills)" style="flex:1;height:42px;background:rgba(15,23,42,0.9);border:1px solid rgba(51,65,85,0.6);border-radius:8px;padding:8px 12px;color:#fff;font-size:12px;resize:none;" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendAgentMessage();}"></textarea>
-            <button class="agentic-btn-secondary" id="voice-btn" onclick="toggleVoiceInput()" style="padding:8px 10px;font-size:12px;" title="🎙️ Voice input (Web Speech API)">🎙️</button>
-            <button class="agentic-btn-secondary" id="tts-btn" onclick="toggleTTS()" style="padding:8px 10px;font-size:11px;" title="🔊 Read agent replies aloud">🔇 Off</button>
-            <button class="agentic-btn-secondary" onclick="exportSessionMenu(this)" style="padding:8px 10px;font-size:11px;" title="Export session (.md / .json / PDF)">📤</button>
-            <label class="agentic-btn-secondary" style="padding:8px 12px;font-size:11px;cursor:pointer;display:flex;align-items:center;" title="Attach File">
-              📎 <input type="file" style="display:none;" onchange="handlePromptFileUpload(event)">
-            </label>
-            <button class="agentic-btn" onclick="sendAgentMessage()" style="padding:8px 16px;background:#0284c7;">Send</button>
+            <button class="agentic-icon-btn" id="voice-btn" onclick="toggleVoiceInput()" title="Voice input (Web Speech API)" aria-label="Voice input">🎙️</button><button class="agentic-icon-btn" id="tts-btn" onclick="toggleTTS()" title="Read agent replies aloud" aria-label="Toggle speech">🔇</button><button class="agentic-icon-btn" onclick="exportSessionMenu(this)" title="Export session (.md / .json / PDF)" aria-label="Export session">📤</button><label class="agentic-icon-btn" title="Attach Markdown / Code File to context" aria-label="Attach file" style="cursor:pointer;">📎 <input type="file" style="display:none;" onchange="handlePromptFileUpload(event)"></label><button class="agentic-btn" onclick="sendAgentMessage()" style="padding:0 18px;height:34px;">Send</button>
           </div>
         </div>
       </div>
@@ -3725,21 +3903,16 @@ function loadAgentWorkspace(agentId, threadId) {
         <div style="display:flex;align-items:center;gap:10px;">
           <span style="font-size:20px;">🦌</span>
           <div>
-            <span style="font-weight:700;font-size:14px;color:#f8fafc;">DeerFlow Super-Agent Workstation</span>
-            <span style="font-size:11px;color:#a78bfa;margin-left:8px;">Long-Horizon Harness (:2026)</span>
+            <span style="font-weight:700;font-size:14px;color:#f8fafc;">DeerFlow</span>
+            <span style="font-size:11px;color:#64748b;margin-left:8px;">Long-Horizon Harness (:2026)</span>
           </div>
         </div>
-        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-left:auto;">
-          <button class="agentic-btn" style="padding:4px 12px;font-size:11px;background:#0ea5e9;" onclick="nav('gov')">📡 Telegram & Integrations</button>
-          <button class="agentic-btn" style="padding:4px 12px;font-size:11px;background:#7c3aed;" onclick="launch('2026','/','DeerFlow','','')">🚀 Open DeerFlow UI (:2026)</button>
-          <select id="agent-session-select" onchange="switchAgentSession('deerflow', this.value)" style="background:rgba(30,41,59,0.9);border:1px solid rgba(167,139,250,0.4);color:#fff;font-size:11px;border-radius:6px;padding:4px 8px;max-width:180px;">
+        <div class="agentic-ws-actions">
+          <select id="agent-session-select" onchange="switchAgentSession('deerflow', this.value)" style="background:rgba(30,41,59,0.9);border:1px solid rgba(71,85,105,0.55);color:#fff;font-size:11px;border-radius:8px;padding:5px 8px;max-width:150px;">
             <option value="main">Main Chat</option>
           </select>
-          <button class="agentic-btn-secondary" style="padding:4px 10px;font-size:11px;" onclick="createNewAgentSession('deerflow')" title="Create a new chat / topic">➕ New Topic</button>
-          <button class="agentic-btn-secondary" style="padding:4px 8px;font-size:11px;" onclick="renameCurrentAgentSession('deerflow')" title="Rename this topic">✏️</button>
-          <button class="agentic-btn-secondary" style="padding:4px 8px;font-size:11px;color:#ef4444;border-color:rgba(239,68,68,0.4);" onclick="deleteCurrentAgentSession('deerflow')" title="Delete this topic">🗑️</button>
-          <button class="agentic-btn-secondary" style="padding:4px 10px;font-size:11px;" onclick="loadAgentWorkspace('deerflow', currentThreadId)">🔄 Refresh</button>
-          <button class="agentic-btn-secondary" style="padding:4px 10px;font-size:11px;" onclick="nav('config')">⚙️ Config</button>
+          <button class="agentic-btn" style="padding:5px 10px;font-size:11px;" onclick="createNewAgentSession('deerflow')" title="Create a new chat / topic">New Topic</button>
+          <button class="agentic-icon-btn" style="font-size:14px;width:30px;height:30px;" onclick="agenticMoreMenu(this, agenticTopicItems('deerflow'))" title="Topic options" aria-label="Topic options">⋯</button>
         </div>
       </div>
 
@@ -3756,13 +3929,7 @@ function loadAgentWorkspace(agentId, threadId) {
           </div>
           <div style="display:flex;gap:8px;">
             <textarea id="agent-msg-input" placeholder="Talk to DeerFlow Super-Agent... (type / for commands, @ for skills)" style="flex:1;height:42px;background:rgba(15,23,42,0.9);border:1px solid rgba(51,65,85,0.6);border-radius:8px;padding:8px 12px;color:#fff;font-size:12px;resize:none;" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendAgentMessage();}"></textarea>
-            <button class="agentic-btn-secondary" id="voice-btn" onclick="toggleVoiceInput()" style="padding:8px 10px;font-size:12px;" title="🎙️ Voice input (Web Speech API)">🎙️</button>
-            <button class="agentic-btn-secondary" id="tts-btn" onclick="toggleTTS()" style="padding:8px 10px;font-size:11px;" title="🔊 Read agent replies aloud">🔇 Off</button>
-            <button class="agentic-btn-secondary" onclick="exportSessionMenu(this)" style="padding:8px 10px;font-size:11px;" title="Export session (.md / .json / PDF)">📤</button>
-            <label class="agentic-btn-secondary" style="padding:8px 12px;font-size:11px;cursor:pointer;display:flex;align-items:center;" title="Attach File">
-              📎 <input type="file" style="display:none;" onchange="handlePromptFileUpload(event)">
-            </label>
-            <button class="agentic-btn" onclick="sendAgentMessage()" style="padding:8px 16px;background:#7c3aed;">Send</button>
+            <button class="agentic-icon-btn" id="voice-btn" onclick="toggleVoiceInput()" title="Voice input (Web Speech API)" aria-label="Voice input">🎙️</button><button class="agentic-icon-btn" id="tts-btn" onclick="toggleTTS()" title="Read agent replies aloud" aria-label="Toggle speech">🔇</button><button class="agentic-icon-btn" onclick="exportSessionMenu(this)" title="Export session (.md / .json / PDF)" aria-label="Export session">📤</button><label class="agentic-icon-btn" title="Attach Markdown / Code File to context" aria-label="Attach file" style="cursor:pointer;">📎 <input type="file" style="display:none;" onchange="handlePromptFileUpload(event)"></label><button class="agentic-btn" onclick="sendAgentMessage()" style="padding:0 18px;height:34px;">Send</button>
           </div>
         </div>
       </div>
@@ -3799,20 +3966,16 @@ function loadAgentWorkspace(agentId, threadId) {
         <div style="display:flex;align-items:center;gap:10px;">
           <span style="font-size:18px;">${agentIcon}</span>
           <div>
-            <span style="font-weight:700;font-size:14px;color:#f8fafc;">${agentName} Workstation</span>
-            <span style="font-size:10px;background:${agentBadgeBg};color:${agentBadgeColor};padding:2px 8px;border-radius:4px;font-weight:600;margin-left:8px;">${agentBadgeText}</span>
-            <span style="font-size:11px;color:#94a3b8;margin-left:6px;">${agentModel}</span>
+            <span style="font-weight:700;font-size:14px;color:#f8fafc;">${agentName}</span>
+            <span style="font-size:10.5px;color:#64748b;margin-left:8px;">${agentModel}</span>
           </div>
         </div>
-        <div style="display:flex;align-items:center;gap:6px;margin-left:auto;flex-wrap:wrap;">
-          <select id="agent-session-select" onchange="switchAgentSession('${currentAgentWorkspace}', this.value)" style="background:rgba(30,41,59,0.9);border:1px solid rgba(56,189,248,0.3);color:#fff;font-size:11px;border-radius:6px;padding:4px 8px;max-width:180px;">
+        <div class="agentic-ws-actions">
+          <select id="agent-session-select" onchange="switchAgentSession('${currentAgentWorkspace}', this.value)" style="background:rgba(30,41,59,0.9);border:1px solid rgba(71,85,105,0.55);color:#fff;font-size:11px;border-radius:8px;padding:5px 8px;max-width:150px;">
             <option value="main">Main Chat</option>
           </select>
-          <button class="agentic-btn-secondary" style="padding:4px 10px;font-size:11px;" onclick="createNewAgentSession('${currentAgentWorkspace}')" title="Create a new chat / topic">➕ New Topic</button>
-          <button class="agentic-btn-secondary" style="padding:4px 8px;font-size:11px;" onclick="renameCurrentAgentSession('${currentAgentWorkspace}')" title="Rename this topic">✏️</button>
-          <button class="agentic-btn-secondary" style="padding:4px 8px;font-size:11px;color:#ef4444;border-color:rgba(239,68,68,0.4);" onclick="deleteCurrentAgentSession('${currentAgentWorkspace}')" title="Delete this topic">🗑️</button>
-          <button class="agentic-btn" style="padding:4px 12px;font-size:11px;background:#0284c7;" onclick="nav('config')">⚙️ Configure API Key & Model</button>
-          <button class="agentic-btn-secondary" style="padding:4px 8px;font-size:11px;" onclick="loadAgentWorkspace('${currentAgentWorkspace}', currentThreadId)">🔄 Refresh</button>
+          <button class="agentic-btn" style="padding:5px 10px;font-size:11px;" onclick="createNewAgentSession('${currentAgentWorkspace}')" title="Create a new chat / topic">New Topic</button>
+          <button class="agentic-icon-btn" style="font-size:14px;width:30px;height:30px;" onclick="agenticMoreMenu(this, agenticTopicItems('${currentAgentWorkspace}'))" title="Topic options" aria-label="Topic options">⋯</button>
         </div>
       </div>
 
@@ -3829,13 +3992,7 @@ function loadAgentWorkspace(agentId, threadId) {
           </div>
           <div style="display:flex;gap:8px;">
             <textarea id="agent-msg-input" placeholder="Talk to ${agentName}... (type / for commands, @ for skills)" style="flex:1;height:42px;background:rgba(15,23,42,0.9);border:1px solid rgba(51,65,85,0.6);border-radius:8px;padding:8px 12px;color:#fff;font-size:12px;resize:none;" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendAgentMessage();}"></textarea>
-            <button class="agentic-btn-secondary" id="voice-btn" onclick="toggleVoiceInput()" style="padding:8px 10px;font-size:12px;" title="🎙️ Voice input (Web Speech API)">🎙️</button>
-            <button class="agentic-btn-secondary" id="tts-btn" onclick="toggleTTS()" style="padding:8px 10px;font-size:11px;" title="🔊 Read agent replies aloud">🔇 Off</button>
-            <button class="agentic-btn-secondary" onclick="exportSessionMenu(this)" style="padding:8px 10px;font-size:11px;" title="Export session (.md / .json / PDF)">📤</button>
-            <label class="agentic-btn-secondary" style="padding:8px 12px;font-size:11px;cursor:pointer;display:flex;align-items:center;" title="Attach File">
-              📎 <input type="file" style="display:none;" onchange="handlePromptFileUpload(event)">
-            </label>
-            <button class="agentic-btn" onclick="sendAgentMessage()" style="padding:8px 16px;">Send</button>
+            <button class="agentic-icon-btn" id="voice-btn" onclick="toggleVoiceInput()" title="Voice input (Web Speech API)" aria-label="Voice input">🎙️</button><button class="agentic-icon-btn" id="tts-btn" onclick="toggleTTS()" title="Read agent replies aloud" aria-label="Toggle speech">🔇</button><button class="agentic-icon-btn" onclick="exportSessionMenu(this)" title="Export session (.md / .json / PDF)" aria-label="Export session">📤</button><label class="agentic-icon-btn" title="Attach Markdown / Code File to context" aria-label="Attach file" style="cursor:pointer;">📎 <input type="file" style="display:none;" onchange="handlePromptFileUpload(event)"></label><button class="agentic-btn" onclick="sendAgentMessage()" style="padding:0 18px;height:34px;">Send</button>
           </div>
         </div>
       </div>
@@ -3878,25 +4035,23 @@ function switchHermesSubtab(tab) {
   var btnRadar = $('hermes-subtab-radar');
   var btnTools = $('hermes-subtab-tools');
 
-  // Reset Hermes subtabs
+  // Reset Hermes subtabs (segmented-control active state)
   if (chatCont) chatCont.style.display = 'none';
   if (radarCont) radarCont.style.display = 'none';
   if (toolsCont) toolsCont.style.display = 'none';
 
-  if (btnChat) { btnChat.className = 'agentic-btn-secondary'; btnChat.style.background = ''; btnChat.style.color = '#cbd5e1'; }
-  if (btnRadar) { btnRadar.className = 'agentic-btn-secondary'; btnRadar.style.background = ''; btnRadar.style.color = '#fbbf24'; }
-  if (btnTools) { btnTools.className = 'agentic-btn-secondary'; btnTools.style.background = ''; btnTools.style.color = '#a78bfa'; }
+  [btnChat, btnRadar, btnTools].forEach(function(b){ if (b) { b.classList.remove('active'); b.style.background = ''; b.style.color = ''; } });
 
   if (tab === 'radar') {
     if (radarCont) radarCont.style.display = 'flex';
-    if (btnRadar) { btnRadar.className = 'agentic-btn'; btnRadar.style.background = 'rgba(251,191,36,0.25)'; btnRadar.style.color = '#fbbf24'; }
+    if (btnRadar) btnRadar.classList.add('active');
     loadHermesRadar();
   } else if (tab === 'tools') {
     if (toolsCont) toolsCont.style.display = 'flex';
-    if (btnTools) { btnTools.className = 'agentic-btn'; btnTools.style.background = 'rgba(167,139,250,0.25)'; btnTools.style.color = '#a78bfa'; }
+    if (btnTools) btnTools.classList.add('active');
   } else {
     if (chatCont) chatCont.style.display = 'flex';
-    if (btnChat) { btnChat.className = 'agentic-btn'; btnChat.style.background = ''; btnChat.style.color = '#fff'; }
+    if (btnChat) btnChat.classList.add('active');
   }
 }
 
@@ -4046,17 +4201,18 @@ function switchRightPanelTab(tab) {
   var btnMem = $('tab-btn-mem');
   var btnVault = $('tab-btn-vault');
 
+  if (btnMem) btnMem.classList.remove('active');
+  if (btnVault) btnVault.classList.remove('active');
+
   if (tab === 'vault') {
     if (memView) memView.style.display = 'none';
     if (vaultView) vaultView.style.display = 'flex';
-    if (btnMem) { btnMem.style.background = ''; btnMem.style.color = '#fff'; }
-    if (btnVault) { btnVault.style.background = 'rgba(56,189,248,0.2)'; btnVault.style.color = '#38bdf8'; }
+    if (btnVault) btnVault.classList.add('active');
     loadVaultFiles();
   } else {
     if (memView) memView.style.display = 'block';
     if (vaultView) vaultView.style.display = 'none';
-    if (btnMem) { btnMem.style.background = 'rgba(56,189,248,0.2)'; btnMem.style.color = '#38bdf8'; }
-    if (btnVault) { btnVault.style.background = ''; btnVault.style.color = '#fff'; }
+    if (btnMem) btnMem.classList.add('active');
   }
 }
 
@@ -4846,9 +5002,9 @@ function loadAgentRoster() {
     if ($('agent-count-badge')) $('agent-count-badge').textContent = agents.length + ' Tools & Agents';
 
     var categories = [
-      { id: 'orchestrators', title: '🎼 AGENT ORCHESTRATORS', color: '#a855f7' },
-      { id: 'agents', title: '🤖 AUTONOMOUS AGENTS', color: '#38bdf8' },
-      { id: 'llms', title: '🧠 LLM & MEMORY ENGINES', color: '#22c55e' }
+      { id: 'orchestrators', title: '🎼 Agent Orchestrators', color: '#a855f7' },
+      { id: 'agents', title: '🤖 Autonomous Agents', color: '#38bdf8' },
+      { id: 'llms', title: '🧠 LLM & Memory Engines', color: '#22c55e' }
     ];
 
     var html = '';
@@ -8933,7 +9089,12 @@ var ttsEnabled = false;
 function toggleTTS() {
   ttsEnabled = !ttsEnabled;
   var btn = $('tts-btn');
-  if (btn) { btn.textContent = ttsEnabled ? '🔊 On' : '🔇 Off'; btn.style.background = ttsEnabled ? 'rgba(34,197,94,0.2)' : ''; }
+  if (btn) {
+    btn.textContent = ttsEnabled ? '🔊' : '🔇';
+    btn.style.background = ttsEnabled ? 'rgba(34,197,94,0.18)' : '';
+    btn.style.borderColor = ttsEnabled ? 'rgba(34,197,94,0.45)' : '';
+    btn.title = ttsEnabled ? 'Speech ON — click to mute' : 'Speech OFF — click to enable';
+  }
   toast(ttsEnabled ? 'Speech synthesis ON — agent replies will be read aloud' : 'Speech synthesis OFF', ttsEnabled ? 'green' : 'info');
   if (!ttsEnabled && window.speechSynthesis) speechSynthesis.cancel();
 }
