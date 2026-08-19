@@ -1304,7 +1304,8 @@ var NAV_SECTIONS = [
   ]},
   { id: 'automation', title: 'Automation', defaultPinned: true, items: [
     { id: 'n8n', route: 'n8n', label: 'n8n Automation', subtitle: 'Workflows & triggers', icon: 'bolt', color: '#ff6d5a' },
-    { id: 'hermes-full', route: 'hermes-full', label: 'Hermes (Full)', subtitle: 'Complete Hermes API console', icon: 'terminal', color: '#22d3ee' },
+    { id: 'hermes-full', route: 'hermes-full', label: 'Hermes (Full)', subtitle: 'Complete Hermes console + API', icon: 'terminal', color: '#22d3ee' },
+    { id: 'openclaw-full', route: 'openclaw-full', label: 'OpenClaw (Full)', subtitle: 'OpenClaw Studio console', icon: 'hub', color: '#38bdf8' },
     { id: 'dsh-full', route: 'dsh-full', label: 'DeepSeek Harness', subtitle: 'Full DSH console & agents', icon: 'memory', color: '#38bdf8' }
   ]},
   { id: 'pipeline', title: 'Pipeline', items: [
@@ -3145,6 +3146,7 @@ function nav(page) {
   else if (page === 'crews') showCrewsLauncher();
   else if (page === 'hermes-full') showHermesFull();
   else if (page === 'dsh-full') showDshFull();
+  else if (page === 'openclaw-full') showOpenclawFull();
   else if (page === 'health') showHealthPage();
   else if (page === 'help') showHelpPage();
   else if (page === 'config') { showAgenticConfig(); decorateConfigTools(); }
@@ -3163,6 +3165,9 @@ var _hermesFullTab = 'chat';
 var _hermesSessions = [];
 var _hermesActiveSession = null;
 
+var HERMES_DOCS_URL = (function(){
+  try { return localStorage.getItem('appvault_hermes_docs_url') || '/hermes/docs'; } catch (e) { return '/hermes/docs'; }
+})();
 function showHermesFull() {
   _hermesFullTab = 'chat';
   var c = $('content');
@@ -3171,7 +3176,7 @@ function showHermesFull() {
       <div class="agentic-subbar">
         <div class="agentic-status-group">
           <span class="agentic-badge-live">● Hermes — Full Agent Console</span>
-          <span id="hermes-console-status" style="font-size:11px;color:#64748b;">sessions · chat · tools · config · telemetry</span>
+          <span id="hermes-console-status" style="font-size:11px;color:#64748b;">checking…</span>
         </div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
           <div class="agentic-seg">
@@ -3179,21 +3184,34 @@ function showHermesFull() {
             <button class="seg-btn" id="hf-tab-tools" onclick="hermesFullTab('tools')">🛠 Tools</button>
             <button class="seg-btn" id="hf-tab-config" onclick="hermesFullTab('config')">⚙️ Config</button>
             <button class="seg-btn" id="hf-tab-telemetry" onclick="hermesFullTab('telemetry')">📊 Telemetry</button>
+            <button class="seg-btn" id="hf-tab-docs" onclick="hermesFullTab('docs')">📚 API Docs</button>
           </div>
-          <a class="agentic-btn-secondary" target="_blank" href="/hermes/docs" style="text-decoration:none;font-size:11px;padding:6px 10px;">API Reference</a>
+          <button class="agentic-btn" style="padding:6px 12px;font-size:11px;" onclick="hermesOpenExternal()" title="Open the Hermes API reference in a new tab">↗ New Tab</button>
           <button class="agentic-btn-secondary" style="font-size:11px;padding:6px 10px;" onclick="nav('agentic')">← Back to Agentic OS</button>
         </div>
       </div>
       <div id="hermes-console-body" style="flex:1;min-height:0;"></div>
     </div>`;
   hermesFullTab('chat');
+  hermesProbeStatus();
+}
+function hermesOpenExternal() {
+  window.open(HERMES_DOCS_URL, '_blank');
+}
+function hermesProbeStatus() {
+  var el = $('hermes-console-status');
+  fetch('/hermes/api/v1/config').then(function(r){
+    if (el) el.textContent = '● online — sessions · chat · tools · config · telemetry';
+  }).catch(function(){
+    if (el) el.textContent = '○ offline — is the hermes-agent container running?';
+  });
 }
 
 function hermesFullTab(tab) {
   _hermesFullTab = tab;
   var body = $('hermes-console-body');
   if (!body) return;
-  ['chat','tools','config','telemetry'].forEach(function(t){
+  ['chat','tools','config','telemetry','docs'].forEach(function(t){
     var b = $('hf-tab-' + t);
     if (b) b.classList.toggle('active', t === tab);
   });
@@ -3201,6 +3219,22 @@ function hermesFullTab(tab) {
   else if (tab === 'tools') hermesToolsTab(body);
   else if (tab === 'config') hermesConfigTab(body);
   else if (tab === 'telemetry') hermesTelemetryTab(body);
+  else if (tab === 'docs') hermesDocsTab(body);
+}
+
+// API Docs tab: embed the real Hermes Swagger UI (same-origin via /hermes/ proxy).
+function hermesDocsTab(body) {
+  body.innerHTML = `<div style="display:flex;flex-direction:column;min-height:calc(100vh - 235px);background:#0b0f19;border:1px solid rgba(51,65,85,0.5);border-radius:12px;overflow:hidden;position:relative;">
+    <div id="hermes-docs-loading" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;background:#0b0f19;z-index:1;">
+      <div class="skeleton" style="width:120px;height:12px;border-radius:6px;"></div>
+      <div style="font-size:12px;color:#64748b;">Loading Hermes API reference…</div>
+    </div>
+    <iframe id="hermes-docs-iframe" src="${escapeHtml(HERMES_DOCS_URL)}" style="width:100%;height:100%;min-height:calc(100vh - 240px);border:none;display:block;" title="Hermes API reference" onload="hermesDocsLoaded()"></iframe>
+  </div>`;
+}
+function hermesDocsLoaded() {
+  var ld = $('hermes-docs-loading');
+  if (ld) { ld.style.display = 'none'; }
 }
 
 function hermesApi(path, opts) {
@@ -3262,6 +3296,54 @@ function dshProbeStatus() {
   img.onload = function(){ if (el) el.textContent = '● online — ' + DSH_URL; };
   img.onerror = function(){ if (el) el.textContent = '○ harness unreachable at ' + DSH_URL + ' — start it with `dsh web`'; };
   img.src = DSH_URL + 'favicon.svg';
+}
+
+// ── OPENCLAW — full console via the real OpenClaw Studio web UI ──
+// Mirrors the DeepSeek Harness integration: embed the real OpenClaw Studio UI
+// (gateway web app on :18789) at its own origin. OpenClaw is a separate
+// project (ghcr.io/openclaw/openclaw); the console shows a clear hint when
+// the gateway isn't running yet.
+var OPENCLAW_URL = (function(){
+  try { return localStorage.getItem('appvault_openclaw_url') || 'http://localhost:18789/'; } catch (e) { return 'http://localhost:18789/'; }
+})();
+function showOpenclawFull() {
+  var c = $('content');
+  c.innerHTML = `
+    <div class="agentic-wrap" style="padding:16px;">
+      <div class="agentic-subbar">
+        <div class="agentic-status-group">
+          <span class="agentic-badge-live" style="background:rgba(56,189,248,0.12);border-color:rgba(56,189,248,0.35);color:#7dd3fc;">● OpenClaw — Full Console</span>
+          <span id="openclaw-console-status" style="font-size:11px;color:#64748b;">loading studio…</span>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <button class="agentic-btn" style="padding:6px 12px;font-size:11px;" onclick="openclawOpenExternal()" title="Open OpenClaw Studio in a new tab">↗ New Tab</button>
+          <button class="agentic-btn-secondary" style="font-size:11px;padding:6px 10px;" onclick="nav('agentic')">← Back to Agentic OS</button>
+        </div>
+      </div>
+      <div id="openclaw-console-frame" style="flex:1;min-height:calc(100vh - 130px);background:#0b0f19;border:1px solid rgba(51,65,85,0.5);border-radius:12px;overflow:hidden;position:relative;">
+        <div id="openclaw-loading" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;background:#0b0f19;z-index:1;">
+          <div class="skeleton" style="width:120px;height:12px;border-radius:6px;"></div>
+          <div style="font-size:12px;color:#64748b;">Connecting to OpenClaw Studio at ${escapeHtml(OPENCLAW_URL)}…</div>
+          <div style="font-size:10.5px;color:#475569;">If this stays blank, the OpenClaw gateway may not be running — start it with <code style="color:#38bdf8;">docker run -d --name openclaw-gateway -p 18789:18789 ghcr.io/openclaw/openclaw:latest</code> (or <code style="color:#38bdf8;">openclaw</code>).</div>
+        </div>
+        <iframe id="openclaw-iframe" src="${escapeHtml(OPENCLAW_URL)}" style="width:100%;height:100%;min-height:calc(100vh - 140px);border:none;display:block;" title="OpenClaw Studio console" allow="clipboard-read; clipboard-write" onload="openclawFrameLoaded()"></iframe>
+      </div>
+    </div>`;
+  openclawProbeStatus();
+}
+function openclawFrameLoaded() {
+  var ld = $('openclaw-loading');
+  if (ld) { ld.style.display = 'none'; }
+}
+function openclawOpenExternal() {
+  window.open(OPENCLAW_URL, '_blank');
+}
+function openclawProbeStatus() {
+  var el = $('openclaw-console-status');
+  var img = new Image();
+  img.onload = function(){ if (el) el.textContent = '● online — ' + OPENCLAW_URL; };
+  img.onerror = function(){ if (el) el.textContent = '○ gateway unreachable at ' + OPENCLAW_URL + ' — start OpenClaw first'; };
+  img.src = OPENCLAW_URL + 'favicon.ico';
 }
 
 // ── CHAT ──
@@ -3551,6 +3633,8 @@ function agenticTopicItems(agentId) {
     ];
   } else if (agentId === 'openclaw') {
     extras = [
+      { icon: 'hub', label: 'Open Full OpenClaw Console', onclick: "nav('openclaw-full')" },
+      { icon: 'open_in_new', label: 'OpenClaw Studio (New Tab)', onclick: "openclawOpenExternal()" },
       { icon: 'key', label: 'Configure API Key & Model', onclick: "nav('config')" },
       { icon: 'send', label: 'Telegram & Integrations', onclick: "nav('gov')" },
       { icon: 'refresh', label: 'Refresh', onclick: "loadAgentWorkspace('openclaw', currentThreadId)" },
@@ -3940,6 +4024,7 @@ function loadAgentWorkspace(agentId, threadId) {
           <select id="agent-session-select" onchange="switchAgentSession('openclaw', this.value)" style="background:rgba(30,41,59,0.9);border:1px solid rgba(71,85,105,0.55);color:#fff;font-size:11px;border-radius:8px;padding:5px 8px;max-width:150px;">
             <option value="main">Main Chat</option>
           </select>
+          <button class="agentic-btn" style="padding:5px 10px;font-size:11px;" onclick="nav('openclaw-full')" title="Open the full OpenClaw Studio console">🛠 Full OpenClaw</button>
           <button class="agentic-btn" style="padding:5px 10px;font-size:11px;" onclick="createNewAgentSession('openclaw')" title="Create a new chat / topic">New Topic</button>
           <button class="agentic-icon-btn" style="font-size:14px;width:30px;height:30px;" onclick="agenticMoreMenu(this, agenticTopicItems('openclaw'))" title="Topic options" aria-label="Topic options">⋯</button>
         </div>
@@ -5337,7 +5422,8 @@ function loadAgentRoster() {
           } else if (matchApp && matchApp.status === 'installed') {
             actionBtn = `<button class="agent-row-action primary" onclick="launch('${matchApp.host_port||''}','${matchApp.web_path||'/'}','${matchApp.name}','${matchApp.launch_url||''}')">Open</button>`;
           } else if (ag.id === 'openclaw') {
-            actionBtn = `<button class="agent-row-action primary" onclick="openAgentSession('openclaw')">OpenClaw</button>`;
+            actionBtn = `<button class="agent-row-action primary" onclick="nav('openclaw-full')">Open</button>
+            <button class="agent-row-action" onclick="openAgentSession('openclaw')">Chat</button>`;
           } else if (ag.id === 'openwebui' || ag.id === 'ollama') {
             actionBtn = `<button class="agent-row-action" onclick="nav('store')">Install</button>`;
           } else if (ag.id === 'deerflow') {
