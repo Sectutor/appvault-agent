@@ -789,7 +789,7 @@ SERVICES = [
     ("anythingllm", "AnythingLLM", "RAG Knowledge Base", "llms", "Obsidian Document RAG Engine (:59742)", "59742/", "rag/port-59742"),
     ("mcp", "MCP Gateway", "Tool Gateway", "llms", "Installed-app tools for LLMs (:8087)", "8087/", "mcp/port-8087"),
     ("deerflow", "DeerFlow", "SuperAgent Harness", "agents", "Long-horizon Research & Coding Agent (:2026)", "2026/", "deerflow/port-2026"),
-    ("openclaw", "OpenClaw Gateway", "Autonomous Agent Gateway", "orchestrators", "Autonomous Multi-Channel Agent Engine (:18789)", "18789/", "openclaw/gateway"),
+    ("openclaw", "OpenClaw", "Autonomous Agent Gateway", "agents", "Autonomous Multi-Channel Agent Engine (:18789)", "18789/", "openclaw/gateway"),
 ]
 
 def _probe_port(path):
