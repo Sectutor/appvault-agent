@@ -13467,8 +13467,28 @@ def api_openclaw_start():
         cfg_dir = "/app/openclaw-config"
         try:
             os.makedirs(cfg_dir, exist_ok=True)
+            # controlUi.allowedOrigins: the dashboard embeds the Studio UI via
+            # the nginx /openclaw/ proxy; the gateway rejects unknown browser
+            # origins ("Browser origin not allowed") unless listed here.
+            cfg = {
+                "gateway": {
+                    "mode": "local",
+                    "bind": "auto",
+                    "auth": {"mode": "token", "token": "appvault-local"},
+                    "controlUi": {
+                        "enabled": True,
+                        "allowedOrigins": [
+                            "http://localhost:8090",
+                            "http://127.0.0.1:8090",
+                            "http://localhost:8086",
+                            "http://127.0.0.1:8086",
+                        ],
+                    },
+                }
+            }
+            import json as _json
             with open(os.path.join(cfg_dir, "openclaw.json"), "w") as f:
-                f.write('{"gateway":{"mode":"local","bind":"auto","auth":{"mode":"token","token":"appvault-local"}}}')
+                _json.dump(cfg, f)
         except Exception as e:
             return jsonify({"status": "error", "error": "could not write config: " + str(e)}), 500
         cmd = ["docker", "run", "-d", "--name", "openclaw-gateway", "--restart", "unless-stopped",
