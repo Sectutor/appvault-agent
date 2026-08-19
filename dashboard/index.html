@@ -3497,11 +3497,16 @@ function showAgentPage(agentId) {
                 <button class="agentic-btn" onclick="postToMemory()" style="padding:6px 16px;font-size:11px;flex-shrink:0;">＋ Add</button>
               </div>
             </div>
+            <div style="display:flex;gap:6px;margin-bottom:8px;align-items:center;">
+              <input id="mem-search-input" placeholder="🔎 Search memory… (semantic)" onkeydown="if(event.key==='Enter')searchMemoryEntries()" style="flex:1;min-width:0;background:rgba(15,23,42,0.9);border:1px solid rgba(51,65,85,0.6);color:#fff;border-radius:8px;padding:6px 10px;font-size:11px;">
+              <button class="agentic-icon-btn" id="memf-search-clear" style="display:none;width:30px;height:30px;" onclick="clearMemorySearch()" title="Clear search" aria-label="Clear search">✕</button>
+            </div>
             <div class="agentic-seg" style="flex-wrap:wrap;" id="mem-tier-filters">
               <button class="seg-btn" id="memf-all" style="font-size:10px;padding:3px 9px;background:rgba(56,189,248,0.2);color:#38bdf8;" onclick="loadAgentMemory('')">All</button>
               <button class="seg-btn" id="memf-core" style="font-size:10px;padding:3px 9px;" onclick="loadAgentMemory('core')">⭐ Core</button>
               <button class="seg-btn" id="memf-working" style="font-size:10px;padding:3px 9px;" onclick="loadAgentMemory('working')">💼 Working</button>
               <button class="seg-btn" id="memf-auto" style="font-size:10px;padding:3px 9px;" onclick="loadAgentMemory('auto')">🤖 Auto</button>
+              <button class="seg-btn" id="memf-system" style="font-size:10px;padding:3px 9px;margin-left:4px;" onclick="toggleMemorySystem()" title="Show/hide system entries (vault scans, bus events, cron jobs)">⚙ System</button>
             </div>
             <div class="agentic-mem-stream" id="agentic-memory-container">
               <div class="loading">Loading memory stream...</div>
@@ -5201,6 +5206,17 @@ function showAgentMemoryView() {
   }, currentPage === 'agentic' ? 100 : 450);
 }
 
+var _memShowSystem = false;
+function toggleMemorySystem() {
+  _memShowSystem = !_memShowSystem;
+  var b = $('memf-system');
+  if (b) {
+    b.style.background = _memShowSystem ? 'rgba(56,189,248,0.2)' : '';
+    b.style.color = _memShowSystem ? '#38bdf8' : '#94a3b8';
+  }
+  loadAgentMemory('');
+}
+
 function loadAgentMemory(tier) {
   var url = API + '/api/agentic/memory';
   var params = [];
@@ -5214,9 +5230,24 @@ function loadAgentMemory(tier) {
     if (b) { var on = (t === 'all' && !tier) || (t === tier); b.style.background = on ? 'rgba(56,189,248,0.2)' : ''; b.style.color = on ? '#38bdf8' : ''; }
   });
   var clearBtn = $('memf-search-clear');
-  if (clearBtn) clearBtn.style.display = q.trim() ? '' : 'none';
+  if (clearBtn) clearBtn.style.display = q.trim() ? 'inline-flex' : 'none';
   fetchJSON(url).then(function(data){
     var memory = (data && data.memory) || [];
+    // Hide system noise by default (All view only): vault file-dump scans, bus
+    // pipeline events, cron job logs and oracle radar signals drown out real
+    // memory. Explicit tier picks and searches show everything as-is.
+    if (!_memShowSystem && !tier && !q.trim()) {
+      memory = memory.filter(function(m){
+        var a = (m.agent || '').toLowerCase();
+        var s = (m.source || '').toLowerCase();
+        if (s === 'vault' || s === 'bus') return false;
+        if (a.indexOf('cron:') === 0) return false;
+        if (a === 'vault') return false;
+        if (a === 'bus') return false;
+        if (a.indexOf('oracle') >= 0 && (m.tag || '').toLowerCase().indexOf('radar') >= 0) return false;
+        return true;
+      });
+    }
     __memoryCache = memory;
     var container = $('agentic-memory-container');
     if (!container) return;
@@ -5224,6 +5255,9 @@ function loadAgentMemory(tier) {
     var html = '';
     if (isSearch && data && data.query) {
       html += '<div style="font-size:10px;color:#38bdf8;margin-bottom:4px;">🔬 semantic results for "' + escapeHtml(data.query) + '"</div>';
+    }
+    if (!q.trim() && !_memShowSystem && !tier && memory.length) {
+      html += '<div style="font-size:9.5px;color:#64748b;margin-bottom:6px;display:flex;justify-content:space-between;"><span>Real memory · system entries hidden</span><span style="color:#38bdf8;cursor:pointer;" onclick="toggleMemorySystem()">show all →</span></div>';
     }
     memory.forEach(function(m){
       var tagClass = 'agentic-tag-code';
@@ -5247,7 +5281,11 @@ function loadAgentMemory(tier) {
         </div>
       `;
     });
-    container.innerHTML = html || '<div style="font-size:12px;color:#94a3b8;">Memory feed empty.</div>';
+    container.innerHTML = html || (q.trim()
+      ? '<div style="font-size:12px;color:#94a3b8;padding:6px;">No memory matches your search.</div>'
+      : (!_memShowSystem && !tier
+        ? '<div style="font-size:12px;color:#94a3b8;padding:6px;line-height:1.6;">No real memory yet.<br><span style="font-size:10px;color:#64748b;">System entries (vault scans, bus events, cron) are hidden — <span style="color:#38bdf8;cursor:pointer;" onclick="toggleMemorySystem()">show all →</span></span></div>'
+        : '<div style="font-size:12px;color:#94a3b8;">Memory feed empty.</div>'));
   }).catch(function(){
     if ($('agentic-memory-container')) $('agentic-memory-container').innerHTML = '<div style="font-size:12px;color:#94a3b8;">Standalone Mode</div>';
   });
