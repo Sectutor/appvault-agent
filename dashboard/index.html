@@ -1265,7 +1265,7 @@ table.data-table tbody tr:last-child td { border-bottom: none; }
         <div class="stat-row"><span class="msr">storage</span><span>Disk</span><span id="stat-disk">&ndash;</span></div>
         <div class="stat-bar"><div id="stat-disk-bar"></div></div>
         <div class="stat-row"><span class="msr">apps</span><span>Apps</span><span id="stat-apps">&ndash;</span></div>
-        <div id="appvault-build-stamp" style="margin-top:10px;padding:6px 8px;font-size:9.5px;color:#475569;border-top:1px solid rgba(51,65,85,0.4);text-align:center;cursor:default;" title="AppVault dashboard build">build 2026.08.19-h15</div>
+        <div id="appvault-build-stamp" style="margin-top:10px;padding:6px 8px;font-size:9.5px;color:#475569;border-top:1px solid rgba(51,65,85,0.4);text-align:center;cursor:default;" title="AppVault dashboard build">build 2026.08.19-h16</div>
       </div>
     </div>
     <div id="nav-backdrop" class="nav-backdrop" style="display:none;"></div>
@@ -3178,13 +3178,14 @@ var _hermesFullTab = 'chat';
 var _hermesSessions = [];
 var _hermesActiveSession = null;
 
-// ── FULL HERMES CONSOLE — a real web app embedded in an iframe.
-// Hermes itself serves a complete agent console (sessions, chat with SSE
-// streaming, tools, config, telemetry) at :8095/ — the dashboard embeds it
-// through the :8090 /hermes/ proxy, exactly like the DeepSeek Harness
-// (:3080) and OpenClaw (Control UI) consoles.
+// ── FULL HERMES CONSOLE — the ORIGINAL Hermes Agent, embedded in an iframe.
+// This is the real, unmodified Nous Research Hermes Agent web dashboard
+// (hermes-agent.nousresearch.com) served by the official container on :9119 —
+// its own genuine UI: Chat, Sessions, Files, Models, Logs, Cron, Skills,
+// Plugins, MCP, Config, Keys. No custom page: the real app in an iframe,
+// exactly like the DeepSeek Harness (:3080) and OpenClaw (Control UI).
 var HERMES_URL = (function(){
-  try { return localStorage.getItem('appvault_hermes_url') || (dashboardOrigin() + '/hermes/'); } catch (e) { return dashboardOrigin() + '/hermes/'; }
+  try { return localStorage.getItem('appvault_hermes_url') || 'http://localhost:9119/'; } catch (e) { return 'http://localhost:9119/'; }
 })();
 
 function showHermesFull() {
@@ -3194,12 +3195,11 @@ function showHermesFull() {
     <div class="agentic-wrap" style="padding:16px;">
       <div class="agentic-subbar">
         <div class="agentic-status-group">
-          <span class="agentic-badge-live" style="background:rgba(34,211,238,0.12);border-color:rgba(34,211,238,0.35);color:#67e8f9;">● Hermes Agent — Full Console</span>
-          <span id="hermes-console-status" style="font-size:11px;color:#64748b;">loading Hermes console…</span>
+          <span class="agentic-badge-live" style="background:rgba(34,211,238,0.12);border-color:rgba(34,211,238,0.35);color:#67e8f9;">● Hermes Agent — Original Console</span>
+          <span id="hermes-console-status" style="font-size:11px;color:#64748b;">loading Hermes Agent…</span>
         </div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-          <button class="agentic-btn" style="padding:6px 12px;font-size:11px;" onclick="window.open(HERMES_URL, '_blank')" title="Open the Hermes console in a new tab">↗ New Tab</button>
-          <button class="agentic-btn" style="padding:6px 12px;font-size:11px;" onclick="window.open(dashboardOrigin() + '/hermes/docs', '_blank')" title="Open the Hermes API reference in a new tab">↗ API Docs</button>
+          <button class="agentic-btn" style="padding:6px 12px;font-size:11px;" onclick="window.open(HERMES_URL, '_blank')" title="Open Hermes Agent in a new tab">↗ New Tab</button>
           <button class="agentic-btn-secondary" style="font-size:11px;padding:6px 10px;" onclick="nav('agentic')">← Back to Agentic OS</button>
         </div>
       </div>
@@ -3208,10 +3208,10 @@ function showHermesFull() {
           <div style="text-align:center;max-width:440px;">
             <div class="skeleton" style="width:140px;height:12px;border-radius:6px;margin:0 auto 18px;"></div>
             <div style="font-size:14px;color:#e2e8f0;font-weight:600;margin-bottom:6px;">Connecting to Hermes Agent…</div>
-            <div style="font-size:12px;color:#94a3b8;line-height:1.6;" id="hermes-loading-msg">Loading the full Hermes console from ${escapeHtml(HERMES_URL)}…</div>
+            <div style="font-size:12px;color:#94a3b8;line-height:1.6;" id="hermes-loading-msg">Loading the original Hermes Agent dashboard from ${escapeHtml(HERMES_URL)}…</div>
           </div>
         </div>
-        <iframe id="hermes-iframe" src="${escapeHtml(HERMES_URL)}" style="width:100%;height:100%;min-height:calc(100vh - 140px);border:none;display:block;" title="Hermes Agent console" allow="clipboard-read; clipboard-write" onload="hermesFrameLoaded()"></iframe>
+        <iframe id="hermes-iframe" src="${escapeHtml(HERMES_URL)}" style="width:100%;height:100%;min-height:calc(100vh - 140px);border:none;display:block;" title="Hermes Agent — original Nous Research console" allow="clipboard-read; clipboard-write" onload="hermesFrameLoaded()"></iframe>
       </div>
     </div>`;
   hermesFrameProbe();
@@ -3223,17 +3223,17 @@ function hermesFrameLoaded() {
 function hermesFrameProbe() {
   var el = $('hermes-console-status');
   if (!el) return;
-  // Verify the Hermes console is actually reachable from the browser.
-  fetch(dashboardOrigin() + '/hermes/health?t=' + Date.now())
+  // Verify the original Hermes Agent dashboard is reachable from the browser.
+  fetch(HERMES_URL + 'login?t=' + Date.now(), { method: 'GET' })
     .then(function(r){
       if (!r.ok) throw new Error('HTTP ' + r.status);
-      return r.json();
+      return r.text();
     })
-    .then(function(d){
-      if (el) el.textContent = '● online — ' + (d.agent || 'Hermes Agent') + ' v' + (d.version || '') + ' · ' + HERMES_URL;
+    .then(function(){
+      if (el) el.textContent = '● online — original Hermes Agent at ' + HERMES_URL;
     })
     .catch(function(){
-      if (el) el.textContent = '○ offline — is the hermes-agent container running?';
+      if (el) el.textContent = '○ offline — is the original hermes-agent container running?';
     });
 }
 
