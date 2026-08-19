@@ -1304,7 +1304,8 @@ var NAV_SECTIONS = [
   ]},
   { id: 'automation', title: 'Automation', defaultPinned: true, items: [
     { id: 'n8n', route: 'n8n', label: 'n8n Automation', subtitle: 'Workflows & triggers', icon: 'bolt', color: '#ff6d5a' },
-    { id: 'hermes-full', route: 'hermes-full', label: 'Hermes (Full)', subtitle: 'Complete Hermes API console', icon: 'terminal', color: '#22d3ee' }
+    { id: 'hermes-full', route: 'hermes-full', label: 'Hermes (Full)', subtitle: 'Complete Hermes API console', icon: 'terminal', color: '#22d3ee' },
+    { id: 'dsh-full', route: 'dsh-full', label: 'DeepSeek Harness', subtitle: 'Full DSH console & agents', icon: 'memory', color: '#38bdf8' }
   ]},
   { id: 'pipeline', title: 'Pipeline', items: [
     { id: 'crews', route: 'crews', label: 'Crews', subtitle: 'Agent teams', icon: 'groups', color: '#fb923c' },
@@ -3143,6 +3144,7 @@ function nav(page) {
   else if (page === 'memory') showMemoryPage();
   else if (page === 'crews') showCrewsLauncher();
   else if (page === 'hermes-full') showHermesFull();
+  else if (page === 'dsh-full') showDshFull();
   else if (page === 'health') showHealthPage();
   else if (page === 'help') showHelpPage();
   else if (page === 'config') { showAgenticConfig(); decorateConfigTools(); }
@@ -3206,6 +3208,46 @@ function hermesApi(path, opts) {
     headers: Object.assign({ 'Content-Type': 'application/json' }, (opts || {}).headers || {})
   })).then(function(r){
     return r.json().catch(function(){ return { status: 'error', error: 'non-JSON response HTTP ' + r.status }; });
+  });
+}
+
+// ── DEEPSEEK HARNESS (dsh) — full console via same-origin proxy /dsh/ ──
+// The real DeepSeek Harness web app (agents, sessions, tools, config, goals,
+// workflows) is served by `dsh web` on the host. The dashboard nginx proxies
+// /dsh/ -> host.docker.internal:3080, so we embed it in an iframe exactly like
+// a full agent console (mirrors the Hermes full-console pattern).
+var _dshFullTab = 'gui';
+function showDshFull() {
+  _dshFullTab = 'gui';
+  var c = $('content');
+  c.innerHTML = `
+    <div class="agentic-wrap" style="padding:16px;">
+      <div class="agentic-subbar">
+        <div class="agentic-status-group">
+          <span class="agentic-badge-live" style="background:rgba(56,189,248,0.12);border-color:rgba(56,189,248,0.35);color:#7dd3fc;">● DeepSeek Harness — Full Console</span>
+          <span id="dsh-console-status" style="font-size:11px;color:#64748b;">agents · sessions · tools · config · goals</span>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <button class="agentic-btn" style="padding:6px 12px;font-size:11px;" onclick="dshOpenExternal()" title="Open the harness in a new tab">↗ New Tab</button>
+          <button class="agentic-btn-secondary" style="font-size:11px;padding:6px 10px;" onclick="nav('agentic')">← Back to Agentic OS</button>
+        </div>
+      </div>
+      <div id="dsh-console-frame" style="flex:1;min-height:calc(100vh - 130px);background:#0b0f19;border:1px solid rgba(51,65,85,0.5);border-radius:12px;overflow:hidden;">
+        <iframe id="dsh-iframe" src="/dsh/" style="width:100%;height:100%;min-height:calc(100vh - 140px);border:none;display:block;" title="DeepSeek Harness console" allow="clipboard-read; clipboard-write"></iframe>
+      </div>
+    </div>`;
+  dshProbeStatus();
+}
+function dshOpenExternal() {
+  window.open(location.origin + '/dsh/', '_blank');
+}
+function dshProbeStatus() {
+  fetch('/dsh/api/health').then(function(r){
+    var el = $('dsh-console-status');
+    if (el) el.textContent = '● online — agents · sessions · tools · config · goals';
+  }).catch(function(){
+    var el = $('dsh-console-status');
+    if (el) el.textContent = '○ checking… (harness reachable via /dsh/)';
   });
 }
 
@@ -3472,6 +3514,12 @@ function agenticSubbarItems(agentId) {
       { icon: 'monitoring', label: 'Hermes Telemetry', onclick: "hermesWorkspacePanel('telemetry')" },
       { icon: 'terminal', label: 'Full Hermes Console', onclick: "nav('hermes-full')" }
     ]);
+  } else if (agentId === 'deepseek-harness') {
+    items = items.concat([
+      { icon: 'memory', label: 'Full Harness Console', onclick: "nav('dsh-full')" },
+      { icon: 'open_in_new', label: 'Harness in New Tab', onclick: "dshOpenExternal()" },
+      { icon: 'key', label: 'LLM & API Keys', onclick: "nav('config')" }
+    ]);
   }
   return items;
 }
@@ -3515,6 +3563,15 @@ function agenticTopicItems(agentId) {
       { icon: 'key', label: 'Configure API Key & Model', onclick: "nav('config')" },
       { icon: 'refresh', label: 'Refresh', onclick: "loadAgentWorkspace('deepseek-harness', currentThreadId)" },
       { icon: 'code', label: 'GitHub', href: 'https://github.com/deepseek-ai' }
+    ];
+  } else if (agentId === 'deepseek-harness') {
+    extras = [
+      { icon: 'memory', label: 'Open Full Harness Console', onclick: "nav('dsh-full')" },
+      { icon: 'open_in_new', label: 'Harness in New Tab', onclick: "dshOpenExternal()" },
+      { icon: 'send', label: 'Telegram & Integrations', onclick: "nav('gov')" },
+      { icon: 'key', label: 'Configure API Key & Model', onclick: "nav('config')" },
+      { icon: 'refresh', label: 'Refresh', onclick: "loadAgentWorkspace('deepseek-harness', currentThreadId)" },
+      { icon: 'code', label: 'GitHub', href: 'https://github.com/deepseek-ai/deepseek-harness' }
     ];
   } else if (agentId === 'deerflow') {
     extras = [
@@ -4041,6 +4098,7 @@ function loadAgentWorkspace(agentId, threadId) {
           <select id="agent-session-select" onchange="switchAgentSession('deepseek-harness', this.value)" style="background:rgba(30,41,59,0.9);border:1px solid rgba(71,85,105,0.55);color:#fff;font-size:11px;border-radius:8px;padding:5px 8px;max-width:150px;">
             <option value="main">Main Chat</option>
           </select>
+          <button class="agentic-btn" style="padding:5px 10px;font-size:11px;" onclick="nav('dsh-full')" title="Open the full DeepSeek Harness console">🛠 Full Harness</button>
           <button class="agentic-btn" style="padding:5px 10px;font-size:11px;" onclick="createNewAgentSession('deepseek-harness')" title="Create a new chat / topic">New Topic</button>
           <button class="agentic-icon-btn" style="font-size:14px;width:30px;height:30px;" onclick="agenticMoreMenu(this, agenticTopicItems('deepseek-harness'))" title="Topic options" aria-label="Topic options">⋯</button>
         </div>
@@ -5276,6 +5334,9 @@ function loadAgentRoster() {
               actionBtn = `<button class="agent-row-action primary" onclick="launchDeerFlow()">Launch</button>`;
             }
             actionBtn += ` <button class="agent-row-action" onclick="openAgentSession('deerflow')">Chat</button>`;
+          } else if (ag.id === 'deepseek-harness') {
+            actionBtn = `<button class="agent-row-action primary" onclick="nav('dsh-full')">Open</button>
+            <button class="agent-row-action" onclick="openAgentSession('deepseek-harness')">Chat</button>`;
           } else {
             actionBtn = `<button class="agent-row-action primary" onclick="openAgentSession('${ag.id}')">Chat</button>`;
           }

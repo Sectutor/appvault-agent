@@ -790,6 +790,7 @@ SERVICES = [
     ("mcp", "MCP Gateway", "Tool Gateway", "llms", "Installed-app tools for LLMs (:8087)", "8087/", "mcp/port-8087"),
     ("deerflow", "DeerFlow", "SuperAgent Harness", "agents", "Long-horizon Research & Coding Agent (:2026)", "2026/", "deerflow/port-2026"),
     ("openclaw", "OpenClaw", "Autonomous Agent Gateway", "agents", "Autonomous Multi-Channel Agent Engine (:18789)", "18789/", "openclaw/gateway"),
+    ("deepseek-harness", "DeepSeek Harness", "Agentic Reasoning Engine", "agents", "DeepSeek Agent & Reasoning Platform (:3080)", "3080/", "deepseek-harness/port-3080"),
 ]
 
 def _probe_port(path):
