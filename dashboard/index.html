@@ -2142,7 +2142,7 @@ function mediaUrl(u) {
   return (u.indexOf('http://') === 0 || u.indexOf('https://') === 0) ? u : API + u;
 }
 var licenseKey = localStorage.getItem('appvault_license_key') || '';
-var API_KEY = localStorage.getItem('appvault_api_key') || '';
+var API_KEY = localStorage.getItem('appvault_api_key') || 'appvault-key';
 // One-click setup: ?setup=KEY auto-saves the API key (demo convenience; stripped from URL after)
 (function(){
   var m = location.search.match(/[?&]setup=([^&]+)/);
