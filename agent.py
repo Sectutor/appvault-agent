@@ -496,6 +496,55 @@ def sync_catalog(force=False):
                 save_catalog_cache(catalog_result)
                 print(f"[agent] Catalog synced: v{remote_ver} ({len(catalog_cache.get('apps', []))} apps)")
 
+def _fleet_telemetry():
+    """Compact fleet-health payload for the central dashboard: memory size,
+    error count (24h), active missions, LLM token spend (7d) + provider."""
+    import sqlite3 as _sq
+    out = {"version": "unknown", "docker": "unknown", "memory": 0, "errors_24h": 0,
+           "missions": 0, "tokens_7d": 0, "cost_7d": 0.0, "provider": "", "model": ""}
+    try:
+        db_path = os.path.join(os.environ.get("STORAGE_PATH", "/data"), "agentic.db")
+        if os.path.exists(db_path):
+            conn = _sq.connect(db_path)
+            conn.row_factory = _sq.Row
+            try:
+                out["memory"] = conn.execute("SELECT COUNT(*) c FROM memory").fetchone()["c"]
+                out["errors_24h"] = conn.execute(
+                    "SELECT COUNT(*) c FROM audit_log WHERE ts >= datetime('now','-1 day') "
+                    "AND (action LIKE '%fail%' OR action LIKE '%error%')").fetchone()["c"]
+            except Exception:
+                pass
+            try:
+                out["missions"] = conn.execute(
+                    "SELECT COUNT(*) c FROM missions WHERE status IN ('running','active','pending')").fetchone()["c"]
+            except Exception:
+                pass
+            try:
+                row = conn.execute(
+                    "SELECT COALESCE(SUM(total_tokens),0) t, COALESCE(SUM(cost_usd),0) c "
+                    "FROM llm_usage WHERE ts >= datetime('now','-7 day')").fetchone()
+                out["tokens_7d"] = row["t"] or 0
+                out["cost_7d"] = round(row["c"] or 0.0, 4)
+            except Exception:
+                pass
+            conn.close()
+    except Exception:
+        pass
+    try:
+        import agentic_plane as _ap
+        cfg = _ap._get_llm_config()
+        out["provider"] = cfg.get("provider", "")
+        out["model"] = cfg.get("model", "")
+    except Exception:
+        pass
+    out["version"] = os.getenv("AGENT_VERSION", "dev")
+    try:
+        r = subprocess.run(["docker", "--version"], capture_output=True, text=True, timeout=5)
+        out["docker"] = (r.stdout or "").strip()
+    except Exception:
+        pass
+    return out
+
 def send_heartbeat():
     """Send heartbeat to central server."""
     effective_id = agent_state.get("agent_id", "")
@@ -505,7 +554,8 @@ def send_heartbeat():
     
     central_request("POST", "/api/agent/heartbeat", data={
         "agent_id": effective_id,
-        "api_key": effective_key
+        "api_key": effective_key,
+        "telemetry": _fleet_telemetry()
     })
 
 def execute_job(job):
