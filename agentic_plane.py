@@ -1048,6 +1048,77 @@ def api_status():
                     "llm_config": {k: ("***" if k == "api_key" and v else v)
                                    for k, v in _get_llm_config().items()}})
 
+@agentic_bp.route("/api/agentic/system", methods=["GET", "OPTIONS"])
+def api_system():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    try:
+        import os, re, shutil
+        # Memory from /proc/meminfo (Linux)
+        mem_total = mem_free = mem_used_pct = None
+        try:
+            info = {}
+            with open("/proc/meminfo", "r") as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        info[parts[0].rstrip(":")] = int(parts[1])
+            total_kb = info.get("MemTotal", 0)
+            free_kb = info.get("MemAvailable", info.get("MemFree", 0))
+            if total_kb:
+                mem_total = round(total_kb / 1024 / 1024, 1)
+                mem_free = round(free_kb / 1024 / 1024, 1)
+                mem_used_pct = round((1 - free_kb / total_kb) * 100, 1)
+        except Exception:
+            pass
+        # CPU from /proc/stat (instantaneous)
+        cpu_pct = None
+        try:
+            with open("/proc/stat", "r") as f:
+                first = f.readline().split()
+            if first and first[0] == "cpu" and len(first) >= 5:
+                idle = int(first[4])
+                total = sum(int(x) for x in first[1:])
+                cpu_pct = round((1 - idle / total) * 100, 1) if total else None
+        except Exception:
+            pass
+        # Load average
+        load1 = load5 = load15 = None
+        try:
+            load1, load5, load15 = (round(x, 2) for x in os.getloadavg())
+        except Exception:
+            pass
+        # Disk
+        disk_total = disk_free = disk_pct = None
+        try:
+            du = shutil.disk_usage("/")
+            disk_total = round(du.total / 1024 / 1024 / 1024, 1)
+            disk_free = round(du.free / 1024 / 1024 / 1024, 1)
+            disk_pct = round((1 - du.free / du.total) * 100, 1)
+        except Exception:
+            pass
+        return jsonify({
+            "status": "ok",
+            "memory": {
+                "total_gb": mem_total,
+                "free_gb": mem_free,
+                "used_pct": mem_used_pct,
+            },
+            "cpu": {
+                "used_pct": cpu_pct,
+                "load_1": load1,
+                "load_5": load5,
+                "load_15": load15,
+            },
+            "disk": {
+                "total_gb": disk_total,
+                "free_gb": disk_free,
+                "used_pct": disk_pct,
+            },
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "detail": str(e)}), 500
+
 @agentic_bp.route("/api/agentic/roster", methods=["GET", "OPTIONS"])
 def api_roster():
     if request.method == "OPTIONS":
