@@ -191,6 +191,14 @@ def _init_db():
         PRIMARY KEY (post_id, user_key)
     );
     """)
+    # News sync columns — central-managed posts are keyed by central_id so the
+    # agent can merge the operator's News & Tips feed into the local store
+    # without touching local admin posts.
+    for _col, _ddl in [("central_id", "TEXT"), ("source", "TEXT DEFAULT 'local'")]:
+        try:
+            conn.execute(f"ALTER TABLE news_posts ADD COLUMN {_col} {_ddl}")
+        except Exception:
+            pass
     conn.commit()
     conn.close()
 
@@ -295,6 +303,97 @@ def _cfg_set(key, value):
                  (key, json.dumps(value)))
     conn.commit()
     conn.close()
+
+# ---------------------------------------------------------------------------
+# Agentic plane auth — bearer token on /api/agentic/* (default ON).
+# Token source: AGENTIC_TOKEN env > API_KEY env > persisted config
+# (agentic_auth_token, auto-generated on first boot so restarts keep it).
+# Public GET allowlist stays open for the store UI badges/news + CORS preflight.
+# ---------------------------------------------------------------------------
+_AGENTIC_TOKEN_CACHE = [None]
+
+def _get_agentic_token():
+    """Resolve the agentic plane auth token (env > config > generate+persist)."""
+    if _AGENTIC_TOKEN_CACHE[0]:
+        return _AGENTIC_TOKEN_CACHE[0]
+    tok = (os.environ.get("AGENTIC_TOKEN") or os.environ.get("API_KEY") or "").strip()
+    if not tok:
+        tok = str(_cfg_get("agentic_auth_token") or "")
+    if not tok:
+        import secrets as _secrets
+        tok = _secrets.token_urlsafe(32)
+        try:
+            _cfg_set("agentic_auth_token", tok)
+        except Exception:
+            pass
+        print("[agentic] generated + persisted agentic auth token", flush=True)
+    _AGENTIC_TOKEN_CACHE[0] = tok
+    return tok
+
+def _agentic_token_ok(supplied):
+    tok = _get_agentic_token()
+    if not tok or not supplied:
+        return False
+    import hmac as _hmac
+    try:
+        return _hmac.compare_digest(str(supplied), tok)
+    except Exception:
+        return False
+
+# GETs the store UI / agents may call without a token (badges, news feed, health)
+_AGENTIC_PUBLIC_GET = ("/api/agentic/status", "/api/agentic/health", "/api/agentic/news")
+
+@agentic_bp.before_request
+def _agentic_auth_guard():
+    """Require Bearer/X-Api-Key token on all agentic routes except the public
+    GET allowlist + CORS preflight. Closes the LAN-exposed 0.0.0.0:8086 hole."""
+    if request.method == "OPTIONS":
+        return None
+    path = request.path
+    if request.method == "GET" and path in _AGENTIC_PUBLIC_GET:
+        return None
+    if path == "/api/agentic/bootstrap" and request.method == "GET":
+        return None  # origin-gated inside the handler
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer ") and _agentic_token_ok(auth[7:]):
+        return None
+    if _agentic_token_ok(request.headers.get("X-Api-Key", "")):
+        return None
+    return jsonify({"error": "Unauthorized",
+                    "message": "Valid agentic token required (Authorization: Bearer <token>)"}), 401
+
+@agentic_bp.route("/api/agentic/bootstrap", methods=["GET", "OPTIONS"])
+def api_agentic_bootstrap():
+    """Return the agentic auth token to the LOCAL store UI only.
+
+    Origin-gated: only the local store UI origin (localhost:8085 / :8086 /
+    :8080) or loopback/docker-bridge source addresses may fetch it. A LAN
+    client (192.168.x / public IP) gets 403 — the exact hole this closes."""
+    if request.method == "OPTIONS":
+        return Response(status=204)
+    origin = request.headers.get("Origin", "")
+    ok = False
+    try:
+        p = urllib.parse.urlparse(origin)
+        if p.scheme in ("http", "https") and p.hostname in ("localhost", "127.0.0.1", "host.docker.internal"):
+            ok = p.port in (8085, 8086, 8080, 3000, 8090, 8095) or p.port is None
+    except Exception:
+        ok = False
+    if not ok:
+        ra = request.remote_addr or ""
+        # loopback + docker bridge (172.16.0.0/12) only — NOT LAN ranges
+        ok = ra in ("127.0.0.1", "::1")
+        if not ok and ra.count(".") == 3:
+            octets = ra.split(".")
+            ok = octets[0] == "172" and 16 <= int(octets[1]) <= 31
+    if not ok:
+        return jsonify({"error": "Forbidden", "message": "bootstrap is local-UI only"}), 403
+    return jsonify({"token": _get_agentic_token(), "ok": True})
+
+# Internal self-calls (same process → 127.0.0.1:8086) must carry the token.
+def _self_headers():
+    return {"Authorization": "Bearer " + _get_agentic_token()}
+
 
 # ---------------------------------------------------------------------------
 # Central LLM configuration (single source of truth for the whole fleet)
@@ -705,6 +804,8 @@ def _call_llm_with(overrides, user_msg, system_prompt=None, agent="hermes", time
                 choices = data.get("choices", [])
                 if choices:
                     _LAST_BACKEND[0] = provider
+                    _record_llm_usage(provider, model, data.get("usage") or {}, agent=agent,
+                                      tag="llm:" + str(agent))
                     return choices[0].get("message", {}).get("content", "").strip()
             last_err = f"{provider} HTTP {status}: {str(data)[:200]}"
         except Exception as e:
@@ -724,6 +825,8 @@ def _call_llm_with(overrides, user_msg, system_prompt=None, agent="hermes", time
                 content = data.get("content", [])
                 if content:
                     _LAST_BACKEND[0] = "anthropic"
+                    _record_llm_usage(provider, model, data.get("usage") or {}, agent=agent,
+                                      tag="llm:" + str(agent))
                     return content[0].get("text", "").strip()
             last_err = f"anthropic HTTP {status}: {str(data)[:200]}"
         except Exception as e:
@@ -742,6 +845,7 @@ def _call_llm_with(overrides, user_msg, system_prompt=None, agent="hermes", time
                 reply = data.get("response", "").strip()
                 if reply:
                     _LAST_BACKEND[0] = "ollama"
+                    _record_llm_usage(provider, model, data, agent=agent, tag="llm:" + str(agent))
                     return reply
             last_err = f"ollama HTTP {status}"
         except Exception as e:
@@ -779,6 +883,8 @@ def _call_llm_with(overrides, user_msg, system_prompt=None, agent="hermes", time
                     reply = data.get("response", "").strip()
                     if reply:
                         _LAST_BACKEND[0] = "ollama-fallback"
+                        _record_llm_usage("ollama", model_name, data, agent=agent,
+                                          tag="llm:" + str(agent) + ":fallback")
                         return reply
                 last_err = f"ollama-fallback HTTP {status}: {str(data)[:150]}"
         except Exception as e:
@@ -2836,7 +2942,8 @@ def _exec_pipeline_node(ntype, cfg, outputs):
         question = _resolve_tpl(cfg.get("question", "What should we build?"), outputs)
         providers = [p.strip() for p in str(cfg.get("providers") or "deepseek,grok,anthropic").split(",") if p.strip()]
         data, status = _http("http://127.0.0.1:8086/api/agentic/consortium", method="POST",
-                             json_data={"question": question, "providers": providers}, timeout=180)
+                             json_data={"question": question, "providers": providers}, timeout=180,
+                             headers=_self_headers())
         if isinstance(data, dict) and data.get("answers"):
             return {"answers": data["answers"], "summary": data.get("summary", "")}
         return {"error": "consortium failed", "http": status}
@@ -4793,6 +4900,29 @@ def start_funnel_scheduler():
             except Exception:
                 pass
             time.sleep(300)
+
+    threading.Thread(target=_loop, daemon=True).start()
+
+
+def start_backup_scheduler():
+    """Boot hook (agent.py): auto-snapshot agentic.db once a day. Idempotent.
+
+    First run fires shortly after boot, then every 24h. Config:
+      backup_enabled (1/0, default 1), backup_retention (int, default 7),
+      backup_dir (default <data>/backups).
+    """
+    if getattr(start_backup_scheduler, "_started", False):
+        return
+    start_backup_scheduler._started = True
+
+    def _loop():
+        while True:
+            try:
+                if int(_cfg_get("backup_enabled", 1) or 1):
+                    _run_backup()
+            except Exception:
+                pass
+            time.sleep(24 * 3600)
 
     threading.Thread(target=_loop, daemon=True).start()
 
@@ -13597,6 +13727,87 @@ def _news_row_to_dict(r, read_set=None):
         d["read"] = r["id"] in read_set
     return d
 
+# ── Central News & Tips sync ─────────────────────────────────────────────
+# The operator writes news/tips on the central admin (/admin/news). The
+# public {CENTRAL_URL}/api/news feed is polled here (TTL-bounded) and merged
+# into the local news_posts table, so every store user sees them in the
+# News & Tips page + RSS. Local admin posts (source='local') are untouched.
+_NEWS_SYNC_LAST = 0.0
+_NEWS_SYNC_TTL = 60  # seconds between central polls
+
+def _sync_central_news(force=False):
+    """Pull central-managed news/tips and upsert into the local feed.
+    Returns number of new posts merged."""
+    global _NEWS_SYNC_LAST
+    now_ts = datetime.now().timestamp()
+    if not force and (now_ts - _NEWS_SYNC_LAST) < _NEWS_SYNC_TTL:
+        return 0
+    _NEWS_SYNC_LAST = now_ts
+    base = os.environ.get("CENTRAL_URL", "http://central:8000").rstrip("/")
+    url = base + "/api/news"
+    try:
+        import urllib.request
+        req = urllib.request.Request(url, headers={"User-Agent": "AppVaultAgent/1.0"})
+        with urllib.request.urlopen(req, timeout=6) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        posts = data.get("posts") or []
+    except Exception:
+        return 0
+    if not posts:
+        # Empty central feed = every central post was deleted; tombstone them.
+        conn = _db()
+        try:
+            conn.execute("DELETE FROM news_posts WHERE source='central'")
+            conn.commit()
+        finally:
+            conn.close()
+        return 0
+    conn = _db()
+    added = 0
+    try:
+        seen_ids = set()
+        for p in posts:
+            cid = str(p.get("id") or "").strip()
+            title = (p.get("title") or "").strip()
+            if not cid or not title:
+                continue
+            seen_ids.add(cid)
+            row = conn.execute("SELECT id FROM news_posts WHERE central_id=?", (cid,)).fetchone()
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            category = (p.get("category") or "update").strip().lower()
+            priority = (p.get("priority") or "normal").strip().lower()
+            if priority not in ("normal", "high"):
+                priority = "normal"
+            body = p.get("body") or ""
+            author = (p.get("author") or "AppVault").strip()[:80]
+            pub = p.get("published_at") or now
+            if row:
+                conn.execute(
+                    "UPDATE news_posts SET title=?, category=?, priority=?, body=?, author=?, "
+                    "status='published', updated=?, published_at=? WHERE id=?",
+                    (title, category, priority, body, author, now, pub, row["id"]))
+            else:
+                cur = conn.execute(
+                    "INSERT INTO news_posts (title, category, priority, body, author, status, "
+                    "created, updated, published_at, central_id, source) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (title, category, priority, body, author, "published", now, now, pub, cid, "central"))
+                added += 1
+        conn.commit()
+        # Tombstone sync: central posts deleted on the admin must vanish from
+        # the local feed too (local admin posts are never touched).
+        if seen_ids:
+            placeholders = ",".join("?" * len(seen_ids))
+            conn.execute(
+                f"DELETE FROM news_posts WHERE source='central' AND central_id NOT IN ({placeholders})",
+                tuple(seen_ids))
+        else:
+            conn.execute("DELETE FROM news_posts WHERE source='central'")
+        conn.commit()
+    finally:
+        conn.close()
+    return added
+
 @agentic_bp.route("/api/agentic/news", methods=["GET", "POST", "OPTIONS"])
 def api_news():
     if request.method == "OPTIONS":
@@ -13647,6 +13858,7 @@ def api_news():
 
     # GET — list posts newest first, with read state for this reader.
     user_key = _news_user_key()
+    _sync_central_news()
     show_drafts = request.args.get("drafts") == "1" and _news_admin_ok()
     rows = conn.execute(
         "SELECT * FROM news_posts WHERE status='published' OR ? ORDER BY priority DESC, published_at DESC, id DESC",
@@ -13662,6 +13874,7 @@ def api_news_unread():
     if request.method == "OPTIONS":
         return jsonify({"status": "ok"})
     user_key = _news_user_key()
+    _sync_central_news()
     conn = _db()
     total = conn.execute("SELECT COUNT(*) c FROM news_posts WHERE status='published'").fetchone()["c"]
     read = conn.execute("SELECT COUNT(*) c FROM news_reads WHERE user_key=?", (user_key,)).fetchone()["c"]
@@ -13753,3 +13966,233 @@ def api_news_feed():
     )
     return Response(rss, mimetype="application/rss+xml")
 
+
+
+# ---------------------------------------------------------------------------
+# OPS: BACKUP / RESTORE / EXPORT / USAGE METERING (added 2026-08)
+# ---------------------------------------------------------------------------
+def _backup_dir():
+    d = _cfg_get("backup_dir") or os.path.join(os.path.dirname(_DB_PATH) or "/data", "backups")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        pass
+    return d
+
+def _run_backup():
+    """Snapshot agentic.db via sqlite3 backup API (safe under WAL). Returns summary."""
+    bdir = _backup_dir()
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    dest = os.path.join(bdir, "agentic-" + ts + ".db")
+    src = sqlite3.connect(_DB_PATH)
+    dst = sqlite3.connect(dest)
+    try:
+        with dst:
+            src.backup(dst)
+    finally:
+        src.close(); dst.close()
+    size = os.path.getsize(dest)
+    keep = int(_cfg_get("backup_retention", 7) or 7)
+    snaps = sorted([f for f in os.listdir(bdir) if f.startswith("agentic-") and f.endswith(".db")])
+    if len(snaps) > keep:
+        for old in snaps[:-keep]:
+            try: os.remove(os.path.join(bdir, old))
+            except Exception: pass
+    try:
+        _audit("agentic", "backup.run", os.path.basename(dest))
+    except Exception:
+        pass
+    return {"file": os.path.basename(dest), "size": size, "count": len(snaps), "dir": bdir}
+
+@agentic_bp.route("/api/agentic/backup", methods=["POST", "OPTIONS"])
+def api_agentic_backup():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    try:
+        res = _run_backup()
+        return jsonify({"status": "ok", "backup": res})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+@agentic_bp.route("/api/agentic/backup/list", methods=["GET", "OPTIONS"])
+def api_agentic_backup_list():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    bdir = _backup_dir()
+    snaps = []
+    for f in sorted(os.listdir(bdir)):
+        if f.startswith("agentic-") and f.endswith(".db"):
+            p = os.path.join(bdir, f)
+            snaps.append({"file": f, "size": os.path.getsize(p),
+                          "modified": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(p)))})
+    return jsonify({"status": "ok", "backups": snaps})
+
+@agentic_bp.route("/api/agentic/backup/restore", methods=["POST", "OPTIONS"])
+def api_agentic_backup_restore():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    data = request.get_json() or {}
+    fname = os.path.basename(str(data.get("file") or ""))
+    if not fname:
+        return jsonify({"error": "file required"}), 400
+    src_path = os.path.join(_backup_dir(), fname)
+    if not os.path.exists(src_path):
+        return jsonify({"error": "backup not found", "file": fname}), 404
+    try:
+        _run_backup()
+    except Exception:
+        pass
+    try:
+        src = sqlite3.connect(src_path)
+        dst = sqlite3.connect(_DB_PATH)
+        with dst:
+            src.backup(dst)
+        src.close(); dst.close()
+        try:
+            _audit("agentic", "backup.restore", fname)
+        except Exception:
+            pass
+        return jsonify({"status": "ok", "restored": fname,
+                        "note": "Backup restored. Some in-memory caches may need a restart."})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+@agentic_bp.route("/api/agentic/export", methods=["GET", "OPTIONS"])
+def api_agentic_export():
+    """Portable JSON export of a business's data (or everything when no id)."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    bid = request.args.get("business_id", type=int)
+    conn = _db()
+    out = {"exported": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "business_id": bid}
+    def dump(table, where="", params=()):
+        try:
+            q = "SELECT * FROM " + table
+            if where:
+                q += " WHERE " + where
+            return [dict(r) for r in conn.execute(q, params).fetchall()]
+        except Exception as e:
+            return {"error": str(e)}
+    if bid:
+        out["businesses"] = dump("businesses", "id=?", (bid,))
+        out["oracle_feeds"] = dump("oracle_feeds", "business_id=?", (bid,))
+        out["oracle_posts"] = dump("oracle_posts", "business_id=?", (bid,))
+        out["social_profiles"] = dump("social_profiles", "business_id=?", (bid,))
+        out["prospect_seeds"] = dump("prospect_seeds", "business_id=?", (bid,))
+        out["content_types"] = dump("content_types", "business_id=?", (bid,))
+    else:
+        for t in ("businesses", "oracle_feeds", "oracle_posts", "social_profiles",
+                  "prospect_seeds", "content_types", "news_posts", "pipelines", "work_items"):
+            out[t] = dump(t)
+    conn.close()
+    return jsonify(out)
+
+# ---- Usage metering -------------------------------------------------------
+def _ensure_usage_table():
+    conn = _db()
+    conn.execute("""CREATE TABLE IF NOT EXISTS llm_usage (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts TEXT,
+        agent TEXT,
+        business_id INTEGER,
+        provider TEXT,
+        model TEXT,
+        prompt_tokens INTEGER DEFAULT 0,
+        completion_tokens INTEGER DEFAULT 0,
+        total_tokens INTEGER DEFAULT 0,
+        cost_usd REAL DEFAULT 0,
+        tag TEXT DEFAULT ''
+    )""")
+    conn.commit()
+    conn.close()
+
+_ensure_usage_table()
+
+_DEFAULT_PRICING = {
+    "deepseek-chat": {"input": 0.27, "output": 1.10},
+    "deepseek-reasoner": {"input": 0.55, "output": 2.19},
+    "gpt-4o": {"input": 2.50, "output": 10.00},
+    "gpt-4o-mini": {"input": 0.15, "output": 0.60},
+    "claude-3-5-sonnet-20241022": {"input": 3.00, "output": 15.00},
+    "llama3": {"input": 0.0, "output": 0.0},
+    "qwen2.5:0.5b": {"input": 0.0, "output": 0.0},
+    "qwen2.5:1.5b": {"input": 0.0, "output": 0.0},
+}
+def _model_pricing():
+    p = _cfg_get("model_pricing")
+    if isinstance(p, dict):
+        merged = dict(_DEFAULT_PRICING); merged.update(p); return merged
+    return _DEFAULT_PRICING
+
+def _record_llm_usage(provider, model, usage, agent="hermes", business_id=None, tag=""):
+    """Persist one LLM call's token usage + est. cost."""
+    try:
+        if not usage or not isinstance(usage, dict):
+            return
+        prompt = int(usage.get("prompt_tokens") or usage.get("input_tokens") or usage.get("prompt_eval_count") or 0)
+        completion = int(usage.get("completion_tokens") or usage.get("output_tokens") or usage.get("eval_count") or 0)
+        total = int(usage.get("total_tokens") or (prompt + completion))
+        price = _model_pricing().get(model or "", {})
+        cost = (prompt * float(price.get("input", 0)) + completion * float(price.get("output", 0))) / 1_000_000.0
+        conn = _db()
+        conn.execute(
+            "INSERT INTO llm_usage (ts, agent, business_id, provider, model, prompt_tokens, completion_tokens, total_tokens, cost_usd, tag) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), agent, business_id, provider, model,
+             prompt, completion, total, round(cost, 6), tag))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+@agentic_bp.route("/api/agentic/usage", methods=["GET", "OPTIONS"])
+def api_agentic_usage():
+    """Usage summary: totals + per-business + per-model over N days (default 7)."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    days = max(1, min(365, int(request.args.get("days", 7) or 7)))
+    bid = request.args.get("business_id", type=int)
+    since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    conn = _db()
+    def agg(where, params):
+        return conn.execute(
+            "SELECT COALESCE(SUM(prompt_tokens),0) p, COALESCE(SUM(completion_tokens),0) c, "
+            "COALESCE(SUM(total_tokens),0) t, COALESCE(SUM(cost_usd),0) cost, COUNT(*) calls "
+            "FROM llm_usage WHERE ts>=? " + where, [since] + params).fetchone()
+    if bid:
+        tot = agg("AND business_id=?", [bid])
+    else:
+        tot = agg("", [])
+    per_model = [dict(r) for r in conn.execute(
+        "SELECT provider, model, SUM(prompt_tokens) prompt_tokens, SUM(completion_tokens) completion_tokens, "
+        "SUM(total_tokens) total_tokens, SUM(cost_usd) cost_usd, COUNT(*) calls "
+        "FROM llm_usage WHERE ts>=? GROUP BY provider, model ORDER BY cost_usd DESC", (since,)).fetchall()]
+    per_biz = [dict(r) for r in conn.execute(
+        "SELECT business_id, SUM(prompt_tokens) prompt_tokens, SUM(completion_tokens) completion_tokens, "
+        "SUM(total_tokens) total_tokens, SUM(cost_usd) cost_usd, COUNT(*) calls "
+        "FROM llm_usage WHERE ts>=? GROUP BY business_id ORDER BY cost_usd DESC", (since,)).fetchall()]
+    per_day = [dict(r) for r in conn.execute(
+        "SELECT substr(ts,1,10) day, SUM(total_tokens) total_tokens, SUM(cost_usd) cost_usd, COUNT(*) calls "
+        "FROM llm_usage WHERE ts>=? GROUP BY substr(ts,1,10) ORDER BY day", (since,)).fetchall()]
+    conn.close()
+    return jsonify({"status": "ok", "days": days, "totals": dict(tot),
+                    "per_model": per_model, "per_business": per_biz, "per_day": per_day})
+
+@agentic_bp.route("/api/agentic/usage/log", methods=["GET", "OPTIONS"])
+def api_agentic_usage_log():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    days = max(1, min(365, int(request.args.get("days", 7) or 7)))
+    bid = request.args.get("business_id", type=int)
+    limit = min(500, int(request.args.get("limit", 200) or 200))
+    since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    conn = _db()
+    if bid:
+        rows = conn.execute(
+            "SELECT * FROM llm_usage WHERE ts>=? AND business_id=? ORDER BY id DESC LIMIT ?",
+            (since, bid, limit)).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM llm_usage WHERE ts>=? ORDER BY id DESC LIMIT ?",
+                            (since, limit)).fetchall()
+    conn.close()
+    return jsonify({"status": "ok", "rows": [dict(r) for r in rows]})

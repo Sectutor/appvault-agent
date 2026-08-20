@@ -252,6 +252,61 @@ def save_catalog_cache(catalog):
         f.write(str(catalog.get("version", 0)))
     os.replace(CATALOG_VERSION_FILE + ".tmp", CATALOG_VERSION_FILE)
 
+# ── Admin catalog overrides (free/premium per app) ──
+# The store catalog (catalog.json) marks each app free_tier / locked /
+# requires_paid. The admin can override those flags per app from the
+# dashboard (Settings → Catalog Manager) without editing the catalog file;
+# overrides persist here and are layered on top of every catalog response.
+CATALOG_OVERRIDES_PATH = os.path.join(STORAGE_PATH, "catalog_overrides.json")
+_OVERRIDE_LOCK = threading.RLock()
+
+def load_catalog_overrides():
+    try:
+        with _OVERRIDE_LOCK:
+            if os.path.exists(CATALOG_OVERRIDES_PATH):
+                with open(CATALOG_OVERRIDES_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        return data
+    except Exception:
+        pass
+    return {}
+
+def save_catalog_overrides(overrides):
+    with _OVERRIDE_LOCK:
+        tmp = CATALOG_OVERRIDES_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(overrides, f, indent=2)
+        os.replace(tmp, CATALOG_OVERRIDES_PATH)
+
+@app.route("/api/agentic/catalog/overrides", methods=["GET", "POST", "OPTIONS"])
+def api_catalog_overrides():
+    """Admin: list or update per-app free/premium overrides."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    if request.method == "POST":
+        data = request.get_json() or {}
+        app_id = (data.get("app_id") or data.get("id") or "").strip()
+        if not app_id:
+            return jsonify({"error": "app_id required"}), 400
+        overrides = load_catalog_overrides()
+        cur = overrides.get(app_id) or {}
+        if "free_tier" in data and isinstance(data["free_tier"], bool):
+            cur["free_tier"] = data["free_tier"]
+        if "locked" in data and isinstance(data["locked"], bool):
+            cur["locked"] = data["locked"]
+        if "requires_paid" in data and isinstance(data["requires_paid"], bool):
+            cur["requires_paid"] = data["requires_paid"]
+        if not cur:
+            overrides.pop(app_id, None)
+        else:
+            overrides[app_id] = cur
+        save_catalog_overrides(overrides)
+        _CATALOG_RESP_CACHE = None  # invalidate catalog cache
+        return jsonify({"status": "ok", "app_id": app_id, "override": overrides.get(app_id)})
+    # GET
+    return jsonify({"status": "ok", "overrides": load_catalog_overrides()})
+
 def get_cached_version():
     try:
         with open(CATALOG_VERSION_FILE) as f:
@@ -3012,10 +3067,16 @@ def api_catalog():
     if _CATALOG_RESP_CACHE is not None and now - _CATALOG_RESP_TS < _BULK_CACHE_TTL:
         return Response(_CATALOG_RESP_CACHE, mimetype="application/json")
     _refresh_bulk_container_state()
+    # Admin overrides (free/premium per app) — layered on top of the catalog.
+    overrides = load_catalog_overrides()
     result = []
     for app in catalog_cache.get("apps", []):
         if app.get("hidden") or app.get("disabled"):
             continue  # infra (central-* DBs etc.) / unpublished apps not shown in the store
+        if app["id"] in overrides:
+            for _k in ("free_tier", "locked", "requires_paid"):
+                if _k in overrides[app["id"]]:
+                    app = {**app, _k: overrides[app["id"]][_k]}
         status = get_app_status_local(app["id"])
         cname = _app_container_name(app["id"])
         host_port = get_container_host_port(cname) or _stable_host_port(cname, app["id"], app.get("container_port", 80))
@@ -4192,8 +4253,9 @@ def api_ai_generate_command():
 # Replaces the hardcoded demo block. State lives in SQLite, roster status is
 # derived from live probes, Oracle sweeps real RSS feeds, LLM config is central.
 # ==============================================================================
-from agentic_plane import agentic_bp, start_funnel_scheduler
+from agentic_plane import agentic_bp, start_funnel_scheduler, start_backup_scheduler
 start_funnel_scheduler()  # boot the funnel scheduler daemon (prospect machine)
+start_backup_scheduler()  # boot the daily backup daemon (agentic.db snapshots)
 app.register_blueprint(agentic_bp)
 
 # HEIMDALL â€” auto-configure on startup

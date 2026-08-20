@@ -39,6 +39,8 @@ services:
       - OPENAI_API_KEY=${LITELLM_MASTER_KEY:-sk-litellm-master-key}
       - OBSIDIAN_VAULT_PATH=/vault
       - AGENT_API_URL=http://host.docker.internal:8086
+      - AGENTIC_TOKEN=${AGENTIC_TOKEN:-}
+      - API_KEY=${API_KEY:-}
       - OLLAMA_API_BASE=${OLLAMA_API_BASE:-http://host.docker.internal:11434}
     volumes:
       - ./vault:/vault
@@ -59,6 +61,8 @@ services:
       - OPENAI_API_KEY=${LITELLM_MASTER_KEY:-sk-litellm-master-key}
       - OBSIDIAN_VAULT_PATH=/vault
       - AGENT_API_URL=http://host.docker.internal:8086
+      - AGENTIC_TOKEN=${AGENTIC_TOKEN:-}
+      - API_KEY=${API_KEY:-}
     volumes:
       - ./vault:/vault
       - ./logs/crewai:/logs
@@ -75,6 +79,8 @@ services:
       - "3001:3001"
     environment:
       - AGENT_API_URL=http://host.docker.internal:8086
+      - AGENTIC_TOKEN=${AGENTIC_TOKEN:-}
+      - API_KEY=${API_KEY:-}
       - OBSIDIAN_VAULT_PATH=/vault
     volumes:
       - ./vault:/vault
