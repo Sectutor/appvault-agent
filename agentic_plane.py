@@ -342,7 +342,8 @@ def _agentic_token_ok(supplied):
 
 # GETs the store UI / agents may call without a token (badges, news feed, health, brain graph, memory)
 _AGENTIC_PUBLIC_GET = ("/api/agentic/status", "/api/agentic/health", "/api/agentic/news",
-                       "/api/agentic/brain/graph", "/api/agentic/brain/note", "/api/agentic/memory")
+                       "/api/agentic/config", "/api/agentic/brain/graph",
+                       "/api/agentic/brain/note", "/api/agentic/memory")
 
 @agentic_bp.before_request
 def _agentic_auth_guard():

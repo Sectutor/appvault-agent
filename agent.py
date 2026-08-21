@@ -118,6 +118,7 @@ def add_cors_headers(response):
 # uninstall/restart/stop/exec/agentic) requires a valid X-Api-Key when API_KEY is set.
 PUBLIC_READ_PREFIXES = ("/api/catalog", "/api/health", "/api/info", "/api/agent/status", "/api/stats",
                         "/api/apps/health", "/api/education/", "/api/icon/", "/api/ping/",
+                        "/api/agentic/status", "/api/agentic/health", "/api/agentic/config",
                         "/api/agentic/news", "/api/agentic/bootstrap", "/api/agentic/brain",
                         "/api/agentic/memory")
 
