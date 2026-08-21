@@ -284,6 +284,10 @@ def _migrate_multitenant_schema():
         conn.execute("CREATE TABLE IF NOT EXISTS links (code TEXT PRIMARY KEY, target TEXT, campaign TEXT, source TEXT, medium TEXT, clicks INTEGER DEFAULT 0, created TEXT)")
     except Exception:
         pass
+    try:
+        conn.execute("ALTER TABLE work_items ADD COLUMN extra_json TEXT DEFAULT '{}'")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
 
@@ -12203,6 +12207,223 @@ def api_pipeline_auto():
     cfg["auto"] = bool(data.get("auto", cfg.get("auto", True)))
     _cfg_set("pipeline", cfg)
     return jsonify({"status": "ok", "config": cfg})
+
+# ---------------------------------------------------------------------------
+# AUTONOMOUS MULTI-MODAL ASSET STUDIO (Hero Art, Diagrams & Carousels)
+# ---------------------------------------------------------------------------
+
+_DIAGRAM_PROMPT = ("You are an expert Solutions Architect and Visual Communicator. "
+                   "From the article title and content, generate a clean, valid Mermaid.js diagram "
+                   "that visualizes the core architecture, sequential workflow, or decision tree. "
+                   "Use 'flowchart TD' or 'flowchart LR'. Keep node labels concise (< 6 words). "
+                   "Output ONLY the Mermaid code inside a ```mermaid code block, with NO other text.")
+
+_CAROUSEL_PROMPT = ("You are an elite LinkedIn & Social Media Growth Strategist. "
+                    "Convert the article into an engaging 5-slide visual carousel presentation. "
+                    "Return a JSON array of exactly 5 slide objects, each with: "
+                    "slide (1 to 5), "
+                    "tag (e.g. 'THE HOOK', 'THE FRICTION', 'THE FRAMEWORK', 'IN PRACTICE', 'KEY TAKEAWAYS'), "
+                    "headline (punchy title, max 8 words), "
+                    "body (2-3 concise bullet points or short insight, max 40 words total), "
+                    "footer (e.g. 'Swipe ->', 'Save for later', 'Follow for more'). "
+                    "Output ONLY the JSON array -- no markdown fences, no preamble.")
+
+def _generate_hero_art(wid, title, angle="", project="appvault"):
+    """Generate high-impact Hero Cover Art for the content pipeline."""
+    import urllib.parse
+    clean_title = (title or "AI Systems & Technology").replace("Brainstorm - ", "").replace("Brief: ", "").strip()
+    prompt_subject = f"Editorial modern 3D isometric tech illustration for '{clean_title}', {angle}, digital cybersecurity futuristic glowing cyber mesh studio lighting minimalist high quality 4k"
+    encoded_prompt = urllib.parse.quote(prompt_subject[:300])
+    image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1200&height=630&nologo=true&seed={abs(hash(clean_title)) % 100000}"
+    
+    # Also generate a rich standalone SVG banner as fallback/instant asset
+    svg_title = clean_title[:45].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    svg_angle = (angle[:70] if angle else "Enterprise AI & Autonomous Systems").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    svg_banner = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0b132b"/>
+      <stop offset="50%" stop-color="#1c2541"/>
+      <stop offset="100%" stop-color="#0b0f19"/>
+    </linearGradient>
+    <linearGradient id="cyan" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#818cf8"/>
+    </linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="rgba(56,189,248,0.06)" stroke-width="1"/>
+    </pattern>
+  </defs>
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <rect width="1200" height="630" fill="url(#grid)"/>
+  <circle cx="1050" cy="150" r="280" fill="rgba(56,189,248,0.12)" filter="blur(60px)"/>
+  <circle cx="150" cy="480" r="220" fill="rgba(129,140,248,0.1)" filter="blur(60px)"/>
+  
+  <rect x="80" y="80" width="140" height="32" rx="16" fill="rgba(56,189,248,0.15)" stroke="rgba(56,189,248,0.4)" stroke-width="1.5"/>
+  <text x="150" y="101" font-family="system-ui, -apple-system, sans-serif" font-size="13" font-weight="bold" fill="#38bdf8" text-anchor="middle">APPVAULT INSIGHTS</text>
+  
+  <text x="80" y="240" font-family="system-ui, -apple-system, sans-serif" font-size="52" font-weight="900" fill="#f8fafc" width="1040">
+    <tspan x="80" dy="0">{svg_title}</tspan>
+  </text>
+  
+  <text x="80" y="360" font-family="system-ui, -apple-system, sans-serif" font-size="24" font-weight="400" fill="#94a3b8">
+    <tspan x="80" dy="0">{svg_angle}</tspan>
+  </text>
+  
+  <line x1="80" y1="520" x2="1120" y2="520" stroke="rgba(255,255,255,0.1)" stroke-width="1"/>
+  <text x="80" y="560" font-family="system-ui, -apple-system, sans-serif" font-size="16" font-weight="600" fill="#38bdf8">Autonomous Content Engine</text>
+  <text x="1120" y="560" font-family="system-ui, -apple-system, sans-serif" font-size="16" font-weight="500" fill="#64748b" text-anchor="end">appvault.internal</text>
+</svg>"""
+    return {
+        "image_url": image_url,
+        "svg_banner": svg_banner,
+        "prompt": prompt_subject,
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+
+def _generate_diagram(wid, title, content="", project="appvault"):
+    """Generate structured Mermaid architecture / workflow diagram from content."""
+    prompt_context = f"Article Title: {title}\n\nArticle Outline & Content:\n{content[:2000]}"
+    try:
+        raw_diagram = _call_llm(prompt_context, system_prompt=_DIAGRAM_PROMPT, agent="architect", timeout=60)
+        code = raw_diagram.strip()
+        if "```mermaid" in code:
+            code = code.split("```mermaid")[1].split("```")[0].strip()
+        elif "```" in code:
+            code = code.split("```")[1].split("```")[0].strip()
+        if not code.startswith("flowchart") and not code.startswith("graph") and not code.startswith("sequenceDiagram"):
+            code = "flowchart TD\n  A[Signal Ingestion] --> B[Strategist Brief]\n  B --> C[Draft Synthesis]\n  C --> D[Multi-Modal Asset Studio]\n  D --> E[Human Verification & Publication]"
+    except Exception as e:
+        print(f"[asset_studio] diagram LLM call warning: {e}", flush=True)
+        code = "flowchart TD\n  A[Signal & Research] --> B[Architectural Synthesis]\n  B --> C[Implementation Core]\n  C --> D[Verified Output]"
+    
+    return {
+        "mermaid": code,
+        "type": "flowchart",
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+
+def _generate_carousel(wid, title, content="", project="appvault"):
+    """Generate 5 structured social carousel slides from article content."""
+    prompt_context = f"Article Title: {title}\n\nContent:\n{content[:2500]}"
+    slides = []
+    try:
+        raw_slides = _call_llm(prompt_context, system_prompt=_CAROUSEL_PROMPT, agent="strategist", timeout=60)
+        slides = _json_array_extract(raw_slides)
+    except Exception as e:
+        print(f"[asset_studio] carousel LLM call warning: {e}", flush=True)
+    
+    if not slides or not isinstance(slides, list) or len(slides) < 3:
+        clean_t = title.replace("Brainstorm - ", "").replace("Brief: ", "").strip()
+        slides = [
+            {"slide": 1, "tag": "THE HOOK", "headline": clean_t[:45], "body": "Why modern systems are pivoting towards autonomous execution and verified memory meshes.", "footer": "Swipe to explore ->"},
+            {"slide": 2, "tag": "THE FRICTION", "headline": "The Legacy Failure Mode", "body": "Manual workflows cause cognitive bottlenecks, slow delivery, and fragmented knowledge silos.", "footer": "The Solution ->"},
+            {"slide": 3, "tag": "THE FRAMEWORK", "headline": "The Autonomous Architecture", "body": "1. Multi-tier Memory\n2. Real-time Probes\n3. Autonomous Pipeline Execution", "footer": "In Practice ->"},
+            {"slide": 4, "tag": "IN PRACTICE", "headline": "Proven Business Impact", "body": "10x throughput, guaranteed zero-token fallback, and instant multi-channel asset synthesis.", "footer": "Summary ->"},
+            {"slide": 5, "tag": "KEY TAKEAWAY", "headline": "Build For The Future Today", "body": "Deploy resilient, autonomous agent workflows that compound knowledge automatically.", "footer": "Save & Share"}
+        ]
+    
+    slides = [s for s in slides if isinstance(s, dict)][:5]
+    return {
+        "slides": slides,
+        "count": len(slides),
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+
+@agentic_bp.route("/api/agentic/pipeline/<wid>/assets", methods=["GET", "OPTIONS"])
+def api_pipeline_get_assets(wid):
+    """Retrieve existing multi-modal assets for a work item."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    item = _pipeline_get(wid)
+    if not item:
+        return jsonify({"error": "item not found"}), 404
+    
+    extra = {}
+    try:
+        if item.get("extra_json"):
+            extra = json.loads(item["extra_json"])
+    except Exception:
+        pass
+    
+    assets = extra.get("assets") or {}
+    return jsonify({"status": "ok", "wid": wid, "assets": assets, "item": item})
+
+@agentic_bp.route("/api/agentic/pipeline/<wid>/assets/generate", methods=["POST", "OPTIONS"])
+def api_pipeline_generate_assets(wid):
+    """Generate Hero Art, Diagram, or Carousel on demand."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    item = _pipeline_get(wid)
+    if not item:
+        return jsonify({"error": "item not found"}), 404
+    
+    data = request.get_json() or {}
+    gen_type = data.get("type") or "all"
+    custom_prompt = (data.get("custom_prompt") or "").strip()
+    
+    title = item.get("title") or "Article"
+    content = item.get("content") or ""
+    project = item.get("project") or "appvault"
+    
+    extra = {}
+    try:
+        if item.get("extra_json"):
+            extra = json.loads(item["extra_json"])
+    except Exception:
+        pass
+    
+    assets = extra.get("assets") or {}
+    
+    if gen_type in ("all", "hero"):
+        hero_angle = custom_prompt or (item.get("summary") or "")[:80]
+        assets["hero"] = _generate_hero_art(wid, title, hero_angle, project)
+    
+    if gen_type in ("all", "diagram"):
+        assets["diagram"] = _generate_diagram(wid, title, content, project)
+    
+    if gen_type in ("all", "carousel"):
+        assets["carousel"] = _generate_carousel(wid, title, content, project)
+    
+    extra["assets"] = assets
+    img_url = assets.get("hero", {}).get("image_url") or item.get("image_url")
+    
+    conn = _db()
+    conn.execute("UPDATE work_items SET extra_json=?, image_url=? WHERE id=?", (json.dumps(extra, ensure_ascii=False), img_url, wid))
+    conn.commit()
+    conn.close()
+    
+    _bus_publish("pipeline.assets.ready", {"wid": wid, "title": title, "types": list(assets.keys())})
+    return jsonify({"status": "ok", "wid": wid, "assets": assets})
+
+@agentic_bp.route("/api/agentic/pipeline/<wid>/assets/embed-diagram", methods=["POST", "OPTIONS"])
+def api_pipeline_embed_diagram(wid):
+    """Embed the generated Mermaid diagram into the article draft content."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"})
+    item = _pipeline_get(wid)
+    if not item:
+        return jsonify({"error": "item not found"}), 404
+    
+    extra = {}
+    try:
+        if item.get("extra_json"):
+            extra = json.loads(item["extra_json"])
+    except Exception:
+        pass
+    
+    assets = extra.get("assets") or {}
+    diagram = assets.get("diagram", {}).get("mermaid")
+    if not diagram:
+        return jsonify({"error": "no diagram found for this item"}), 400
+    
+    content = item.get("content") or ""
+    if "```mermaid" not in content:
+        embed_block = f"\n\n### Architecture & Process Flow\n\n```mermaid\n{diagram}\n```\n\n"
+        content = content + embed_block
+        _pipeline_update(wid, content=content)
+    
+    return jsonify({"status": "ok", "wid": wid, "item": _pipeline_get(wid)})
 
 # ---------------------------------------------------------------------------
 # HELP — the plain-English guide, served from the vault
