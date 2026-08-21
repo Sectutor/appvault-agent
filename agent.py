@@ -3233,14 +3233,19 @@ def get_app_image(app_id):
 
 @app.route("/api/catalog/sync", methods=["POST", "OPTIONS"])
 def api_catalog_sync():
-    """Trigger immediate catalog synchronization from the central server and clear local caches."""
+    """Trigger immediate catalog and news synchronization from the central server and clear local caches."""
     if request.method == "OPTIONS":
         return Response("", status=200)
     try:
         sync_catalog(force=True)
         global _CATALOG_RESP_CACHE
         _CATALOG_RESP_CACHE = None
-        return jsonify({"status": "ok", "message": "Catalog sync triggered immediately"})
+        try:
+            from agentic_plane import _sync_central_news
+            _sync_central_news(force=True)
+        except Exception:
+            pass
+        return jsonify({"status": "ok", "message": "Catalog and news sync triggered immediately"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

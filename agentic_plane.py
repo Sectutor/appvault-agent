@@ -13929,7 +13929,7 @@ def api_news():
 
     # GET — list posts newest first, with read state for this reader.
     user_key = _news_user_key()
-    _sync_central_news()
+    _sync_central_news(force=True)
     show_drafts = request.args.get("drafts") == "1" and _news_admin_ok()
     rows = conn.execute(
         "SELECT * FROM news_posts WHERE status='published' OR ? ORDER BY priority DESC, published_at DESC, id DESC",
