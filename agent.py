@@ -118,21 +118,34 @@ def add_cors_headers(response):
 # uninstall/restart/stop/exec/agentic) requires a valid X-Api-Key when API_KEY is set.
 PUBLIC_READ_PREFIXES = ("/api/catalog", "/api/health", "/api/info", "/api/agent/status", "/api/stats",
                         "/api/apps/health", "/api/education/", "/api/icon/", "/api/ping/",
-                        "/api/agentic/news")
+                        "/api/agentic/news", "/api/agentic/bootstrap")
 
 @app.before_request
 def require_api_key():
     if request.method == "OPTIONS":
         return None
-    if not API_KEY:
+    effective_allowed_keys = []
+    if API_KEY:
+        effective_allowed_keys.append(API_KEY)
+    reg_key = agent_state.get("api_key") if 'agent_state' in globals() else None
+    if reg_key:
+        effective_allowed_keys.append(reg_key)
+        
+    if not effective_allowed_keys:
         return None
+        
     path = request.path
     if path.startswith("/api/"):
         is_public_read = request.method == "GET" and path.startswith(PUBLIC_READ_PREFIXES)
         if not is_public_read:
             import hmac as _hmac
             key = request.headers.get("X-Api-Key", "")
-            if not _hmac.compare_digest(key, API_KEY):
+            authorized = False
+            for allowed in effective_allowed_keys:
+                if _hmac.compare_digest(key, allowed):
+                    authorized = True
+                    break
+            if not authorized:
                 return jsonify({"error": "Unauthorized", "message": "Valid X-Api-Key header required"}), 401
     return None
 
@@ -1353,7 +1366,7 @@ def _install_blocked_reason(app_def):
         return "This app is currently disabled by the admin"
     has_paid = bool(agent_state.get("license_key")) or (catalog_cache.get("plan") == "paid")
     if not has_paid:
-        if app_def.get("locked") or app_def.get("requires_paid") or not app_def.get("free_tier"):
+        if app_def.get("requires_paid") or app_def.get("locked"):
             return "Premium app - apply a license key in Settings to unlock"
     return None
 
@@ -1989,10 +2002,13 @@ def _do_install(app_id):
     
     _set_progress(app_id, f"Preparing {app_def.get('name', app_id)}...", 10)
     
-    # Remove existing container if any
-    if container_exists(container_name):
-        _set_progress(app_id, "Removing previous container...", 15)
-        _docker("rm", "-f", container_name)
+    # Remove existing containers if any (handles both standard name and legacy name)
+    legacy_name = app_id
+    for name_to_remove in {container_name, legacy_name}:
+        if name_to_remove and container_exists(name_to_remove):
+            _set_progress(app_id, f"Removing previous container {name_to_remove}...", 15)
+            _docker("stop", name_to_remove, capture=True)
+            _docker("rm", "-f", name_to_remove, capture=True)
     
     # Pull image with live layer streaming progress
     ok, err = _docker_pull_with_progress(image, app_id, start_pct=20, end_pct=60)
@@ -2674,18 +2690,52 @@ def _do_install_stack(app_id):
     _set_progress_done(app_id, f"{app_name} installed!")
     print(f"[agent] {app_id} stack installed")
 
+
+def _sweep_app_volumes(app_id):
+    """Remove all Docker volumes whose names are associated with this app.
+    Catches volumes that weren't in the container inspect (e.g. the container was
+    already removed before uninstall ran) by matching common naming patterns:
+      - <app_id>-<anything>        (e.g. listmonk-data, n8n-data)
+      - <app_id>_<anything>        (e.g. app_id_db)
+      - app-<app_id>-<anything>    (e.g. compose-prefixed volumes)
+    Skips 'central-*' shared infrastructure volumes.
+    """
+    try:
+        ok, out = _docker("volume", "ls", "--format", "{{.Name}}", capture=True)
+        if not ok or not out:
+            return
+        prefixes = (f"{app_id}-", f"{app_id}_", f"app-{app_id}-", f"app-{app_id}_",
+                    f"app_{app_id}_", f"app_{app_id}-")
+        for vol in out.strip().splitlines():
+            vol = vol.strip()
+            if not vol:
+                continue
+            if vol.startswith("central-"):
+                continue
+            if any(vol.startswith(p) for p in prefixes) or vol == app_id:
+                ok_v, ve = _docker("volume", "rm", "--force", vol, capture=True)
+                if ok_v:
+                    print(f"[agent] {app_id}: swept volume {vol}")
+                else:
+                    print(f"[agent] {app_id}: sweep volume {vol} warn: {str(ve)[:60]}")
+    except Exception as e:
+        print(f"[agent] _sweep_app_volumes({app_id}) warn: {e}")
+
 def _do_uninstall(app_id):
-    """Uninstall a Docker app AND free its disk (image + data + volumes)."""
+    """Uninstall a Docker app AND free ALL its disk (containers, image, volumes, data dirs).
+    After this call the app should not appear anywhere in `docker ps -a` or `docker volume ls`.
+    """
     if not docker_available():
         raise Exception("Docker unavailable")
 
     container_name = f"app-{app_id}"
+
+    # ── Stack / compose apps ──────────────────────────────────────────────────
+    # Stack containers are labeled appvault.app=<app_id> (e.g. twenty-server-1)
     if not container_exists(container_name):
-        # ADDITIVE: stack apps run compose containers labeled appvault.app=<app_id>
-        # (e.g. twenty-server-1), so uninstall must tear the whole stack down.
-        okc, outc = _docker("ps", "-a", "--filter", f"label=appvault.app={app_id}",
-                            "--format", "{{.Names}}", capture=True)
-        if okc and outc and outc.strip():
+        ok_lbl, out_lbl = _docker("ps", "-a", "--filter", f"label=appvault.app={app_id}",
+                                   "--format", "{{.Names}}", capture=True)
+        if ok_lbl and out_lbl and out_lbl.strip():
             print(f"[agent] {app_id} is a stack app; removing stack...")
             stack_root = os.path.join(os.environ.get("STORAGE_PATH", "/data"), "stacks", app_id)
             compose_path = ""
@@ -2695,28 +2745,34 @@ def _do_uninstall(app_id):
                     compose_path = cand
                     break
             if compose_path:
-                _docker("compose", "-p", _stack_project(app_id), "-f", compose_path, "down",
-                        "-v", "--remove-orphans", capture=True, timeout=300)
+                _docker("compose", "-p", _stack_project(app_id), "-f", compose_path,
+                        "down", "-v", "--remove-orphans", capture=True, timeout=300)
             else:
-                for cname in outc.strip().splitlines():
-                    _docker("stop", cname.strip())
-                    _docker("rm", cname.strip())
-                # Prune ONLY this stack's labeled volumes. A bare 'volume prune'
-                # deletes EVERY dangling volume on the host - including volumes
-                # belonging to unrelated stopped containers.
+                for cname in out_lbl.strip().splitlines():
+                    cname = cname.strip()
+                    ok_img, img_out = _docker("inspect", cname, "--format",
+                                             "{{.Config.Image}}", capture=True)
+                    _docker("stop", cname, capture=True)
+                    _docker("rm", cname, capture=True)
+                    if ok_img and img_out.strip():
+                        _docker("image", "rm", "--force", img_out.strip(), capture=True)
+                # Prune ONLY this stack's labeled volumes
                 _docker("volume", "prune", "-f",
                         "--filter", f"label=com.docker.compose.project={_stack_project(app_id)}",
                         capture=True)
+            # Also sweep volumes named after the project
+            _sweep_app_volumes(app_id)
             try:
                 _sync_caddy_apps()
             except Exception:
                 pass
-            print(f"[agent] {app_id} stack removed")
+            print(f"[agent] {app_id} stack fully removed")
             return
-        print(f"[agent] {app_id} not found, skipping")
+        print(f"[agent] {app_id} not found — nothing to remove")
         return
 
-    # capture image + volumes/binds BEFORE removing the container
+    # ── Single-container app ──────────────────────────────────────────────────
+    # Capture image + volumes BEFORE removing the container
     image = None
     named_volumes = []
     bind_dirs = []
@@ -2734,27 +2790,55 @@ def _do_uninstall(app_id):
     except Exception as e:
         print(f"[agent] uninstall inspect warn: {e}")
 
-    _docker("stop", container_name)
-    _docker("rm", container_name)
+    # Check for sibling containers (e.g. app-listmonk-db, app-twenty-db)
+    ok_sib, sib_out = _docker("ps", "-a", "--filter", f"name=app-{app_id}-",
+                               "--format", "{{.Names}}", capture=True)
+    sibling_containers = [n.strip() for n in (sib_out or "").splitlines() if n.strip()]
 
-    # 1. remove the app's docker image (frees GBs). Ignore if shared/in-use.
+    # Stop and remove main container
+    print(f"[agent] {app_id}: stopping and removing container...")
+    _docker("stop", container_name, capture=True)
+    ok_rm, rm_err = _docker("rm", "--force", container_name, capture=True)
+    if ok_rm:
+        print(f"[agent] {app_id}: container removed")
+    else:
+        print(f"[agent] {app_id}: container rm warn: {str(rm_err)[:80]}")
+
+    # Stop and remove sibling containers
+    for sib in sibling_containers:
+        ok_si, si_img = _docker("inspect", sib, "--format", "{{.Config.Image}}", capture=True)
+        _docker("stop", sib, capture=True)
+        _docker("rm", "--force", sib, capture=True)
+        print(f"[agent] {app_id}: removed sibling container {sib}")
+        # Collect sibling images for removal
+        if ok_si and si_img.strip():
+            _docker("image", "rm", "--force", si_img.strip(), capture=True)
+
+    # 1. Remove the app's Docker image (frees GBs)
     if image:
-        ok, err = _docker("image", "rm", image, capture=True)
-        if ok:
-            print(f"[agent] removed image {image}")
+        ok_img, err_img = _docker("image", "rm", "--force", image, capture=True)
+        if ok_img:
+            print(f"[agent] {app_id}: removed image {image}")
         else:
-            print(f"[agent] image {image} not removed ({str(err)[:60]}) - shared/in-use")
-    # 2. clear dangling layers left behind (safe: only untagged)
+            print(f"[agent] {app_id}: image {image} not removed ({str(err_img)[:60]}) — shared/in-use")
+
+    # 2. Prune dangling image layers left behind
     _docker("image", "prune", "-f", capture=True)
 
-    # 3. remove the app's named volumes (skip shared central-* infra)
+    # 3. Remove named volumes found in inspect
     for vol in named_volumes:
         if str(vol).startswith("central-"):
             continue
-        _docker("volume", "rm", vol, capture=True)
-        print(f"[agent] removed volume {vol}")
+        ok_v, ve = _docker("volume", "rm", "--force", vol, capture=True)
+        if ok_v:
+            print(f"[agent] {app_id}: removed volume {vol}")
+        else:
+            print(f"[agent] {app_id}: volume {vol} rm warn: {str(ve)[:60]}")
 
-    # 4. remove the app's data dir (unified /data/apps/<id>) + any bind mounts
+    # 4. Sweep any additional volumes named after the app that weren't in inspect
+    _sweep_app_volumes(app_id)
+
+    # 5. Remove the app's data dir + bind mounts
     app_data_host = os.environ.get("APP_DATA_HOST_PATH", "")
     host_dir = ""
     if app_data_host:
@@ -2762,40 +2846,41 @@ def _do_uninstall(app_id):
         if os.path.isdir(host_dir):
             import shutil
             shutil.rmtree(host_dir, ignore_errors=True)
-            print(f"[agent] removed app data dir {host_dir}")
+            print(f"[agent] {app_id}: removed data dir {host_dir}")
     for d in bind_dirs:
         if d and d != host_dir and os.path.isdir(d):
             import shutil
             shutil.rmtree(d, ignore_errors=True)
-            print(f"[agent] removed bind dir {d}")
-    
+            print(f"[agent] {app_id}: removed bind dir {d}")
+
     # Remove Heimdall tile
     try:
         from heimdall_bridge import remove_heimdall_tile
-        tile_url = f"{public_base()}:{_https_port(app_id)}" if not _is_proxy_disabled(app_id) else f"{public_base()}:{get_container_host_port(container_name) or ''}"
+        tile_url = (f"{public_base()}:{_https_port(app_id)}" if not _is_proxy_disabled(app_id)
+                    else f"{public_base()}:{get_container_host_port(container_name) or ''}")
         if tile_url:
             remove_heimdall_tile(tile_url)
-    except Exception as e:
+    except Exception:
         pass
-    
-    # Monitoring tools (Portainer/Kuma/Netdata): clear per-install secret + wipe data
-    # so uninstall removes the admin password entirely and reinstalling gets a fresh one.
+
+    # Monitoring tools: clear per-install secret + wipe data
     if app_id in ("portainer", "uptime-kuma", "netdata"):
         try:
             _mon_sec(app_id, "clear")
         except Exception:
             pass
         try:
-            host_dir = _monitoring_health_dir(app_id)  # APP_DATA_HOST_PATH/<id>
-            if host_dir and os.path.isdir(host_dir):
+            hd = _monitoring_health_dir(app_id)
+            if hd and os.path.isdir(hd):
                 import shutil
-                shutil.rmtree(host_dir, ignore_errors=True)
-                print(f"[agent] wiped {app_id} data dir {host_dir}")
-        except Exception as e:
+                shutil.rmtree(hd, ignore_errors=True)
+                print(f"[agent] {app_id}: wiped monitoring data dir {hd}")
+        except Exception:
             pass
 
-    _sync_caddy_apps()  # remove HTTPS reverse-proxy path for this app
-    print(f"[agent] {app_id} uninstalled")
+    _sync_caddy_apps()  # Remove HTTPS reverse-proxy path for this app
+    print(f"[agent] {app_id}: fully uninstalled — container, image, volumes and data removed")
+
 
 def _do_restart(app_id):
     """Restart a Docker app."""
@@ -2817,17 +2902,54 @@ def _do_restart(app_id):
         raise Exception(f"Failed to restart: {err}")
 
 def _do_stop(app_id):
-    """Stop a Docker app (releases memory; container + data preserved)."""
+    """Stop a Docker app and remove its container (frees memory + clears Docker Desktop clutter).
+    Data is preserved in named volumes so the app can be restarted at any time.
+    Stopping a stack app tears down all stack containers.
+    """
     if not docker_available():
         raise Exception("Docker unavailable")
     container_name = f"app-{app_id}"
+
+    # Stack app: look for containers labeled appvault.app=<app_id>
+    ok_lbl, out_lbl = _docker("ps", "-a", "--filter", f"label=appvault.app={app_id}",
+                               "--format", "{{.Names}}", capture=True)
+    if ok_lbl and out_lbl and out_lbl.strip() and not container_exists(container_name):
+        # It's a stack — stop and remove all stack containers
+        print(f"[agent] {app_id} is a stack app; stopping stack...")
+        stack_root = os.path.join(os.environ.get("STORAGE_PATH", "/data"), "stacks", app_id)
+        compose_path = ""
+        for cand in (os.path.join(stack_root, "docker-compose.yml"),
+                     os.path.join(stack_root, "repo", "docker-compose.yml")):
+            if os.path.exists(cand):
+                compose_path = cand
+                break
+        if compose_path:
+            _docker("compose", "-p", _stack_project(app_id), "-f", compose_path, "down",
+                    capture=True, timeout=120)
+        else:
+            for cname in out_lbl.strip().splitlines():
+                _docker("stop", cname.strip(), capture=True)
+                _docker("rm", cname.strip(), capture=True)
+        print(f"[agent] {app_id} stack stopped and containers removed")
+        return
+
     if not container_exists(container_name):
         raise Exception(f"Container '{container_name}' not found")
+
+    # Stop the container
     ok, err = _docker("stop", container_name, capture=True)
-    if ok:
-        print(f"[agent] {app_id} stopped")
-    else:
+    if not ok:
         raise Exception(f"Failed to stop: {err}")
+
+    # Remove the container — data lives in volumes, not the container layer.
+    # This removes the Exited entry from Docker Desktop immediately.
+    ok_rm, err_rm = _docker("rm", container_name, capture=True)
+    if ok_rm:
+        print(f"[agent] {app_id} stopped and container removed (data preserved in volumes)")
+    else:
+        # Non-fatal: rm failed but stop succeeded — warn and continue.
+        print(f"[agent] {app_id} stopped (container rm warn: {str(err_rm)[:80]})")
+
 
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # APP HEALTH MONITOR
@@ -3109,6 +3231,19 @@ def _get_app_image_uncached(app_id):
 def get_app_image(app_id):
     return _cached_docker_port(("img", app_id), _get_app_image_uncached, app_id)
 
+@app.route("/api/catalog/sync", methods=["POST", "OPTIONS"])
+def api_catalog_sync():
+    """Trigger immediate catalog synchronization from the central server and clear local caches."""
+    if request.method == "OPTIONS":
+        return Response("", status=200)
+    try:
+        sync_catalog(force=True)
+        global _CATALOG_RESP_CACHE
+        _CATALOG_RESP_CACHE = None
+        return jsonify({"status": "ok", "message": "Catalog sync triggered immediately"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/api/catalog")
 def api_catalog():
     """Return the catalog with live local status and host ports (response cached)."""
@@ -3204,6 +3339,36 @@ def api_health():
         "catalog_apps": len(catalog_cache.get("apps", [])),
         "version": APP_VERSION,
     })
+
+
+@app.route("/api/agentic/bootstrap", methods=["GET", "OPTIONS"])
+def api_agentic_bootstrap():
+    """Return the API key to the store UI so it can self-configure on first load.
+    Origin-gated: only the store UI origin (port == UI_ORIGIN_PORT) may receive
+    the token. External origins get a 403 so the key never leaks to random sites.
+    This endpoint is listed in PUBLIC_READ_PREFIXES so it's reachable before the
+    key is known, but is *not* useful to unauthenticated callers on other origins.
+    """
+    if request.method == "OPTIONS":
+        return Response("", status=200)
+    origin = request.headers.get("Origin", "")
+    if not _origin_allowed(origin):
+        return jsonify({"error": "Forbidden", "message": "Not a trusted origin"}), 403
+    if not API_KEY:
+        return jsonify({"error": "No API key configured"}), 404
+    return jsonify({"token": API_KEY, "status": "ok"})
+
+@app.route("/api/auth/verify", methods=["GET", "OPTIONS"])
+def api_auth_verify():
+    """Validate the X-Api-Key header — returns 200 ok or 401 unauthorized.
+    Used by the store UI to check if its stored key is still correct after
+    a reinstall or key rotation, without triggering a side-effect.
+    This route itself IS protected by require_api_key (no PUBLIC_READ_PREFIXES
+    entry), so a valid key returns 200 and an invalid key returns 401.
+    """
+    if request.method == "OPTIONS":
+        return Response("", status=200)
+    return jsonify({"status": "ok", "agent_id": agent_state.get("agent_id", "")})
 
 @app.route("/api/stats")
 def api_stats():
