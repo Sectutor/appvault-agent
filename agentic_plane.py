@@ -340,8 +340,9 @@ def _agentic_token_ok(supplied):
     except Exception:
         return False
 
-# GETs the store UI / agents may call without a token (badges, news feed, health)
-_AGENTIC_PUBLIC_GET = ("/api/agentic/status", "/api/agentic/health", "/api/agentic/news")
+# GETs the store UI / agents may call without a token (badges, news feed, health, brain graph, memory)
+_AGENTIC_PUBLIC_GET = ("/api/agentic/status", "/api/agentic/health", "/api/agentic/news",
+                       "/api/agentic/brain/graph", "/api/agentic/brain/note", "/api/agentic/memory")
 
 @agentic_bp.before_request
 def _agentic_auth_guard():
@@ -2679,14 +2680,26 @@ def _build_vault_graph():
 
 
 # SECOND BRAIN GRAPH (2026-08-08) — the Memory page: wiki-link graph of the
-# Obsidian GRC-Brain vault + note CRUD. Vault mounted at /data/second-brain.
+# Obsidian GRC-Brain vault + note CRUD. Vault mounted at /data/second-brain or /data/vault.
 # =============================================================================
 SECOND_BRAIN_ROOT = os.environ.get("SECOND_BRAIN_ROOT", "/data/second-brain/GRC-Brain")
 
 
+def _sb_root():
+    for p in (os.environ.get("SECOND_BRAIN_ROOT"), "/data/second-brain/GRC-Brain", "/data/second-brain", "/data/vault", _vault_path(), "D:/ObsidianVault", "./vault"):
+        if p and os.path.isdir(p):
+            return os.path.realpath(p)
+    p = os.path.realpath("/data/vault")
+    try:
+        os.makedirs(p, exist_ok=True)
+    except Exception:
+        pass
+    return p
+
+
 def _sb_path(path):
     """Resolve a note path safely inside the vault root."""
-    root = os.path.realpath(SECOND_BRAIN_ROOT)
+    root = _sb_root()
     full = os.path.realpath(os.path.join(root, (path or "").lstrip("/\\")))
     if not full.startswith(root + os.sep) and full != root:
         return None
@@ -2710,52 +2723,91 @@ def _sb_note_title(path):
 
 def _second_brain_graph():
     """Scan the vault: nodes = markdown notes (sized by in-link count),
-    edges = [[wiki-links]]. Clusters = top-level folders."""
-    root = SECOND_BRAIN_ROOT
+    edges = [[wiki-links]]. Also loads memory entries from SQLite so knowledge graph
+    unifies notes, operational logs, and agent memory facts."""
+    root = _sb_root()
     nodes, edges = [], []
-    index = {}          # relpath -> node dict
-    links_out = {}      # relpath -> [targets]
-    link_counts = {}    # relpath -> int (in-links)
+    index = {}          # id -> node dict
+    links_out = {}      # id -> [targets]
+    link_counts = {}    # id -> int (in-links)
     link_re = re.compile(r"\[\[([^\]|#]+)(?:\|[^\]]+)?\]\]")
-    if not os.path.isdir(root):
-        return {"nodes": [], "edges": [], "folders": []}
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if not d.startswith(".") and d != ".obsidian"]
-        for fn in filenames:
-            if not fn.endswith(".md"):
-                continue
-            full = os.path.join(dirpath, fn)
-            rel = os.path.relpath(full, root).replace("\\", "/")
-            folder = rel.split("/")[0] if "/" in rel else "root"
-            try:
-                with open(full, "r", encoding="utf-8", errors="replace") as f:
-                    content = f.read(12000)
-            except Exception:
-                continue
-            title = _sb_note_title(full)
-            preview = ""
-            try:
-                with open(full, "r", encoding="utf-8", errors="replace") as f:
-                    raw = f.read(900)
-                preview = re.sub(r"\s+", " ", re.sub(r"[#*`>|\[\]]", " ", raw)).strip()[:160]
-            except Exception:
-                pass
-            targets = []
-            for m in link_re.finditer(content):
-                tgt = m.group(1).strip().replace("\\", "/")
-                if tgt.startswith("http") or "/" not in tgt and "." in tgt:
+
+    if os.path.isdir(root):
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if not d.startswith(".") and d != ".obsidian"]
+            for fn in filenames:
+                if not fn.endswith(".md"):
                     continue
-                targets.append(tgt)
-            index[rel] = {"id": rel, "title": title, "folder": folder, "path": rel, "preview": preview}
-            links_out[rel] = targets
-            for t in targets:
-                key = t + ".md" if not t.endswith(".md") else t
-                key = key if key.endswith(".md") else key + ".md"
-                link_counts[key] = link_counts.get(key, 0) + 1
-    # build nodes with size + edges (resolve targets to existing relpaths)
+                full = os.path.join(dirpath, fn)
+                rel = os.path.relpath(full, root).replace("\\", "/")
+                folder = rel.split("/")[0] if "/" in rel else "root"
+                try:
+                    with open(full, "r", encoding="utf-8", errors="replace") as f:
+                        content = f.read(12000)
+                except Exception:
+                    continue
+                title = _sb_note_title(full)
+                preview = ""
+                try:
+                    with open(full, "r", encoding="utf-8", errors="replace") as f:
+                        raw = f.read(900)
+                    preview = re.sub(r"\s+", " ", re.sub(r"[#*`>|\[\]]", " ", raw)).strip()[:160]
+                except Exception:
+                    pass
+                targets = []
+                for m in link_re.finditer(content):
+                    tgt = m.group(1).strip().replace("\\", "/")
+                    if tgt.startswith("http") or ("/" not in tgt and "." in tgt):
+                        continue
+                    targets.append(tgt)
+                index[rel] = {"id": rel, "title": title, "folder": folder, "path": rel, "preview": preview, "is_note": True}
+                links_out[rel] = targets
+                for t in targets:
+                    key = t + ".md" if not t.endswith(".md") else t
+                    link_counts[key] = link_counts.get(key, 0) + 1
+
+    # Ingest agent memories into graph
+    mem_entries = []
+    try:
+        conn = _db()
+        rows = conn.execute("SELECT * FROM memory ORDER BY id DESC").fetchall()
+        conn.close()
+        tag_clusters = {}
+        for r in rows:
+            rid = r["id"]
+            tag = r["tag"] or "General"
+            content = r["content"] or ""
+            title = content[:48] + ("…" if len(content) > 48 else "")
+            mem_id = f"mem://{rid}"
+            path_str = f"Memory/{tag}/#{rid}.md"
+            node_dict = {
+                "id": mem_id,
+                "title": title or f"Memory #{rid}",
+                "folder": tag,
+                "path": path_str,
+                "preview": content[:180],
+                "is_memory": True,
+                "memory_id": rid,
+                "tier": r["tier"] or "working",
+                "agent": r["agent"] or "System",
+                "ts": (r["ts"] or "")[:16]
+            }
+            index[mem_id] = node_dict
+            tag_clusters.setdefault(tag, []).append(mem_id)
+            mem_entries.append(node_dict)
+        
+        # Link memories sharing tags
+        for tag, mem_ids in tag_clusters.items():
+            for i in range(len(mem_ids) - 1):
+                edges.append({"from": mem_ids[i], "to": mem_ids[i+1]})
+    except Exception:
+        pass
+
+    # Build node sizes and edges
     for rel, node in index.items():
         node["size"] = 1 + min(12, link_counts.get(rel, 0))
         nodes.append(node)
+    
     id_set = set(index.keys())
     for rel, targets in links_out.items():
         for t in targets:
@@ -2764,8 +2816,9 @@ def _second_brain_graph():
                 edges.append({"from": rel, "to": cand})
             elif t in id_set:
                 edges.append({"from": rel, "to": t})
+
     folders = sorted({n["folder"] for n in nodes})
-    return {"nodes": nodes, "edges": edges, "folders": folders}
+    return {"nodes": nodes, "edges": edges, "folders": folders, "memories": mem_entries}
 
 
 @agentic_bp.route("/api/agentic/brain/graph", methods=["GET", "OPTIONS"])
@@ -2774,8 +2827,6 @@ def api_brain_graph():
         return jsonify({"status": "ok"})
     try:
         g = _second_brain_graph()
-        if request.args.get("include_memory") == "1":
-            g["memories"] = _brain_memory_overlay(g["nodes"])
         return jsonify({"status": "ok", **g})
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)[:200]}), 500
@@ -2787,6 +2838,25 @@ def api_brain_note():
         return jsonify({"status": "ok"})
     if request.method == "GET":
         rel = (request.args.get("path") or "").strip()
+        # Check if memory entry
+        if rel.startswith("mem://") or rel.startswith("Memory/"):
+            mid_str = rel.split("#")[-1].replace(".md", "").strip() if "#" in rel else rel.replace("mem://", "").replace(".md", "").strip()
+            if mid_str.isdigit():
+                conn = _db()
+                r = conn.execute("SELECT * FROM memory WHERE id=?", (int(mid_str),)).fetchone()
+                conn.close()
+                if r:
+                    return jsonify({
+                        "status": "ok",
+                        "path": rel,
+                        "title": f"Memory #{r['id']} ({r['tag'] or 'General'})",
+                        "content": r["content"] or "",
+                        "tag": r["tag"] or "General",
+                        "tier": r["tier"] or "working",
+                        "agent": r["agent"] or "System",
+                        "ts": r["ts"] or "",
+                        "is_memory": True
+                    })
         full = _sb_path(rel)
         if not full or not os.path.isfile(full):
             return jsonify({"error": "note not found"}), 404
@@ -2801,6 +2871,28 @@ def api_brain_note():
     rel = (data.get("path") or "").strip().lstrip("/\\")
     if request.method == "DELETE":
         rel = (request.args.get("path") or rel or "").strip().lstrip("/\\")
+    
+    # Handle memory modifications
+    if rel.startswith("mem://") or rel.startswith("Memory/"):
+        mid_str = rel.split("#")[-1].replace(".md", "").strip() if "#" in rel else rel.replace("mem://", "").replace(".md", "").strip()
+        if mid_str.isdigit():
+            mid = int(mid_str)
+            if request.method == "PUT":
+                content = data.get("content") or ""
+                conn = _db()
+                conn.execute("UPDATE memory SET content=?, updated=? WHERE id=?", (content, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), mid))
+                conn.commit()
+                conn.close()
+                _audit("store", "brain.memory.update", str(mid))
+                return jsonify({"status": "ok", "path": rel, "id": mid})
+            if request.method == "DELETE":
+                conn = _db()
+                conn.execute("DELETE FROM memory WHERE id=?", (mid,))
+                conn.commit()
+                conn.close()
+                _audit("store", "brain.memory.delete", str(mid))
+                return jsonify({"status": "ok", "deleted": rel, "id": mid})
+
     if not rel.endswith(".md"):
         rel += ".md"
     full = _sb_path(rel)
