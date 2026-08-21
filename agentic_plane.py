@@ -790,10 +790,12 @@ def _call_llm_with(overrides, user_msg, system_prompt=None, agent="hermes", time
     # DeepSeek / OpenAI-compatible — skip entirely if no API key configured
     # (a doomed cloud call would burn the full timeout before the keyless fallback).
     if provider in ("deepseek", "openai", "litellm", "grok") and api_key:
-        base = api_base or "https://api.deepseek.com"
+        base = api_base or ("https://api.deepseek.com" if provider == "deepseek" else "https://api.openai.com/v1")
         url = base.rstrip("/")
         if not url.endswith("/chat/completions"):
             url = url + ("/v1/chat/completions" if "/v1" not in url else "/chat/completions")
+        if provider == "deepseek" and ("v4" in str(model).lower() or not model):
+            model = "deepseek-chat"
         try:
             hdrs = {"Authorization": f"Bearer {api_key}"}
             data, status = _http(url, method="POST", headers=hdrs, json_data={
@@ -808,6 +810,19 @@ def _call_llm_with(overrides, user_msg, system_prompt=None, agent="hermes", time
                     _record_llm_usage(provider, model, data.get("usage") or {}, agent=agent,
                                       tag="llm:" + str(agent))
                     return choices[0].get("message", {}).get("content", "").strip()
+            err_msg = ""
+            if isinstance(data, dict) and data.get("error"):
+                err_info = data["error"]
+                err_msg = err_info.get("message") if isinstance(err_info, dict) else str(err_info)
+            if status == 402:
+                _LAST_BACKEND[0] = f"{provider}:402"
+                return f"⚠️ {provider.capitalize()}: Insufficient Balance (402) — please add credits at {base}."
+            elif status == 401:
+                _LAST_BACKEND[0] = f"{provider}:401"
+                return f"⚠️ {provider.capitalize()}: Invalid API key (401) — check your key."
+            elif status in (400, 403, 404, 429):
+                _LAST_BACKEND[0] = f"{provider}:{status}"
+                return f"⚠️ {provider.capitalize()} error ({status}): {err_msg or 'Request rejected'}"
             last_err = f"{provider} HTTP {status}: {str(data)[:200]}"
         except Exception as e:
             last_err = f"{provider} call failed: {e}"
@@ -829,6 +844,13 @@ def _call_llm_with(overrides, user_msg, system_prompt=None, agent="hermes", time
                     _record_llm_usage(provider, model, data.get("usage") or {}, agent=agent,
                                       tag="llm:" + str(agent))
                     return content[0].get("text", "").strip()
+            err_msg = ""
+            if isinstance(data, dict) and data.get("error"):
+                err_info = data["error"]
+                err_msg = err_info.get("message") if isinstance(err_info, dict) else str(err_info)
+            if status in (400, 401, 402, 403, 404, 429):
+                _LAST_BACKEND[0] = f"anthropic:{status}"
+                return f"⚠️ Anthropic error ({status}): {err_msg or 'Request rejected'}"
             last_err = f"anthropic HTTP {status}: {str(data)[:200]}"
         except Exception as e:
             last_err = f"anthropic call failed: {e}"
