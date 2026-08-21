@@ -4361,6 +4361,144 @@ def api_stop(app_id):
     finally:
         op_lock.release()
 
+# ── OPS KIT (appvault_ops.sh) — backup / restore / safe update ──
+# Thin API wrapper around the host-side ops kit (see README_OPS.md). The script
+# lives on the server next to watchdog.sh (default /opt/appvault/appvault_ops.sh;
+# override with APPVAULT_OPS_SCRIPT). One job at a time; poll /api/ops/status.
+
+OPS_SCRIPT = os.getenv("APPVAULT_OPS_SCRIPT", "/opt/appvault/appvault_ops.sh")
+OPS_TIMEOUT = int(os.getenv("APPVAULT_OPS_TIMEOUT", "3600"))  # seconds per job
+
+_ops_job_lock = threading.Lock()
+_ops_jobs = {}          # job_id -> job dict (recent history, pruned)
+_ops_active_job = None  # only one ops job at a time (they share containers/volumes)
+
+
+def _ops_target_ok(target):
+    """Container names / 'all' only - no shell metacharacters."""
+    if not target or len(target) > 64 or target.startswith(("-", ".")):
+        return False
+    return all(c.isalnum() or c in "_.-" for c in target)
+
+
+def _ops_resolve_target(target):
+    """Accept an AppVault app id or a raw container name ('all' passes through)."""
+    if target == "all":
+        return "all"
+    try:
+        return _app_container_name(target) or target
+    except Exception:
+        return target
+
+
+def _ops_snapshot(job):
+    return {"job_id": job["job_id"], "cmd": job["cmd"], "target": job["target"],
+            "stage": job["stage"], "message": job["message"], "done": job["done"],
+            "error": job["error"], "log_tail": job["log_tail"][-1500:],
+            "elapsed_seconds": int(time.time() - job["start_time"])}
+
+
+def _ops_worker(job_id):
+    global _ops_active_job
+    job = _ops_jobs[job_id]
+    try:
+        if not (os.path.isfile(OPS_SCRIPT) and os.access(OPS_SCRIPT, os.X_OK)):
+            job["error"] = ("Ops kit not found at %s. Install it on the host: "
+                            "sudo cp appvault_ops.sh selfheal_watchdog.sh /opt/appvault/ && "
+                            "sudo chmod +x /opt/appvault/*.sh (or point APPVAULT_OPS_SCRIPT at it). "
+                            "See README_OPS.md." % OPS_SCRIPT)
+            return
+        job["stage"] = "working"
+        job["message"] = "%s %s: running..." % (job["cmd"], job["target"])
+        p = subprocess.run([OPS_SCRIPT, job["cmd"], job["target"]],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           text=True, timeout=OPS_TIMEOUT)
+        job["log_tail"] = (p.stdout or "")[-4000:]
+        if p.returncode == 0:
+            job["stage"] = "done"
+            job["message"] = "%s %s finished OK" % (job["cmd"], job["target"])
+        else:
+            job["error"] = "%s %s failed (exit %d)" % (job["cmd"], job["target"], p.returncode)
+    except subprocess.TimeoutExpired:
+        job["error"] = "%s %s timed out after %ds" % (job["cmd"], job["target"], OPS_TIMEOUT)
+    except Exception as e:
+        job["error"] = str(e)[:300]
+    finally:
+        job["done"] = True
+        with _ops_job_lock:
+            if _ops_active_job == job_id:
+                _ops_active_job = None
+
+
+def _start_ops_job(cmd, target):
+    global _ops_active_job
+    target = _ops_resolve_target((target or "").strip())
+    if not _ops_target_ok(target):
+        return jsonify({"status": "error",
+                        "message": "Invalid target: use 'all' or a container/app name"}), 400
+    with _ops_job_lock:
+        if _ops_active_job:
+            active = _ops_jobs.get(_ops_active_job) or {}
+            return jsonify({"status": "busy",
+                            "message": "An ops job is already running (%s %s)" % (active.get("cmd"), active.get("target"))}), 409
+        job_id = uuid.uuid4().hex[:12]
+        _ops_jobs[job_id] = {"job_id": job_id, "cmd": cmd, "target": target,
+                             "stage": "queued", "message": "Queued...", "done": False,
+                             "error": "", "log_tail": "", "start_time": time.time()}
+        _ops_active_job = job_id
+        done_ids = [j for j, v in _ops_jobs.items() if v["done"]]
+        for j in done_ids[:-19]:
+            _ops_jobs.pop(j, None)
+    threading.Thread(target=_ops_worker, args=(job_id,), daemon=True).start()
+    print("[agent] ops job %s: %s %s" % (job_id, cmd, target), flush=True)
+    return jsonify({"status": "started", "job_id": job_id,
+                    "message": "%s %s started" % (cmd, target)})
+
+
+@app.route("/api/ops/backup", methods=["POST"])
+def api_ops_backup():
+    """Back up app data volumes + launch settings now (all managed apps or one)."""
+    body = request.get_json(silent=True) or {}
+    return _start_ops_job("backup", body.get("target") or "all")
+
+
+@app.route("/api/ops/update", methods=["POST"])
+def api_ops_update():
+    """Safe-update apps via the ops kit (auto-rollback / backup-restore on failure)."""
+    body = request.get_json(silent=True) or {}
+    return _start_ops_job("update", body.get("target") or "all")
+
+
+@app.route("/api/ops/restore", methods=["POST"])
+def api_ops_restore():
+    """Restore one app from its latest backup (container/app name required)."""
+    body = request.get_json(silent=True) or {}
+    target = (body.get("target") or "").strip()
+    if not target or target == "all":
+        return jsonify({"status": "error",
+                        "message": "Restore requires a specific app/container name"}), 400
+    return _start_ops_job("restore", target)
+
+
+@app.route("/api/ops/status", methods=["GET"])
+@app.route("/api/ops/status/<job_id>", methods=["GET"])
+def api_ops_status(job_id=None):
+    """Poll the active (or a specific) ops job."""
+    with _ops_job_lock:
+        if job_id:
+            job = _ops_jobs.get(job_id)
+            if not job:
+                return jsonify({"error": "Unknown job"}), 404
+            return jsonify(_ops_snapshot(job))
+        if _ops_active_job:
+            return jsonify(_ops_snapshot(_ops_jobs[_ops_active_job]))
+        done_ids = [j for j, v in _ops_jobs.items() if v["done"]]
+        if done_ids:
+            return jsonify(_ops_snapshot(_ops_jobs[done_ids[-1]]))
+    return jsonify({"job_id": None, "cmd": None, "target": None, "stage": "idle",
+                    "message": "No ops job has run yet", "done": True, "error": "",
+                    "log_tail": "", "elapsed_seconds": 0})
+
 @app.route("/api/exec/<app_id>", methods=["POST"])
 def api_exec(app_id):
     """Run a command inside the container targeting a specific app (e.g. npx omniroute reset-password).
