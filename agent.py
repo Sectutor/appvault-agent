@@ -4126,6 +4126,106 @@ def _get_placeholder_icon_svg(app_name, app_id):
   <text x="50" y="68" text-anchor="middle" font-size="50" font-weight="700" font-family="sans-serif" fill="white">{letter}</text>
 </svg>'''.encode()
 
+
+# ── APP INFO — live GitHub data for the store's Info button ─────────────
+_APPINFO_CACHE = {}   # app_id -> (timestamp, data)
+APPINFO_TTL = 3600    # 1 hour
+
+def _github_get(path):
+    """GET a GitHub API path with timeout; returns dict or None."""
+    import urllib.request as _ur
+    req = _ur.Request(f"https://api.github.com{path}",
+                      headers={"Accept": "application/vnd.github+json",
+                               "User-Agent": "AppVault-Agent"})
+    try:
+        with _ur.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode())
+    except Exception:
+        return None
+
+@app.route("/api/appinfo/<app_id>")
+def api_appinfo(app_id):
+    """Detailed GitHub info for an app: repo stats, latest release, README excerpt.
+
+    Cached 1h per app. Falls back to catalog metadata when offline/no repo."""
+    now = time.time()
+    cached = _APPINFO_CACHE.get(app_id)
+    if cached and (now - cached[0]) < APPINFO_TTL:
+        return jsonify(cached[1])
+
+    app_def = None
+    for a in catalog_cache.get("apps", []):
+        if a["id"] == app_id:
+            app_def = a
+            break
+    if not app_def:
+        return jsonify({"error": "App not found in catalog"}), 404
+
+    info = {
+        "id": app_id,
+        "name": app_def.get("name", app_id),
+        "emoji": app_def.get("emoji", ""),
+        "tagline": app_def.get("tagline", ""),
+        "description": app_def.get("long_description") or app_def.get("description", ""),
+        "author": app_def.get("author", ""),
+        "version": app_def.get("version", ""),
+        "website": app_def.get("website", ""),
+        "docs_url": app_def.get("docs_url", ""),
+        "repository_url": app_def.get("repository_url", ""),
+        "category": app_def.get("category", ""),
+        "tags": app_def.get("tags", []),
+        "min_mem_mb": app_def.get("min_mem_mb", 0),
+        "screenshots": app_def.get("screenshots", []),
+        "github": None,
+    }
+
+    repo_url = app_def.get("repository_url", "")
+    import re as _re_info
+    mrepo = _re_info.match(r"https://github\.com/([^/]+/[^/#?]+)", repo_url or "")
+    if mrepo:
+        slug = mrepo.group(1).rstrip("/")
+        repo = _github_get(f"/repos/{slug}")
+        if repo:
+            gh = {
+                "full_name": repo.get("full_name"),
+                "stars": repo.get("stargazers_count", 0),
+                "forks": repo.get("forks_count", 0),
+                "open_issues": repo.get("open_issues_count", 0),
+                "language": repo.get("language"),
+                "license": (repo.get("license") or {}).get("spdx_id"),
+                "topics": repo.get("topics", []),
+                "pushed_at": (repo.get("pushed_at") or "")[:10],
+                "created_at": (repo.get("created_at") or "")[:10],
+                "html_url": repo.get("html_url"),
+                "homepage": repo.get("homepage"),
+            }
+            # latest release
+            rel = _github_get(f"/repos/{slug}/releases/latest")
+            if rel and rel.get("name") is not None:
+                gh["latest_release"] = {
+                    "tag": rel.get("tag_name") or rel.get("name"),
+                    "published": (rel.get("published_at") or "")[:10],
+                    "notes": (rel.get("body") or "")[:600],
+                }
+            # README first paragraphs (rendered=false gives raw markdown)
+            readme = _github_get(f"/repos/{slug}/readme")
+            if readme and readme.get("content"):
+                import base64 as _b64
+                txt = _b64.b64decode(readme["content"]).decode("utf-8", errors="ignore")
+                # strip markdown noise: images, badges, html
+                txt = _re_info.sub(r"<[^>]+>", " ", txt)
+                txt = _re_info.sub(r"!\[[^\]]*\]\([^)]*\)", " ", txt)
+                txt = _re_info.sub(r"\[[^\]]*\]\([^)]*\)", "", txt)
+                txt = _re_info.sub(r"[\r\n\t ]+", " ", txt)
+                # cut at first heading that looks like docs nav
+                parts = _re_info.split(r"\n#+ ", txt)[0]
+                gh["readme_excerpt"] = parts.strip()[:900]
+            info["github"] = gh
+
+    _APPINFO_CACHE[app_id] = (now, info)
+    return jsonify(info)
+
+
 @app.route("/api/icon/<app_id>")
 def api_app_icon(app_id):
     """Serve an app's icon (favicon), with fallback to generated SVG."""
