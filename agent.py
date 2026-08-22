@@ -2881,6 +2881,13 @@ def _do_uninstall(app_id):
             pass
 
     _sync_caddy_apps()  # Remove HTTPS reverse-proxy path for this app
+
+    # Invalidate the bulk status cache so My Apps / catalog immediately show
+    # this app as "available" instead of stale "installed" for up to 60s.
+    global _BULK_CACHE_TS
+    _BULK_CACHE_TS = 0
+    _PORT_CACHE.clear()
+
     print(f"[agent] {app_id}: fully uninstalled — container, image, volumes and data removed")
 
 
